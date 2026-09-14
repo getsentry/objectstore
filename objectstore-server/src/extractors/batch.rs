@@ -2,9 +2,13 @@
 //!
 //! Provides [`BatchOperationStream`], which parses a multipart request body into a
 //! lazy stream of [`Operation`]s.
+//!
+//! All insert metadata uses the shared request timestamp, even for fields parsed
+//! later while streaming the body.
 
 use std::fmt::Debug;
 
+use axum::RequestExt;
 use axum::extract::{
     FromRequest, Multipart, Request,
     multipart::{Field, MultipartError, MultipartRejection},
@@ -14,9 +18,11 @@ use futures::{StreamExt, stream::BoxStream};
 use objectstore_service::streaming::{Delete, Get, Head, Insert, Operation};
 use objectstore_types::headers;
 use objectstore_types::metadata::Metadata;
+use objectstore_types::time::Timestamp;
 use thiserror::Error;
 
 use crate::batch::{HEADER_BATCH_OPERATION_KEY, HEADER_BATCH_OPERATION_KIND};
+use crate::extractors::request_time::RequestTime;
 
 /// Errors that can occur when processing or executing batch operations.
 #[derive(Debug, Error)]
@@ -52,7 +58,10 @@ pub enum BatchError {
     },
 }
 
-async fn try_operation_from_field(mut field: Field<'_>) -> Result<Operation, BatchError> {
+async fn try_operation_from_field(
+    mut field: Field<'_>,
+    access_time: Timestamp,
+) -> Result<Operation, BatchError> {
     let kind = field
         .headers()
         .get(HEADER_BATCH_OPERATION_KIND)
@@ -103,7 +112,7 @@ async fn try_operation_from_field(mut field: Field<'_>) -> Result<Operation, Bat
             })?,
         }),
         "insert" => {
-            let metadata = Metadata::from_insert_headers(field.headers(), "")?;
+            let metadata = Metadata::from_insert_headers(field.headers(), "", access_time)?;
             let mut payload = BytesMut::new();
             while let Some(chunk) = field.chunk().await? {
                 if payload.len() + chunk.len() > MAX_FIELD_SIZE {
@@ -146,7 +155,8 @@ where
 {
     type Rejection = MultipartRejection;
 
-    async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
+    async fn from_request(mut request: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let Ok(RequestTime(access_time)) = request.extract_parts::<RequestTime>().await;
         let mut multipart = Multipart::from_request(request, state).await?;
 
         let requests = async_stream::stream! {
@@ -167,7 +177,7 @@ where
                     continue;
                 }
                 count += 1;
-                yield try_operation_from_field(field).await;
+                yield try_operation_from_field(field, access_time).await;
             }
         }
         .boxed();
@@ -227,7 +237,9 @@ mod tests {
             insert2 = String::from_utf8_lossy(insert2_data),
         );
 
+        let access_time = Timestamp::UNIX_EPOCH;
         let request = Request::builder()
+            .extension(RequestTime(access_time))
             .header(CONTENT_TYPE, "multipart/form-data; boundary=boundary")
             .body(Body::from(body))
             .unwrap();
@@ -250,6 +262,7 @@ mod tests {
         assert_eq!(insert_op1.key.as_deref(), Some("test1"));
         assert_eq!(insert_op1.metadata.content_type, "application/octet-stream");
         assert_eq!(insert_op1.metadata.origin, None);
+        assert_eq!(insert_op1.metadata.time_created, Some(access_time));
         assert_eq!(insert_op1.payload.as_ref(), insert1_data);
 
         let Operation::Insert(insert_op2) = &operations[2].as_ref().unwrap() else {
@@ -258,6 +271,11 @@ mod tests {
         assert_eq!(insert_op2.key.as_deref(), Some("test2"));
         assert_eq!(insert_op2.metadata.content_type, "text/plain");
         assert_eq!(insert_op2.metadata.expiration_policy, expiration);
+        assert_eq!(insert_op2.metadata.time_created, Some(access_time));
+        assert_eq!(
+            insert_op2.metadata.time_expires,
+            Some(access_time + Duration::from_hours(1))
+        );
         assert_eq!(insert_op2.metadata.origin.as_deref(), Some("203.0.113.42"));
         assert_eq!(insert_op2.payload.as_ref(), insert2_data);
 

@@ -12,12 +12,19 @@ use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::endpoints;
 use crate::extractors::downstream_service::DownstreamService;
+use crate::extractors::request_time::RequestTime;
 use crate::web::RequestCounter;
 use crate::web::metrics_body::{EmitMetricsGuard, MetricsBody};
 use crate::web::sentry_body::SentryBody;
 
 /// The value for the `Server` HTTP header.
 const SERVER: &str = concat!("objectstore/", env!("CARGO_PKG_VERSION"));
+
+/// Captures the timestamp shared by object operations throughout this request.
+pub async fn capture_request_time(mut request: Request, next: Next) -> Response {
+    let Ok(_) = request.extract_parts::<RequestTime>().await;
+    next.run(request).await
+}
 
 /// Rejects requests with HTTP 503 when the in-flight request count reaches the configured
 /// maximum.

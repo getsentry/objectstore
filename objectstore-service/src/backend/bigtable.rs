@@ -299,7 +299,7 @@ fn live_row_filter(inner: v2::RowFilter, now: Timestamp) -> v2::RowFilter {
 ///
 /// After legacy tombstones expire naturally this simplifies to just
 /// `column_filter(COLUMN_REDIRECT)`.
-fn tombstone_filter() -> v2::RowFilter {
+fn tombstone_filter(access_time: Timestamp) -> v2::RowFilter {
     let filter = v2::RowFilter {
         filter: Some(v2::row_filter::Filter::Interleave(
             v2::row_filter::Interleave {
@@ -307,7 +307,7 @@ fn tombstone_filter() -> v2::RowFilter {
             },
         )),
     };
-    live_row_filter(filter, Timestamp::now())
+    live_row_filter(filter, access_time)
 }
 
 /// Returns a [`MutatePredicate`] that matches any live tombstone row.
@@ -319,8 +319,8 @@ fn tombstone_filter() -> v2::RowFilter {
 ///
 /// This predicate cannot distinguish an empty row from a row holding a regular object; a caller
 /// that needs to know whether its mutation hit anything wants [`non_tombstone_predicate`].
-fn tombstone_predicate() -> MutatePredicate {
-    MutatePredicate::Exclude(tombstone_filter())
+fn tombstone_predicate(access_time: Timestamp) -> MutatePredicate {
+    MutatePredicate::Exclude(tombstone_filter(access_time))
 }
 
 /// Returns a [`MutatePredicate`] that is the logical negation of [`tombstone_predicate`];
@@ -335,11 +335,11 @@ fn tombstone_predicate() -> MutatePredicate {
 /// - Predicate: [`tombstone_filter`] -> is a live tombstone present?
 /// - True branch: `BlockAllFilter` -> match nothing; live tombstones should be preserved
 /// - False branch: `PassAllFilter` -> match everything: expired tombstones and non-tombstones
-fn non_tombstone_predicate() -> MutatePredicate {
+fn non_tombstone_predicate(access_time: Timestamp) -> MutatePredicate {
     MutatePredicate::Include(v2::RowFilter {
         filter: Some(v2::row_filter::Filter::Condition(Box::new(
             v2::row_filter::Condition {
-                predicate_filter: Some(Box::new(tombstone_filter())),
+                predicate_filter: Some(Box::new(tombstone_filter(access_time))),
                 true_filter: Some(Box::new(v2::RowFilter {
                     filter: Some(v2::row_filter::Filter::BlockAllFilter(true)),
                 })),
@@ -376,7 +376,11 @@ fn exact_value_regex(value: &str) -> Vec<u8> {
 ///   column stored the path)
 /// - Chain: `m` column present AND value matches `{"is_redirect_tombstone":true...}` regex
 ///   (legacy metadata format predating the dedicated `r` column)
-fn redirect_target_filter(target: &ObjectId, own_id: &ObjectId) -> v2::RowFilter {
+fn redirect_target_filter(
+    target: &ObjectId,
+    own_id: &ObjectId,
+    access_time: Timestamp,
+) -> v2::RowFilter {
     let target_path = exact_value_regex(&target.as_storage_path().to_string());
 
     let exact_match = v2::RowFilter {
@@ -391,7 +395,7 @@ fn redirect_target_filter(target: &ObjectId, own_id: &ObjectId) -> v2::RowFilter
     };
 
     if target != own_id {
-        return live_row_filter(exact_match, Timestamp::now());
+        return live_row_filter(exact_match, access_time);
     }
 
     let empty_redirect_match = v2::RowFilter {
@@ -415,7 +419,7 @@ fn redirect_target_filter(target: &ObjectId, own_id: &ObjectId) -> v2::RowFilter
             },
         )),
     };
-    live_row_filter(filter, Timestamp::now())
+    live_row_filter(filter, access_time)
 }
 
 /// Returns a [`MutatePredicate`] that matches tombstones whose redirect resolves to either `old` or `new`.
@@ -424,13 +428,18 @@ fn redirect_target_filter(target: &ObjectId, own_id: &ObjectId) -> v2::RowFilter
 /// equivalent to `t == old || t == new`. Built as an Interleave of two
 /// [`redirect_target_filter`] calls — yields cells iff at least one branch matches.
 /// An absent row or non-tombstone row yields 0 cells, so `predicate_matched = false` (conflict).
-fn update_predicate(old: &ObjectId, new: &ObjectId, own_id: &ObjectId) -> MutatePredicate {
+fn update_predicate(
+    old: &ObjectId,
+    new: &ObjectId,
+    own_id: &ObjectId,
+    access_time: Timestamp,
+) -> MutatePredicate {
     MutatePredicate::Include(v2::RowFilter {
         filter: Some(v2::row_filter::Filter::Interleave(
             v2::row_filter::Interleave {
                 filters: vec![
-                    redirect_target_filter(old, own_id),
-                    redirect_target_filter(new, own_id),
+                    redirect_target_filter(old, own_id, access_time),
+                    redirect_target_filter(new, own_id, access_time),
                 ],
             },
         )),
@@ -448,15 +457,23 @@ fn update_predicate(old: &ObjectId, new: &ObjectId, own_id: &ObjectId) -> Mutate
 /// - False branch: [`tombstone_filter`] → 0 cells when no tombstone exists.
 ///
 /// Both safe states yield 0 cells, so `predicate_matched = false` in both cases.
-fn optional_target_predicate(target: &ObjectId, own_id: &ObjectId) -> MutatePredicate {
+fn optional_target_predicate(
+    target: &ObjectId,
+    own_id: &ObjectId,
+    access_time: Timestamp,
+) -> MutatePredicate {
     MutatePredicate::Exclude(v2::RowFilter {
         filter: Some(v2::row_filter::Filter::Condition(Box::new(
             v2::row_filter::Condition {
-                predicate_filter: Some(Box::new(redirect_target_filter(target, own_id))),
+                predicate_filter: Some(Box::new(redirect_target_filter(
+                    target,
+                    own_id,
+                    access_time,
+                ))),
                 true_filter: Some(Box::new(v2::RowFilter {
                     filter: Some(v2::row_filter::Filter::BlockAllFilter(true)),
                 })),
-                false_filter: Some(Box::new(tombstone_filter())),
+                false_filter: Some(Box::new(tombstone_filter(access_time))),
             },
         ))),
     })
@@ -491,7 +508,10 @@ fn exact_expiry_filter(start: i64) -> Result<v2::RowFilter> {
 }
 
 /// Matches an inline row whose metadata cell has the observed expiry timestamp.
-fn inline_expiry_predicate(observed_expiry: i64) -> Result<MutatePredicate> {
+fn inline_expiry_predicate(
+    observed_expiry: i64,
+    access_time: Timestamp,
+) -> Result<MutatePredicate> {
     let inline_at_expiry = v2::RowFilter {
         filter: Some(v2::row_filter::Filter::Chain(v2::row_filter::Chain {
             filters: vec![
@@ -504,7 +524,7 @@ fn inline_expiry_predicate(observed_expiry: i64) -> Result<MutatePredicate> {
     Ok(MutatePredicate::Include(v2::RowFilter {
         filter: Some(v2::row_filter::Filter::Condition(Box::new(
             v2::row_filter::Condition {
-                predicate_filter: Some(Box::new(tombstone_filter())),
+                predicate_filter: Some(Box::new(tombstone_filter(access_time))),
                 true_filter: Some(Box::new(v2::RowFilter {
                     filter: Some(v2::row_filter::Filter::BlockAllFilter(true)),
                 })),
@@ -518,11 +538,12 @@ fn redirect_expiry_predicate(
     target: &ObjectId,
     own_id: &ObjectId,
     observed_expiry: i64,
+    access_time: Timestamp,
 ) -> Result<MutatePredicate> {
     Ok(MutatePredicate::Include(v2::RowFilter {
         filter: Some(v2::row_filter::Filter::Chain(v2::row_filter::Chain {
             filters: vec![
-                redirect_target_filter(target, own_id),
+                redirect_target_filter(target, own_id, access_time),
                 exact_expiry_filter(observed_expiry)?,
             ],
         })),
@@ -849,8 +870,9 @@ impl BigTableBackend {
     async fn read_row(
         &self,
         path: &[u8],
-        filter: Option<v2::RowFilter>,
         action: &'static str,
+        access_time: Timestamp,
+        filter: Option<v2::RowFilter>,
     ) -> Result<Option<RowData>> {
         let request = v2::ReadRowsRequest {
             table_name: self.table_path.clone(),
@@ -875,7 +897,7 @@ impl BigTableBackend {
         };
 
         let row = RowData::from_cells(cells)?;
-        Ok(if row.expires_before(Timestamp::now()) {
+        Ok(if row.expires_before(access_time) {
             None
         } else {
             Some(row)
@@ -963,6 +985,7 @@ impl Backend for BigTableBackend {
         id: &ObjectId,
         metadata: &Metadata,
         mut stream: ClientStream,
+        _access_time: Timestamp,
     ) -> Result<PutResponse> {
         objectstore_log::debug!("Writing to Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();
@@ -981,8 +1004,13 @@ impl Backend for BigTableBackend {
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
-    async fn get_object(&self, id: &ObjectId, range: Option<ByteRange>) -> Result<GetResponse> {
-        match self.get_tiered_object(id, range).await? {
+    async fn get_object(
+        &self,
+        id: &ObjectId,
+        access_time: Timestamp,
+        range: Option<ByteRange>,
+    ) -> Result<GetResponse> {
+        match self.get_tiered_object(id, access_time, range).await? {
             TieredGet::Object(metadata, content_range, payload) => {
                 Ok(Some((metadata, content_range, payload)))
             }
@@ -992,21 +1020,34 @@ impl Backend for BigTableBackend {
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
-    async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
-        match self.get_tiered_metadata(id).await? {
+    async fn get_metadata(
+        &self,
+        id: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<MetadataResponse> {
+        match self.get_tiered_metadata(id, access_time).await? {
             TieredMetadata::Object(metadata) => Ok(Some(metadata)),
             TieredMetadata::Tombstone(_) => Err(ErrorKind::UnexpectedTombstone.into()),
             TieredMetadata::NotFound => Ok(None),
         }
     }
 
-    async fn set_expiry(&self, id: &ObjectId, expire_at: Timestamp) -> Result<bool> {
-        self.compare_and_update(id, None, TieredUpdate::SetExpiry(expire_at))
+    async fn set_expiry(
+        &self,
+        id: &ObjectId,
+        expire_at: Timestamp,
+        access_time: Timestamp,
+    ) -> Result<bool> {
+        self.compare_and_update(id, None, TieredUpdate::SetExpiry(expire_at), access_time)
             .await
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
-    async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
+    async fn delete_object(
+        &self,
+        id: &ObjectId,
+        _access_time: Timestamp,
+    ) -> Result<DeleteResponse> {
         objectstore_log::debug!("Deleting from Bigtable backend");
 
         let path = id.as_storage_path().to_string().into_bytes();
@@ -1029,6 +1070,7 @@ impl HighVolumeBackend for BigTableBackend {
         id: &ObjectId,
         metadata: &Metadata,
         payload: Bytes,
+        access_time: Timestamp,
     ) -> Result<Option<Tombstone>> {
         objectstore_log::debug!("Conditional put to Bigtable backend");
 
@@ -1039,7 +1081,7 @@ impl HighVolumeBackend for BigTableBackend {
             let write_succeeded = self
                 .check_and_mutate(
                     path.clone(),
-                    tombstone_predicate(),
+                    tombstone_predicate(access_time),
                     mutations.clone(),
                     "put_non_tombstone",
                 )
@@ -1052,7 +1094,12 @@ impl HighVolumeBackend for BigTableBackend {
 
             // A tombstone was present: read its data for the caller.
             let row = self
-                .read_row(&path, Some(metadata_filter()), "put_non_tombstone")
+                .read_row(
+                    &path,
+                    "put_non_tombstone",
+                    access_time,
+                    Some(metadata_filter()),
+                )
                 .await?;
 
             match row {
@@ -1083,12 +1130,16 @@ impl HighVolumeBackend for BigTableBackend {
     async fn get_tiered_object(
         &self,
         id: &ObjectId,
+        access_time: Timestamp,
         range: Option<ByteRange>,
     ) -> Result<TieredGet> {
         objectstore_log::debug!("Reading from Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();
 
-        let Some(row) = self.read_row(&path, None, "get_tiered_object").await? else {
+        let Some(row) = self
+            .read_row(&path, "get_tiered_object", access_time, None)
+            .await?
+        else {
             return Ok(TieredGet::NotFound);
         };
 
@@ -1118,7 +1169,11 @@ impl HighVolumeBackend for BigTableBackend {
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
-    async fn get_tiered_metadata(&self, id: &ObjectId) -> Result<TieredMetadata> {
+    async fn get_tiered_metadata(
+        &self,
+        id: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<TieredMetadata> {
         objectstore_log::debug!("Reading metadata from Bigtable backend");
         let path = id.as_storage_path().to_string().into_bytes();
 
@@ -1126,7 +1181,12 @@ impl HighVolumeBackend for BigTableBackend {
         // NB: `metadata.size` will only be populated if the size was added to the metadata before
         // writing to Bigtable.
         let row_opt = self
-            .read_row(&path, Some(metadata_filter()), "get_tiered_metadata")
+            .read_row(
+                &path,
+                "get_tiered_metadata",
+                access_time,
+                Some(metadata_filter()),
+            )
             .await?;
         let Some(row) = row_opt else {
             return Ok(TieredMetadata::NotFound);
@@ -1151,14 +1211,17 @@ impl HighVolumeBackend for BigTableBackend {
         id: &ObjectId,
         current: Option<&ObjectId>,
         update: TieredUpdate,
+        access_time: Timestamp,
     ) -> Result<bool> {
         let TieredUpdate::SetExpiry(expire_at) = update;
         let path = id.as_storage_path().to_string().into_bytes();
-        let access_time = Timestamp::now();
 
         // Inline extension needs metadata and payload from the same read so a
         // successful conditional rewrite can preserve the payload verbatim.
-        let Some(row) = self.read_row(&path, None, "set_expiry").await? else {
+        let Some(row) = self
+            .read_row(&path, "set_expiry", access_time, None)
+            .await?
+        else {
             return Ok(false);
         };
 
@@ -1184,7 +1247,7 @@ impl HighVolumeBackend for BigTableBackend {
                 // Observing a live cell here is not atomic with wall-clock
                 // expiry or Bigtable GC. The conditional write may still lose
                 // to either and then returns false.
-                let predicate = inline_expiry_predicate(expiry_micros)?;
+                let predicate = inline_expiry_predicate(expiry_micros, access_time)?;
                 let mut metadata = metadata;
                 metadata.time_expires = Some(expire_at);
                 let (mutations, _) = object_mutations(&path, metadata, payload)?;
@@ -1209,7 +1272,8 @@ impl HighVolumeBackend for BigTableBackend {
                     return Ok(true); // already satisfied
                 }
 
-                let predicate = redirect_expiry_predicate(expected, id, expiry_micros)?;
+                let predicate =
+                    redirect_expiry_predicate(expected, id, expiry_micros, access_time)?;
                 let tombstone = Tombstone {
                     target,
                     time_expires: Some(expire_at),
@@ -1230,7 +1294,11 @@ impl HighVolumeBackend for BigTableBackend {
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
-    async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<Option<Tombstone>> {
+    async fn delete_non_tombstone(
+        &self,
+        id: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<Option<Tombstone>> {
         objectstore_log::debug!("Conditional delete from Bigtable backend");
 
         let path = id.as_storage_path().to_string().into_bytes();
@@ -1239,7 +1307,7 @@ impl HighVolumeBackend for BigTableBackend {
             let deleted = self
                 .check_and_mutate(
                     path.clone(),
-                    non_tombstone_predicate(),
+                    non_tombstone_predicate(access_time),
                     [delete_row_mutation()],
                     "delete_non_tombstone",
                 )
@@ -1253,7 +1321,12 @@ impl HighVolumeBackend for BigTableBackend {
             // Nothing was deleted: either a tombstone is in the way, or the row is absent.
             // Read the row to find out which, and to hand the tombstone to the caller.
             let row = self
-                .read_row(&path, Some(metadata_filter()), "delete_non_tombstone")
+                .read_row(
+                    &path,
+                    "delete_non_tombstone",
+                    access_time,
+                    Some(metadata_filter()),
+                )
                 .await?;
 
             match row {
@@ -1286,15 +1359,16 @@ impl HighVolumeBackend for BigTableBackend {
         id: &ObjectId,
         current: Option<&ObjectId>,
         write: TieredWrite,
+        access_time: Timestamp,
     ) -> Result<bool> {
         objectstore_log::debug!("CAS put to Bigtable backend");
 
         let path = id.as_storage_path().to_string().into_bytes();
         let predicate = match (current, write.target()) {
-            (Some(old), Some(new)) => update_predicate(old, new, id),
-            (Some(target), None) => optional_target_predicate(target, id),
-            (None, Some(target)) => optional_target_predicate(target, id),
-            (None, None) => tombstone_predicate(),
+            (Some(old), Some(new)) => update_predicate(old, new, id, access_time),
+            (Some(target), None) => optional_target_predicate(target, id, access_time),
+            (None, Some(target)) => optional_target_predicate(target, id, access_time),
+            (None, None) => tombstone_predicate(access_time),
         };
 
         // Get the correct set of mutations to apply as well as the new expiration date.
@@ -1598,16 +1672,24 @@ mod tests {
         };
 
         backend
-            .put_object(&id, &metadata, stream::single("hello, world"))
+            .put_object(
+                &id,
+                &metadata,
+                stream::single("hello, world"),
+                Timestamp::now(),
+            )
             .await?;
 
-        let (obj_meta, _, stream) = backend.get_object(&id, None).await?.unwrap();
+        let (obj_meta, _, stream) = backend
+            .get_object(&id, Timestamp::now(), None)
+            .await?
+            .unwrap();
         let payload = stream::read_to_vec(stream).await?;
         assert_eq!(payload, b"hello, world");
         assert_eq!(obj_meta.content_type, metadata.content_type);
         assert_eq!(obj_meta.custom, metadata.custom);
 
-        let head_meta = backend.get_metadata(&id).await?.unwrap();
+        let head_meta = backend.get_metadata(&id, Timestamp::now()).await?.unwrap();
         assert_eq!(head_meta.content_type, metadata.content_type);
         assert_eq!(head_meta.custom, metadata.custom);
 
@@ -1629,7 +1711,7 @@ mod tests {
         };
         create_object(&backend, &id, &metadata, b"data", Timestamp::now()).await?;
 
-        let meta = backend.get_metadata(&id).await?.unwrap();
+        let meta = backend.get_metadata(&id, Timestamp::now()).await?.unwrap();
         assert_eq!(meta.time_expires, Some(expires));
 
         Ok(())
@@ -1641,9 +1723,14 @@ mod tests {
         let backend = create_test_backend().await?;
 
         let id = make_id();
-        assert!(backend.get_object(&id, None).await?.is_none());
-        assert!(backend.get_metadata(&id).await?.is_none());
-        backend.delete_object(&id).await?;
+        assert!(
+            backend
+                .get_object(&id, Timestamp::now(), None)
+                .await?
+                .is_none()
+        );
+        assert!(backend.get_metadata(&id, Timestamp::now()).await?.is_none());
+        backend.delete_object(&id, Timestamp::now()).await?;
 
         Ok(())
     }
@@ -1664,10 +1751,18 @@ mod tests {
             ..Default::default()
         };
         backend
-            .put_object(&id, &second_metadata, stream::single("world"))
+            .put_object(
+                &id,
+                &second_metadata,
+                stream::single("world"),
+                Timestamp::now(),
+            )
             .await?;
 
-        let (meta, _, stream) = backend.get_object(&id, None).await?.unwrap();
+        let (meta, _, stream) = backend
+            .get_object(&id, Timestamp::now(), None)
+            .await?
+            .unwrap();
         let payload = stream::read_to_vec(stream).await?;
         assert_eq!(payload, b"world");
         assert_eq!(meta.custom, second_metadata.custom);
@@ -1682,9 +1777,14 @@ mod tests {
         let id = make_id();
         let metadata = Metadata::default();
         create_object(&backend, &id, &metadata, b"hello", Timestamp::now()).await?;
-        backend.delete_object(&id).await?;
+        backend.delete_object(&id, Timestamp::now()).await?;
 
-        assert!(backend.get_object(&id, None).await?.is_none());
+        assert!(
+            backend
+                .get_object(&id, Timestamp::now(), None)
+                .await?
+                .is_none()
+        );
 
         Ok(())
     }
@@ -1715,21 +1815,35 @@ mod tests {
         });
         backend.mutate(path, mutations, "test-setup").await?;
 
-        let (observed, _, _) = backend.get_object(&id, None).await?.unwrap();
+        let (observed, _, _) = backend
+            .get_object(&id, Timestamp::now(), None)
+            .await?
+            .unwrap();
         let observed_expiry = observed.time_expires.unwrap();
         assert_eq!(
-            backend.get_metadata(&id).await?.unwrap().time_expires,
+            backend
+                .get_metadata(&id, Timestamp::now())
+                .await?
+                .unwrap()
+                .time_expires,
             Some(observed_expiry),
             "backend reads must not renew TTI"
         );
 
         let requested = Timestamp::now() + tti;
-        assert!(backend.set_expiry(&id, requested).await?);
+        assert!(backend.set_expiry(&id, requested, Timestamp::now()).await?);
         assert_eq!(
-            backend.get_metadata(&id).await?.unwrap().time_expires,
+            backend
+                .get_metadata(&id, Timestamp::now())
+                .await?
+                .unwrap()
+                .time_expires,
             Some(requested)
         );
-        let (_, _, stream) = backend.get_object(&id, None).await?.unwrap();
+        let (_, _, stream) = backend
+            .get_object(&id, Timestamp::now(), None)
+            .await?
+            .unwrap();
         let payload = stream::read_to_vec(stream).await?;
         assert_eq!(payload, b"hello, world");
 
@@ -1742,7 +1856,11 @@ mod tests {
         let missing = make_id();
         assert!(
             !backend
-                .set_expiry(&missing, Timestamp::now() + Duration::from_hours(2))
+                .set_expiry(
+                    &missing,
+                    Timestamp::now() + Duration::from_hours(2),
+                    Timestamp::now()
+                )
                 .await?
         );
 
@@ -1759,7 +1877,8 @@ mod tests {
         let mut extended = original.clone();
         extended.time_expires = Some(observed_expiry + Duration::from_hours(1));
         let (extension, _) = object_mutations(&path, extended, b"original".to_vec())?;
-        let predicate = inline_expiry_predicate(observed_expiry.as_micros() as i64)?;
+        let predicate =
+            inline_expiry_predicate(observed_expiry.as_micros() as i64, Timestamp::now())?;
 
         let mut replacement = original.clone();
         replacement.time_expires = Some(observed_expiry + Duration::from_mins(1));
@@ -1776,7 +1895,10 @@ mod tests {
                 .check_and_mutate(path, predicate, extension, "test-expiry-conflict")
                 .await?
         );
-        let (_, _, payload) = backend.get_object(&id, None).await?.unwrap();
+        let (_, _, payload) = backend
+            .get_object(&id, Timestamp::now(), None)
+            .await?
+            .unwrap();
         assert_eq!(stream::read_to_vec(payload).await?, b"replacement");
         Ok(())
     }
@@ -1804,12 +1926,22 @@ mod tests {
         let later = old_expiry + Duration::from_hours(2);
         assert!(
             !backend
-                .compare_and_update(&id, Some(&wrong_target), TieredUpdate::SetExpiry(later),)
+                .compare_and_update(
+                    &id,
+                    Some(&wrong_target),
+                    TieredUpdate::SetExpiry(later),
+                    Timestamp::now(),
+                )
                 .await?
         );
         assert!(
             backend
-                .compare_and_update(&id, Some(&target), TieredUpdate::SetExpiry(later))
+                .compare_and_update(
+                    &id,
+                    Some(&target),
+                    TieredUpdate::SetExpiry(later),
+                    Timestamp::now()
+                )
                 .await?
         );
         assert!(
@@ -1818,10 +1950,13 @@ mod tests {
                     &id,
                     Some(&target),
                     TieredUpdate::SetExpiry(old_expiry + Duration::from_mins(30)),
+                    Timestamp::now(),
                 )
                 .await?
         );
-        let TieredMetadata::Tombstone(tombstone) = backend.get_tiered_metadata(&id).await? else {
+        let TieredMetadata::Tombstone(tombstone) =
+            backend.get_tiered_metadata(&id, Timestamp::now()).await?
+        else {
             panic!("expected tombstone");
         };
         assert_eq!(tombstone.time_expires, Some(later));
@@ -1845,7 +1980,12 @@ mod tests {
         };
         create_object(&backend, &id, &metadata, b"hello, world", Timestamp::now()).await?;
 
-        assert!(backend.get_object(&id, None).await?.is_none());
+        assert!(
+            backend
+                .get_object(&id, Timestamp::now(), None)
+                .await?
+                .is_none()
+        );
 
         Ok(())
     }
@@ -1865,7 +2005,12 @@ mod tests {
         };
         create_object(&backend, &id, &metadata, b"hello, world", Timestamp::now()).await?;
 
-        assert!(backend.get_object(&id, None).await?.is_none());
+        assert!(
+            backend
+                .get_object(&id, Timestamp::now(), None)
+                .await?
+                .is_none()
+        );
 
         Ok(())
     }
@@ -1885,11 +2030,13 @@ mod tests {
         // empty
         let id = make_id();
         assert!(matches!(
-            backend.get_tiered_object(&id, None).await?,
+            backend
+                .get_tiered_object(&id, Timestamp::now(), None)
+                .await?,
             TieredGet::NotFound
         ));
         assert!(matches!(
-            backend.get_tiered_metadata(&id).await?,
+            backend.get_tiered_metadata(&id, Timestamp::now()).await?,
             TieredMetadata::NotFound
         ));
 
@@ -1902,8 +2049,9 @@ mod tests {
         };
         create_object(&backend, &id, &put_meta, b"payload", Timestamp::now()).await?;
 
-        let TieredGet::Object(obj_meta, _, obj_stream) =
-            backend.get_tiered_object(&id, None).await?
+        let TieredGet::Object(obj_meta, _, obj_stream) = backend
+            .get_tiered_object(&id, Timestamp::now(), None)
+            .await?
         else {
             panic!("expected TieredGet::Object");
         };
@@ -1912,7 +2060,9 @@ mod tests {
         assert_eq!(obj_meta.content_type, put_meta.content_type);
         assert_eq!(obj_meta.custom, put_meta.custom);
 
-        let TieredMetadata::Object(head_meta) = backend.get_tiered_metadata(&id).await? else {
+        let TieredMetadata::Object(head_meta) =
+            backend.get_tiered_metadata(&id, Timestamp::now()).await?
+        else {
             panic!("expected TieredMetadata::Object");
         };
         assert_eq!(head_meta.content_type, put_meta.content_type);
@@ -1927,11 +2077,17 @@ mod tests {
         };
         create_tombstone(&backend, &hv_id, &tombstone).await?;
 
-        match backend.get_tiered_object(&hv_id, None).await? {
+        match backend
+            .get_tiered_object(&hv_id, Timestamp::now(), None)
+            .await?
+        {
             TieredGet::Tombstone(get_t) => assert_eq!(get_t.target, lt_id),
             other => panic!("expected TieredGet::Tombstone, got {other:?}"),
         }
-        match backend.get_tiered_metadata(&hv_id).await? {
+        match backend
+            .get_tiered_metadata(&hv_id, Timestamp::now())
+            .await?
+        {
             TieredMetadata::Tombstone(meta_t) => assert_eq!(meta_t.target, lt_id,),
             other => panic!("expected TieredMetadata::Tombstone, got {other:?}"),
         }
@@ -1952,20 +2108,31 @@ mod tests {
         let id = make_id();
         let metadata = Metadata::default();
         let result = backend
-            .put_non_tombstone(&id, &metadata, Bytes::from_static(b"first"))
+            .put_non_tombstone(
+                &id,
+                &metadata,
+                Bytes::from_static(b"first"),
+                Timestamp::now(),
+            )
             .await?;
         assert_eq!(result, None, "expected None on empty row");
-        let (_, _, stream) = backend.get_object(&id, None).await?.unwrap();
+        let (_, _, stream) = backend
+            .get_object(&id, Timestamp::now(), None)
+            .await?
+            .unwrap();
         assert_eq!(&stream::read_to_vec(stream).await?, b"first");
 
         // object: put_non_tombstone on existing object replaces payload, returns None.
         let id = make_id();
         create_object(&backend, &id, &metadata, b"old", Timestamp::now()).await?;
         let result = backend
-            .put_non_tombstone(&id, &metadata, Bytes::from_static(b"new"))
+            .put_non_tombstone(&id, &metadata, Bytes::from_static(b"new"), Timestamp::now())
             .await?;
         assert_eq!(result, None, "expected None when overwriting object");
-        let (_, _, stream) = backend.get_object(&id, None).await?.unwrap();
+        let (_, _, stream) = backend
+            .get_object(&id, Timestamp::now(), None)
+            .await?
+            .unwrap();
         assert_eq!(&stream::read_to_vec(stream).await?, b"new");
 
         // tombstone: put_non_tombstone returns Some(Tombstone) and leaves tombstone intact.
@@ -1977,13 +2144,15 @@ mod tests {
         };
         create_tombstone(&backend, &hv_id, &tombstone).await?;
         let result = backend
-            .put_non_tombstone(&hv_id, &metadata, Bytes::new())
+            .put_non_tombstone(&hv_id, &metadata, Bytes::new(), Timestamp::now())
             .await?;
         let returned = result.expect("expected Some(Tombstone) when row is a tombstone");
         assert_eq!(returned.target, lt_id);
         assert!(
             matches!(
-                backend.get_tiered_metadata(&hv_id).await?,
+                backend
+                    .get_tiered_metadata(&hv_id, Timestamp::now())
+                    .await?,
                 TieredMetadata::Tombstone(_)
             ),
             "tombstone must still exist after put_non_tombstone"
@@ -2006,14 +2175,25 @@ mod tests {
 
         // empty
         let id = make_id();
-        assert_eq!(backend.delete_non_tombstone(&id).await?, None);
+        assert_eq!(
+            backend.delete_non_tombstone(&id, Timestamp::now()).await?,
+            None
+        );
 
         // object
         let id = make_id();
         let metadata = Metadata::default();
         create_object(&backend, &id, &metadata, b"hello, world", Timestamp::now()).await?;
-        assert_eq!(backend.delete_non_tombstone(&id).await?, None);
-        assert!(backend.get_object(&id, None).await?.is_none());
+        assert_eq!(
+            backend.delete_non_tombstone(&id, Timestamp::now()).await?,
+            None
+        );
+        assert!(
+            backend
+                .get_object(&id, Timestamp::now(), None)
+                .await?
+                .is_none()
+        );
 
         // tombstone
         let id = make_id();
@@ -2023,13 +2203,13 @@ mod tests {
         };
         create_tombstone(&backend, &id, &tombstone).await?;
         let tombstone = backend
-            .delete_non_tombstone(&id)
+            .delete_non_tombstone(&id, Timestamp::now())
             .await?
             .expect("expected Some(tombstone)");
         assert_eq!(tombstone.target, id, "tombstone target must be returned");
         assert!(
             matches!(
-                backend.get_tiered_metadata(&id).await?,
+                backend.get_tiered_metadata(&id, Timestamp::now()).await?,
                 TieredMetadata::Tombstone(_)
             ),
             "tombstone must still exist after delete_non_tombstone"
@@ -2057,17 +2237,28 @@ mod tests {
 
         // First create succeeds.
         let committed = backend
-            .compare_and_write(&hv_id, None, TieredWrite::Tombstone(tombstone.clone()))
+            .compare_and_write(
+                &hv_id,
+                None,
+                TieredWrite::Tombstone(tombstone.clone()),
+                Timestamp::now(),
+            )
             .await?;
         assert!(committed, "expected CAS success on empty row");
 
         // Tiered reads must see the tombstone with the correct target and deadline.
-        let TieredMetadata::Tombstone(t) = backend.get_tiered_metadata(&hv_id).await? else {
+        let TieredMetadata::Tombstone(t) = backend
+            .get_tiered_metadata(&hv_id, Timestamp::now())
+            .await?
+        else {
             panic!("expected TieredMetadata::Tombstone");
         };
         assert_eq!(t.target, lt_id, "target must round-trip via r column");
         assert_eq!(t.time_expires, time_expires);
-        match backend.get_tiered_object(&hv_id, None).await? {
+        match backend
+            .get_tiered_object(&hv_id, Timestamp::now(), None)
+            .await?
+        {
             TieredGet::Tombstone(t) => assert_eq!(t.target, lt_id, "round-trip via r column"),
             other => panic!("expected TieredGet::Tombstone, got {other:?}"),
         }
@@ -2075,20 +2266,25 @@ mod tests {
         // Legacy reads must error rather than leak tombstone data.
         assert!(
             backend
-                .get_object(&hv_id, None)
+                .get_object(&hv_id, Timestamp::now(), None)
                 .await
                 .is_err_and(|error| error.kind() == ErrorKind::UnexpectedTombstone)
         );
         assert!(
             backend
-                .get_metadata(&hv_id)
+                .get_metadata(&hv_id, Timestamp::now())
                 .await
                 .is_err_and(|error| error.kind() == ErrorKind::UnexpectedTombstone)
         );
 
         // Idempotent retry: retry with the same target succeeds
         let second = backend
-            .compare_and_write(&hv_id, None, TieredWrite::Tombstone(tombstone))
+            .compare_and_write(
+                &hv_id,
+                None,
+                TieredWrite::Tombstone(tombstone),
+                Timestamp::now(),
+            )
             .await?;
         assert!(second, "idempotent retry");
 
@@ -2117,27 +2313,33 @@ mod tests {
             time_expires: None,
         });
         let swapped = backend
-            .compare_and_write(&hv_id, Some(&wrong_lt_id), write.clone())
+            .compare_and_write(&hv_id, Some(&wrong_lt_id), write.clone(), Timestamp::now())
             .await?;
         assert!(!swapped, "expected CAS failure due to wrong target");
-        match backend.get_tiered_metadata(&hv_id).await? {
+        match backend
+            .get_tiered_metadata(&hv_id, Timestamp::now())
+            .await?
+        {
             TieredMetadata::Tombstone(t) => assert_eq!(t.target, old_lt_id),
             other => panic!("expected tombstone, got {other:?}"),
         }
 
         // Correct target: CAS succeeds, target updated.
         let swapped = backend
-            .compare_and_write(&hv_id, Some(&old_lt_id), write.clone())
+            .compare_and_write(&hv_id, Some(&old_lt_id), write.clone(), Timestamp::now())
             .await?;
         assert!(swapped, "expected CAS success with correct target");
-        match backend.get_tiered_metadata(&hv_id).await? {
+        match backend
+            .get_tiered_metadata(&hv_id, Timestamp::now())
+            .await?
+        {
             TieredMetadata::Tombstone(t) => assert_eq!(t.target, new_lt_id),
             other => panic!("expected tombstone, got {other:?}"),
         }
 
         // Idempotent retry: same A→B swap returns true.
         let retry = backend
-            .compare_and_write(&hv_id, Some(&old_lt_id), write)
+            .compare_and_write(&hv_id, Some(&old_lt_id), write, Timestamp::now())
             .await?;
         assert!(retry, "idempotent retry");
 
@@ -2162,11 +2364,11 @@ mod tests {
         // Wrong target: CAS fails, tombstone intact.
         let write = TieredWrite::Object(Metadata::default(), Bytes::new());
         let swapped = backend
-            .compare_and_write(&id, Some(&wrong_id), write)
+            .compare_and_write(&id, Some(&wrong_id), write, Timestamp::now())
             .await?;
         assert!(!swapped, "expected CAS failure with wrong target");
         assert!(matches!(
-            backend.get_tiered_metadata(&id).await?,
+            backend.get_tiered_metadata(&id, Timestamp::now()).await?,
             TieredMetadata::Tombstone(_)
         ));
 
@@ -2174,16 +2376,21 @@ mod tests {
         let payload = Bytes::from_static(b"hello inline");
         let write = TieredWrite::Object(Metadata::default(), payload.clone());
         let swapped = backend
-            .compare_and_write(&id, Some(&lt_id), write.clone())
+            .compare_and_write(&id, Some(&lt_id), write.clone(), Timestamp::now())
             .await?;
         assert!(swapped, "expected CAS success with correct target");
-        let TieredGet::Object(_, _, stream) = backend.get_tiered_object(&id, None).await? else {
+        let TieredGet::Object(_, _, stream) = backend
+            .get_tiered_object(&id, Timestamp::now(), None)
+            .await?
+        else {
             panic!("expected inline object after swap");
         };
         assert_eq!(&stream::read_to_vec(stream).await?, payload.as_ref());
 
         // Idempotent retry: row is already inline (no tombstone), same CAS returns true.
-        let retry = backend.compare_and_write(&id, Some(&lt_id), write).await?;
+        let retry = backend
+            .compare_and_write(&id, Some(&lt_id), write, Timestamp::now())
+            .await?;
         assert!(retry, "idempotent retry");
 
         Ok(())
@@ -2197,10 +2404,15 @@ mod tests {
         let id = make_id();
         let payload = Bytes::from_static(b"cas object");
         let write = TieredWrite::Object(Metadata::default(), payload.clone());
-        let committed = backend.compare_and_write(&id, None, write).await?;
+        let committed = backend
+            .compare_and_write(&id, None, write, Timestamp::now())
+            .await?;
         assert!(committed, "expected CAS success on empty row");
 
-        let TieredGet::Object(_, _, stream) = backend.get_tiered_object(&id, None).await? else {
+        let TieredGet::Object(_, _, stream) = backend
+            .get_tiered_object(&id, Timestamp::now(), None)
+            .await?
+        else {
             panic!("expected Object after CAS-create");
         };
         assert_eq!(&stream::read_to_vec(stream).await?, payload.as_ref());
@@ -2225,27 +2437,27 @@ mod tests {
 
         // Wrong target: fails, row preserved.
         let deleted = backend
-            .compare_and_write(&id, Some(&wrong_id), TieredWrite::Delete)
+            .compare_and_write(&id, Some(&wrong_id), TieredWrite::Delete, Timestamp::now())
             .await?;
         assert!(!deleted, "expected CAS failure with wrong target");
         assert!(matches!(
-            backend.get_tiered_metadata(&id).await?,
+            backend.get_tiered_metadata(&id, Timestamp::now()).await?,
             TieredMetadata::Tombstone(_)
         ));
 
         // Correct target: succeeds, row gone.
         let deleted = backend
-            .compare_and_write(&id, Some(&lt_id), TieredWrite::Delete)
+            .compare_and_write(&id, Some(&lt_id), TieredWrite::Delete, Timestamp::now())
             .await?;
         assert!(deleted, "expected CAS delete success");
         assert!(matches!(
-            backend.get_tiered_metadata(&id).await?,
+            backend.get_tiered_metadata(&id, Timestamp::now()).await?,
             TieredMetadata::NotFound
         ));
 
         // Idempotent retry: row is already absent (no tombstone), same delete returns true.
         let retry = backend
-            .compare_and_write(&id, Some(&lt_id), TieredWrite::Delete)
+            .compare_and_write(&id, Some(&lt_id), TieredWrite::Delete, Timestamp::now())
             .await?;
         assert!(retry, "idempotent retry");
 
@@ -2255,7 +2467,12 @@ mod tests {
         let metadata = Metadata::default();
         create_object(&backend, &id2, &metadata, b"data", Timestamp::now()).await?;
         let deleted = backend
-            .compare_and_write(&id2, Some(&fake_lt_id), TieredWrite::Delete)
+            .compare_and_write(
+                &id2,
+                Some(&fake_lt_id),
+                TieredWrite::Delete,
+                Timestamp::now(),
+            )
             .await?;
         assert!(deleted, "expected idempotent deletion");
 
@@ -2276,12 +2493,16 @@ mod tests {
         let id = make_id();
         write_legacy_tombstone(&backend, &id, ExpirationPolicy::Manual, None).await?;
 
-        let TieredMetadata::Tombstone(t) = backend.get_tiered_metadata(&id).await? else {
+        let TieredMetadata::Tombstone(t) =
+            backend.get_tiered_metadata(&id, Timestamp::now()).await?
+        else {
             panic!("expected tombstone");
         };
         assert_eq!(t.time_expires, None);
         assert!(matches!(
-            backend.get_tiered_object(&id, None).await?,
+            backend
+                .get_tiered_object(&id, Timestamp::now(), None)
+                .await?,
             TieredGet::Tombstone(_)
         ));
 
@@ -2293,7 +2514,9 @@ mod tests {
         let ttl = Duration::from_hours(2 * 24);
         write_legacy_tombstone(&backend, &id, ExpirationPolicy::TimeToLive(ttl), None).await?;
 
-        let TieredMetadata::Tombstone(t) = backend.get_tiered_metadata(&id).await? else {
+        let TieredMetadata::Tombstone(t) =
+            backend.get_tiered_metadata(&id, Timestamp::now()).await?
+        else {
             panic!("expected TieredMetadata::Tombstone");
         };
         assert!(t.time_expires.is_some());
@@ -2321,12 +2544,14 @@ mod tests {
         .await?;
 
         // A read observes the legacy row but leaves it unchanged.
-        let TieredMetadata::Tombstone(_) = backend.get_tiered_metadata(&id).await? else {
+        let TieredMetadata::Tombstone(_) =
+            backend.get_tiered_metadata(&id, Timestamp::now()).await?
+        else {
             panic!("expected tombstone");
         };
         assert_eq!(
             backend
-                .read_row(&path, None, "test-verify")
+                .read_row(&path, "test-verify", Timestamp::now(), None)
                 .await?
                 .and_then(|row| row.time_expires()),
             Some(old_deadline)
@@ -2335,12 +2560,20 @@ mod tests {
         let requested = Timestamp::now() + tti;
         assert!(
             backend
-                .compare_and_update(&id, Some(&id), TieredUpdate::SetExpiry(requested))
+                .compare_and_update(
+                    &id,
+                    Some(&id),
+                    TieredUpdate::SetExpiry(requested),
+                    Timestamp::now()
+                )
                 .await?
         );
 
         // After extension, the row uses the requested timestamp.
-        let new_deadline = match backend.read_row(&path, None, "test-verify").await? {
+        let new_deadline = match backend
+            .read_row(&path, "test-verify", Timestamp::now(), None)
+            .await?
+        {
             Some(RowData::Tombstone { time_expires, .. }) => time_expires.unwrap(),
             _ => panic!("expected tombstone row after extension"),
         };
@@ -2365,28 +2598,28 @@ mod tests {
         let id = make_id();
         write_legacy_tombstone(&backend, &id, ExpirationPolicy::Manual, None).await?;
         let t_opt = backend
-            .put_non_tombstone(&id, &Metadata::default(), Bytes::new())
+            .put_non_tombstone(&id, &Metadata::default(), Bytes::new(), Timestamp::now())
             .await?;
         assert_eq!(t_opt.map(|t| t.target).as_ref(), Some(&id));
 
         // delete_non_tombstone returns Some(target == id) for a legacy tombstone.
         let id = make_id();
         write_legacy_tombstone(&backend, &id, ExpirationPolicy::Manual, None).await?;
-        let t_opt = backend.delete_non_tombstone(&id).await?;
+        let t_opt = backend.delete_non_tombstone(&id, Timestamp::now()).await?;
         assert_eq!(t_opt.map(|t| t.target).as_ref(), Some(&id));
 
         // CAS-delete succeeds on a legacy-metadata tombstone (target resolves to hv_id).
         let id = make_id();
         write_legacy_tombstone(&backend, &id, ExpirationPolicy::Manual, None).await?;
         let deleted = backend
-            .compare_and_write(&id, Some(&id), TieredWrite::Delete)
+            .compare_and_write(&id, Some(&id), TieredWrite::Delete, Timestamp::now())
             .await?;
         assert!(
             deleted,
             "CAS-delete must succeed on legacy-metadata tombstone"
         );
         assert!(matches!(
-            backend.get_tiered_metadata(&id).await?,
+            backend.get_tiered_metadata(&id, Timestamp::now()).await?,
             TieredMetadata::NotFound
         ));
 
@@ -2394,14 +2627,14 @@ mod tests {
         let id = make_id();
         write_empty_redirect_tombstone(&backend, &id).await?;
         let deleted = backend
-            .compare_and_write(&id, Some(&id), TieredWrite::Delete)
+            .compare_and_write(&id, Some(&id), TieredWrite::Delete, Timestamp::now())
             .await?;
         assert!(
             deleted,
             "CAS-delete must succeed on empty-redirect tombstone"
         );
         assert!(matches!(
-            backend.get_tiered_metadata(&id).await?,
+            backend.get_tiered_metadata(&id, Timestamp::now()).await?,
             TieredMetadata::NotFound
         ));
 
@@ -2415,7 +2648,7 @@ mod tests {
         let id = make_id();
 
         write_empty_redirect_tombstone(&backend, &id).await?;
-        match backend.get_tiered_metadata(&id).await? {
+        match backend.get_tiered_metadata(&id, Timestamp::now()).await? {
             TieredMetadata::Tombstone(t) => assert_eq!(t.target, id, "must fall back to hv_id"),
             other => panic!("expected tombstone, got {other:?}"),
         }
@@ -2445,14 +2678,21 @@ mod tests {
             time_expires: Some(Timestamp::now() + Duration::from_hours(1)),
         };
         let committed = backend
-            .compare_and_write(&id, None, TieredWrite::Tombstone(new_tombstone))
+            .compare_and_write(
+                &id,
+                None,
+                TieredWrite::Tombstone(new_tombstone),
+                Timestamp::now(),
+            )
             .await?;
         assert!(
             committed,
             "CAS with current=None must succeed over an expired tombstone"
         );
 
-        let TieredMetadata::Tombstone(t) = backend.get_tiered_metadata(&id).await? else {
+        let TieredMetadata::Tombstone(t) =
+            backend.get_tiered_metadata(&id, Timestamp::now()).await?
+        else {
             panic!("expected new tombstone to be readable");
         };
         assert_eq!(t.target, new_lt_id);
@@ -2475,14 +2715,22 @@ mod tests {
         create_tombstone(&backend, &id, &tombstone).await?;
 
         let result = backend
-            .put_non_tombstone(&id, &Metadata::default(), Bytes::from_static(b"data"))
+            .put_non_tombstone(
+                &id,
+                &Metadata::default(),
+                Bytes::from_static(b"data"),
+                Timestamp::now(),
+            )
             .await?;
         assert_eq!(
             result, None,
             "put_non_tombstone must succeed (return None) over an expired tombstone"
         );
 
-        let (_, _, stream) = backend.get_object(&id, None).await?.unwrap();
+        let (_, _, stream) = backend
+            .get_object(&id, Timestamp::now(), None)
+            .await?
+            .unwrap();
         assert_eq!(&stream::read_to_vec(stream).await?, b"data");
 
         Ok(())
@@ -2498,7 +2746,12 @@ mod tests {
         };
         let payload = b"Hello, range requests!";
         backend
-            .put_object(&id, &metadata, stream::single(payload.as_slice()))
+            .put_object(
+                &id,
+                &metadata,
+                stream::single(payload.as_slice()),
+                Timestamp::now(),
+            )
             .await?;
         Ok(id)
     }
@@ -2509,7 +2762,7 @@ mod tests {
         let id = put_range_test_object(&backend).await?;
 
         let (_, content_range, stream) = backend
-            .get_object(&id, Some(ByteRange::Bounded(7, 11)))
+            .get_object(&id, Timestamp::now(), Some(ByteRange::Bounded(7, 11)))
             .await?
             .unwrap();
         let data = stream::read_to_vec(stream).await?;
@@ -2529,7 +2782,7 @@ mod tests {
         let id = put_range_test_object(&backend).await?;
 
         let (_, content_range, stream) = backend
-            .get_object(&id, Some(ByteRange::From(7)))
+            .get_object(&id, Timestamp::now(), Some(ByteRange::From(7)))
             .await?
             .unwrap();
         let data = stream::read_to_vec(stream).await?;
@@ -2549,7 +2802,7 @@ mod tests {
         let id = put_range_test_object(&backend).await?;
 
         let (_, content_range, stream) = backend
-            .get_object(&id, Some(ByteRange::Last(9)))
+            .get_object(&id, Timestamp::now(), Some(ByteRange::Last(9)))
             .await?
             .unwrap();
         let data = stream::read_to_vec(stream).await?;
@@ -2568,7 +2821,10 @@ mod tests {
         let backend = create_test_backend().await?;
         let id = put_range_test_object(&backend).await?;
 
-        match backend.get_object(&id, Some(ByteRange::From(100))).await {
+        match backend
+            .get_object(&id, Timestamp::now(), Some(ByteRange::From(100)))
+            .await
+        {
             Err(error) if matches!(error.kind(), ErrorKind::RangeNotSatisfiable { total: 22 }) => {}
             Ok(_) => panic!("expected RangeNotSatisfiable, got Ok"),
             Err(e) => panic!("expected RangeNotSatisfiable, got {e:?}"),
@@ -2582,7 +2838,10 @@ mod tests {
         let backend = create_test_backend().await?;
         let id = put_range_test_object(&backend).await?;
 
-        let (_, content_range, stream) = backend.get_object(&id, None).await?.unwrap();
+        let (_, content_range, stream) = backend
+            .get_object(&id, Timestamp::now(), None)
+            .await?
+            .unwrap();
         let data = stream::read_to_vec(stream).await?;
         assert_eq!(&data, b"Hello, range requests!");
         assert!(content_range.is_none());
@@ -2647,9 +2906,10 @@ mod tests {
                 &id,
                 &metadata,
                 stream::single::<crate::stream::ClientError>(b"hello".to_vec()),
+                Timestamp::now(),
             )
             .await?;
-        backend.delete_object(&id).await?;
+        backend.delete_object(&id, Timestamp::now()).await?;
 
         let records = producer.records();
         assert_eq!(records.len(), 2);
@@ -2682,7 +2942,7 @@ mod tests {
         };
         create_tombstone(&backend, &id, &tombstone).await?;
         assert_eq!(
-            backend.delete_non_tombstone(&id).await?,
+            backend.delete_non_tombstone(&id, Timestamp::now()).await?,
             None,
             "an expired tombstone must not be returned to the caller"
         );
@@ -2699,7 +2959,10 @@ mod tests {
         };
         create_object(&backend, &id, &metadata, b"gone", Timestamp::now()).await?;
         producer.clear();
-        assert_eq!(backend.delete_non_tombstone(&id).await?, None);
+        assert_eq!(
+            backend.delete_non_tombstone(&id, Timestamp::now()).await?,
+            None
+        );
         let records = producer.records();
         assert_eq!(records.len(), 1, "the object row must be reclaimed");
         assert_eq!(records[0].op_type, OpType::Delete);
@@ -2719,7 +2982,12 @@ mod tests {
             time_expires: Some(Timestamp::now() + Duration::from_secs(3600)),
         };
         let written = backend
-            .compare_and_write(&id, None, TieredWrite::Tombstone(tombstone))
+            .compare_and_write(
+                &id,
+                None,
+                TieredWrite::Tombstone(tombstone),
+                Timestamp::now(),
+            )
             .await?;
         assert!(written);
 
@@ -2751,12 +3019,17 @@ mod tests {
                 &id,
                 &metadata,
                 stream::single::<crate::stream::ClientError>(b"hello".to_vec()),
+                Timestamp::now(),
             )
             .await?;
         producer.clear();
 
         backend
-            .set_expiry(&id, Timestamp::now() + Duration::from_secs(3600))
+            .set_expiry(
+                &id,
+                Timestamp::now() + Duration::from_secs(3600),
+                Timestamp::now(),
+            )
             .await?;
 
         let records = producer.records();

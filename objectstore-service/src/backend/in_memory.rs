@@ -125,6 +125,7 @@ impl super::common::Backend for InMemoryBackend {
         id: &ObjectId,
         metadata: &Metadata,
         stream: ClientStream,
+        _access_time: Timestamp,
     ) -> Result<PutResponse> {
         let bytes: BytesMut = stream.try_collect().await?;
         self.store.lock().unwrap().insert(
@@ -134,11 +135,16 @@ impl super::common::Backend for InMemoryBackend {
         Ok(())
     }
 
-    async fn get_object(&self, id: &ObjectId, range: Option<ByteRange>) -> Result<GetResponse> {
+    async fn get_object(
+        &self,
+        id: &ObjectId,
+        access_time: Timestamp,
+        range: Option<ByteRange>,
+    ) -> Result<GetResponse> {
         let entry = self.store.lock().unwrap().get(id).cloned();
         match entry {
             None => Ok(None),
-            Some(entry) if entry.is_expired(Timestamp::now()) => Ok(None),
+            Some(entry) if entry.is_expired(access_time) => Ok(None),
             Some(StoreEntry::Tombstone(_)) => Err(ErrorKind::UnexpectedTombstone.into()),
             Some(StoreEntry::Object(mut metadata, bytes)) => {
                 let total = bytes.len() as u64;
@@ -163,18 +169,26 @@ impl super::common::Backend for InMemoryBackend {
         }
     }
 
-    async fn set_expiry(&self, id: &ObjectId, expire_at: Timestamp) -> Result<bool> {
-        let now = Timestamp::now();
+    async fn set_expiry(
+        &self,
+        id: &ObjectId,
+        expire_at: Timestamp,
+        access_time: Timestamp,
+    ) -> Result<bool> {
         let mut store = self.store.lock().unwrap();
         Ok(match store.get_mut(id) {
             Some(StoreEntry::Object(metadata, _)) => {
-                extend_expiry(&mut metadata.time_expires, expire_at, now)
+                extend_expiry(&mut metadata.time_expires, expire_at, access_time)
             }
             _ => false,
         })
     }
 
-    async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
+    async fn delete_object(
+        &self,
+        id: &ObjectId,
+        _access_time: Timestamp,
+    ) -> Result<DeleteResponse> {
         self.store.lock().unwrap().remove(id);
         Ok(())
     }
@@ -187,10 +201,11 @@ impl HighVolumeBackend for InMemoryBackend {
         id: &ObjectId,
         metadata: &Metadata,
         payload: Bytes,
+        access_time: Timestamp,
     ) -> Result<Option<Tombstone>> {
         let mut store = self.store.lock().unwrap();
         if let Some(StoreEntry::Tombstone(tombstone)) = store.get(id)
-            && !tombstone.is_expired(Timestamp::now())
+            && !tombstone.is_expired(access_time)
         {
             return Ok(Some(tombstone.clone()));
         }
@@ -204,12 +219,13 @@ impl HighVolumeBackend for InMemoryBackend {
     async fn get_tiered_object(
         &self,
         id: &ObjectId,
+        access_time: Timestamp,
         range: Option<ByteRange>,
     ) -> Result<TieredGet> {
         let entry = self.store.lock().unwrap().get(id).cloned();
         Ok(match entry {
             None => TieredGet::NotFound,
-            Some(entry) if entry.is_expired(Timestamp::now()) => TieredGet::NotFound,
+            Some(entry) if entry.is_expired(access_time) => TieredGet::NotFound,
             Some(StoreEntry::Tombstone(tombstone)) => TieredGet::Tombstone(tombstone),
             Some(StoreEntry::Object(mut metadata, bytes)) => {
                 let total = bytes.len() as u64;
@@ -230,20 +246,28 @@ impl HighVolumeBackend for InMemoryBackend {
         })
     }
 
-    async fn get_tiered_metadata(&self, id: &ObjectId) -> Result<TieredMetadata> {
+    async fn get_tiered_metadata(
+        &self,
+        id: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<TieredMetadata> {
         let entry = self.store.lock().unwrap().get(id).cloned();
         Ok(match entry {
             None => TieredMetadata::NotFound,
-            Some(entry) if entry.is_expired(Timestamp::now()) => TieredMetadata::NotFound,
+            Some(entry) if entry.is_expired(access_time) => TieredMetadata::NotFound,
             Some(StoreEntry::Tombstone(tombstone)) => TieredMetadata::Tombstone(tombstone),
             Some(StoreEntry::Object(metadata, _bytes)) => TieredMetadata::Object(metadata),
         })
     }
 
-    async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<Option<Tombstone>> {
+    async fn delete_non_tombstone(
+        &self,
+        id: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<Option<Tombstone>> {
         let mut store = self.store.lock().unwrap();
         if let Some(StoreEntry::Tombstone(tombstone)) = store.get(id).cloned()
-            && !tombstone.is_expired(Timestamp::now())
+            && !tombstone.is_expired(access_time)
         {
             return Ok(Some(tombstone));
         }
@@ -257,16 +281,17 @@ impl HighVolumeBackend for InMemoryBackend {
         id: &ObjectId,
         current: Option<&ObjectId>,
         update: TieredUpdate,
+        access_time: Timestamp,
     ) -> Result<bool> {
         let TieredUpdate::SetExpiry(expire_at) = update;
         let mut store = self.store.lock().unwrap();
 
         Ok(match (store.get_mut(id), current) {
             (Some(StoreEntry::Object(metadata, _)), None) => {
-                extend_expiry(&mut metadata.time_expires, expire_at, Timestamp::now())
+                extend_expiry(&mut metadata.time_expires, expire_at, access_time)
             }
             (Some(StoreEntry::Tombstone(t)), Some(target)) if t.target == *target => {
-                extend_expiry(&mut t.time_expires, expire_at, Timestamp::now())
+                extend_expiry(&mut t.time_expires, expire_at, access_time)
             }
             _ => false,
         })
@@ -277,11 +302,11 @@ impl HighVolumeBackend for InMemoryBackend {
         id: &ObjectId,
         current: Option<&ObjectId>,
         write: TieredWrite,
+        access_time: Timestamp,
     ) -> Result<bool> {
         let mut store = self.store.lock().unwrap();
 
         let actual = store.get(id);
-        let access_time = Timestamp::now();
         let matches_current = matches_redirect(actual, current, access_time);
         let matches_next = matches_redirect(actual, write.target(), access_time);
 
@@ -422,6 +447,7 @@ impl MultipartUploadBackend for InMemoryBackend {
         id: &ObjectId,
         upload_id: &UploadId,
         parts: Vec<CompletedPart>,
+        _access_time: Timestamp,
     ) -> Result<CompleteMultipartResponse> {
         let key = (id.clone(), upload_id.clone());
 
@@ -598,13 +624,14 @@ mod tests {
 
     #[tokio::test]
     async fn set_expiry() {
+        let access_time = Timestamp::from_unix_secs(1_700_000_000).unwrap();
         for policy in [
             ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
             ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
         ] {
             let backend = InMemoryBackend::new("test");
             let id = make_id();
-            let original_expiry = Timestamp::now() + Duration::from_hours(1);
+            let original_expiry = access_time + Duration::from_hours(1);
             let metadata = Metadata {
                 expiration_policy: policy,
                 time_expires: Some(original_expiry),
@@ -612,19 +639,29 @@ mod tests {
                 ..Default::default()
             };
             backend
-                .put_object(&id, &metadata, stream::single("payload"))
+                .put_object(&id, &metadata, stream::single("payload"), access_time)
                 .await
                 .unwrap();
 
             let requested = original_expiry + Duration::from_hours(1) + Duration::from_nanos(999);
-            assert!(backend.set_expiry(&id, requested).await.unwrap());
+            assert!(
+                backend
+                    .set_expiry(&id, requested, access_time)
+                    .await
+                    .unwrap()
+            );
             let (updated, payload) = backend.get(&id).expect_object();
             assert_eq!(updated.expiration_policy, policy);
             assert_eq!(updated.custom, metadata.custom);
             assert_eq!(payload, Bytes::from_static(b"payload"));
             assert_eq!(updated.time_expires, Some(requested));
 
-            assert!(backend.set_expiry(&id, original_expiry).await.unwrap());
+            assert!(
+                backend
+                    .set_expiry(&id, original_expiry, access_time)
+                    .await
+                    .unwrap()
+            );
             assert_eq!(
                 backend.get(&id).expect_object().0.time_expires,
                 updated.time_expires
@@ -634,23 +671,29 @@ mod tests {
 
     #[tokio::test]
     async fn set_expiry_rejected() {
+        let access_time = Timestamp::from_unix_secs(1_700_000_000).unwrap();
         let backend = InMemoryBackend::new("test");
         let absent = make_id();
         assert!(
             !backend
-                .set_expiry(&absent, Timestamp::now() + Duration::from_hours(1))
+                .set_expiry(&absent, access_time + Duration::from_hours(1), access_time)
                 .await
                 .unwrap()
         );
 
         let manual = make_id();
         backend
-            .put_object(&manual, &Metadata::default(), stream::single("manual"))
+            .put_object(
+                &manual,
+                &Metadata::default(),
+                stream::single("manual"),
+                access_time,
+            )
             .await
             .unwrap();
         assert!(
             !backend
-                .set_expiry(&manual, Timestamp::now() + Duration::from_hours(1))
+                .set_expiry(&manual, access_time + Duration::from_hours(1), access_time)
                 .await
                 .unwrap()
         );
@@ -658,17 +701,33 @@ mod tests {
         let expired = make_id();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
-            time_expires: Some(Timestamp::now() - Duration::from_secs(1)),
+            time_expires: Some(access_time - Duration::from_secs(1)),
             ..Default::default()
         };
         backend
-            .put_object(&expired, &metadata, stream::single("expired"))
+            .put_object(&expired, &metadata, stream::single("expired"), access_time)
             .await
             .unwrap();
-        assert!(backend.get_object(&expired, None).await.unwrap().is_none());
+        let deadline = metadata.time_expires.unwrap();
+        for time in [deadline - Duration::from_secs(1), deadline] {
+            assert!(
+                backend
+                    .get_object(&expired, time, None)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        assert!(
+            backend
+                .get_object(&expired, access_time, None)
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert!(
             !backend
-                .set_expiry(&expired, Timestamp::now() + Duration::from_hours(1))
+                .set_expiry(&expired, access_time + Duration::from_hours(1), access_time)
                 .await
                 .unwrap()
         );
@@ -676,11 +735,12 @@ mod tests {
 
     #[tokio::test]
     async fn redirect_expiry() {
+        let access_time = Timestamp::from_unix_secs(1_700_000_000).unwrap();
         let backend = InMemoryBackend::new("test");
         let id = make_id();
         let target = make_id();
         let other = make_id();
-        let old_expiry = Timestamp::now() + Duration::from_hours(1);
+        let old_expiry = access_time + Duration::from_hours(1);
         backend
             .compare_and_write(
                 &id,
@@ -689,19 +749,20 @@ mod tests {
                     target: target.clone(),
                     time_expires: Some(old_expiry),
                 }),
+                access_time,
             )
             .await
             .unwrap();
 
         assert!(
             backend
-                .get_object(&id, None)
+                .get_object(&id, access_time, None)
                 .await
                 .is_err_and(|error| error.kind() == ErrorKind::UnexpectedTombstone)
         );
         assert!(
             backend
-                .get_metadata(&id)
+                .get_metadata(&id, access_time)
                 .await
                 .is_err_and(|error| error.kind() == ErrorKind::UnexpectedTombstone)
         );
@@ -709,7 +770,12 @@ mod tests {
         let new_expiry = old_expiry + Duration::from_hours(1);
         assert!(
             !backend
-                .compare_and_update(&id, Some(&other), TieredUpdate::SetExpiry(new_expiry),)
+                .compare_and_update(
+                    &id,
+                    Some(&other),
+                    TieredUpdate::SetExpiry(new_expiry),
+                    access_time,
+                )
                 .await
                 .unwrap()
         );
@@ -719,7 +785,12 @@ mod tests {
         );
         assert!(
             backend
-                .compare_and_update(&id, Some(&target), TieredUpdate::SetExpiry(new_expiry))
+                .compare_and_update(
+                    &id,
+                    Some(&target),
+                    TieredUpdate::SetExpiry(new_expiry),
+                    access_time
+                )
                 .await
                 .unwrap()
         );
@@ -764,12 +835,17 @@ mod tests {
                     part_number: NonZeroU32::new(1).unwrap(),
                     etag,
                 }],
+                Timestamp::now(),
             )
             .await
             .unwrap();
         assert!(result.is_none(), "expected no error on complete");
 
-        let (meta, _, body) = backend.get_object(&id, None).await.unwrap().unwrap();
+        let (meta, _, body) = backend
+            .get_object(&id, Timestamp::now(), None)
+            .await
+            .unwrap()
+            .unwrap();
         let payload = stream::read_to_vec(body).await.unwrap();
         assert_eq!(payload, data);
         assert_eq!(meta.content_type, "text/plain".to_string());
@@ -845,12 +921,17 @@ mod tests {
                         etag: etag3,
                     },
                 ],
+                Timestamp::now(),
             )
             .await
             .unwrap();
         assert!(result.is_none());
 
-        let (_, _, body) = backend.get_object(&id, None).await.unwrap().unwrap();
+        let (_, _, body) = backend
+            .get_object(&id, Timestamp::now(), None)
+            .await
+            .unwrap()
+            .unwrap();
         let payload = stream::read_to_vec(body).await.unwrap();
         assert_eq!(payload, b"aaaabbbbcc");
     }
@@ -940,7 +1021,10 @@ mod tests {
 
         backend.abort_multipart(&id, &upload_id).await.unwrap();
 
-        let result = backend.get_object(&id, None).await.unwrap();
+        let result = backend
+            .get_object(&id, Timestamp::now(), None)
+            .await
+            .unwrap();
         assert!(result.is_none(), "object should not exist after abort");
     }
 
@@ -972,6 +1056,7 @@ mod tests {
                     part_number: NonZeroU32::new(1).unwrap(),
                     etag: "wrong-etag".into(),
                 }],
+                Timestamp::now(),
             )
             .await
             .unwrap();
@@ -987,6 +1072,7 @@ mod tests {
                     part_number: NonZeroU32::new(1).unwrap(),
                     etag,
                 }],
+                Timestamp::now(),
             )
             .await
             .unwrap();
@@ -1021,6 +1107,7 @@ mod tests {
                     part_number: NonZeroU32::new(99).unwrap(),
                     etag: "whatever".into(),
                 }],
+                Timestamp::now(),
             )
             .await
             .unwrap();
@@ -1036,6 +1123,7 @@ mod tests {
                     part_number: NonZeroU32::new(1).unwrap(),
                     etag,
                 }],
+                Timestamp::now(),
             )
             .await
             .unwrap();

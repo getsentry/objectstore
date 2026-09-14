@@ -175,6 +175,7 @@ where
         &self,
         method: Method,
         id: &ObjectId,
+        access_time: Timestamp,
         range: Option<ByteRange>,
     ) -> Result<Option<(Metadata, Option<ContentRange>, Response)>> {
         let object_url = self.object_url(id);
@@ -241,8 +242,6 @@ where
             }
             None
         };
-
-        let access_time = Timestamp::now();
 
         // Filter already expired objects but leave them to garbage collection
         if metadata.is_expired(access_time) {
@@ -330,6 +329,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         id: &ObjectId,
         metadata: &Metadata,
         stream: ClientStream,
+        _access_time: Timestamp,
     ) -> Result<PutResponse> {
         objectstore_log::debug!("Writing to s3_compatible backend");
         self.request(Method::PUT, self.object_url(id))
@@ -350,11 +350,17 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
-    async fn get_object(&self, id: &ObjectId, range: Option<ByteRange>) -> Result<GetResponse> {
+    async fn get_object(
+        &self,
+        id: &ObjectId,
+        access_time: Timestamp,
+        range: Option<ByteRange>,
+    ) -> Result<GetResponse> {
         objectstore_log::debug!("Reading from s3_compatible backend");
 
-        let Some((metadata, content_range, response)) =
-            self.request_object(Method::GET, id, range).await?
+        let Some((metadata, content_range, response)) = self
+            .request_object(Method::GET, id, access_time, range)
+            .await?
         else {
             return Ok(None);
         };
@@ -364,15 +370,28 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
-    async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
+    async fn get_metadata(
+        &self,
+        id: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<MetadataResponse> {
         objectstore_log::debug!("Reading metadata from s3_compatible backend");
-        let response = self.request_object(Method::HEAD, id, None).await?;
+        let response = self
+            .request_object(Method::HEAD, id, access_time, None)
+            .await?;
         Ok(response.map(|(metadata, _, _)| metadata))
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
-    async fn set_expiry(&self, id: &ObjectId, expire_at: Timestamp) -> Result<bool> {
-        let Some((mut metadata, _, response)) = self.request_object(Method::HEAD, id, None).await?
+    async fn set_expiry(
+        &self,
+        id: &ObjectId,
+        expire_at: Timestamp,
+        access_time: Timestamp,
+    ) -> Result<bool> {
+        let Some((mut metadata, _, response)) = self
+            .request_object(Method::HEAD, id, access_time, None)
+            .await?
         else {
             return Ok(false);
         };
@@ -396,7 +415,11 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
-    async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
+    async fn delete_object(
+        &self,
+        id: &ObjectId,
+        _access_time: Timestamp,
+    ) -> Result<DeleteResponse> {
         objectstore_log::debug!("Deleting from s3_compatible backend");
         let response = self
             .request(Method::DELETE, self.object_url(id))
@@ -575,7 +598,7 @@ mod tests {
     async fn test_get_metadata_nonexistent() -> Result<()> {
         let backend = create_test_backend();
         let id = make_id();
-        let result = backend.get_metadata(&id).await?;
+        let result = backend.get_metadata(&id, Timestamp::now()).await?;
         assert!(result.is_none());
         Ok(())
     }
@@ -588,12 +611,20 @@ mod tests {
         let payload = "hello, world";
 
         backend
-            .put_object(&id, &Metadata::default(), stream::single(payload))
+            .put_object(
+                &id,
+                &Metadata::default(),
+                stream::single(payload),
+                Timestamp::now(),
+            )
             .await?;
 
         // The size must come from the `Content-Length` header, not from the (empty) body of
         // the HEAD response.
-        let metadata = backend.get_metadata(&id).await?.expect("object exists");
+        let metadata = backend
+            .get_metadata(&id, Timestamp::now())
+            .await?
+            .expect("object exists");
         assert_eq!(metadata.size, Some(payload.len()));
 
         Ok(())
@@ -611,13 +642,18 @@ mod tests {
         };
 
         backend
-            .put_object(&id, &metadata, stream::single("hello, world"))
+            .put_object(
+                &id,
+                &metadata,
+                stream::single("hello, world"),
+                Timestamp::now(),
+            )
             .await?;
 
-        let get_result = backend.get_object(&id, None).await?;
+        let get_result = backend.get_object(&id, Timestamp::now(), None).await?;
         assert!(get_result.is_none());
 
-        let head_result = backend.get_metadata(&id).await?;
+        let head_result = backend.get_metadata(&id, Timestamp::now()).await?;
         assert!(head_result.is_none());
 
         Ok(())
@@ -635,13 +671,18 @@ mod tests {
         };
 
         backend
-            .put_object(&id, &metadata, stream::single("hello, world"))
+            .put_object(
+                &id,
+                &metadata,
+                stream::single("hello, world"),
+                Timestamp::now(),
+            )
             .await?;
 
-        let get_result = backend.get_object(&id, None).await?;
+        let get_result = backend.get_object(&id, Timestamp::now(), None).await?;
         assert!(get_result.is_none());
 
-        let head_result = backend.get_metadata(&id).await?;
+        let head_result = backend.get_metadata(&id, Timestamp::now()).await?;
         assert!(head_result.is_none());
 
         Ok(())

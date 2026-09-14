@@ -240,10 +240,15 @@ impl StreamExecutor {
     /// Operations that cannot acquire a permit within the configured queue
     /// timeout fail with [`AtCapacity`](crate::error::ErrorKind::AtCapacity).
     /// Results are yielded in completion order (not submission order).
+    ///
+    /// All operations use the supplied `access_time`, including operations
+    /// parsed or admitted later. Use the same timestamp when resolving insert
+    /// metadata so creation, expiry checks, and TTI calculations share an anchor.
     pub fn execute<E>(
         self,
         context: ObjectContext,
         operations: impl Stream<Item = (usize, Result<Operation, E>)> + Send + 'static,
+        access_time: Timestamp,
     ) -> impl Stream<Item = (usize, Result<OpResponse, E>)> + Send + 'static
     where
         E: From<Error> + Send + 'static,
@@ -264,13 +269,12 @@ impl StreamExecutor {
             .then(move |(idx, item)| {
                 let concurrency = concurrency.clone();
                 async move {
-                    let access_time = Timestamp::now();
                     let op = match item {
                         Ok(op) => op,
                         Err(e) => return (idx, Err(e)),
                     };
                     match concurrency.acquire_bulk().await {
-                        Ok(permit) => (idx, Ok((op, permit, access_time))),
+                        Ok(permit) => (idx, Ok((op, permit))),
                         Err(e) => {
                             objectstore_metrics::count!(
                                 "service.concurrency.rejected",
@@ -287,7 +291,7 @@ impl StreamExecutor {
                 let context = context.clone();
                 let renewals = renewals.clone();
                 async move {
-                    let (op, permit, access_time) = match result {
+                    let (op, permit) = match result {
                         Ok(pair) => pair,
                         Err(e) => return (idx, Err(e)),
                     };
@@ -312,7 +316,7 @@ async fn execute_operation(
     match op {
         Operation::Get(get) => {
             let id = ObjectId::new(context, get.key);
-            let response = backend.get_object(&id, None).await?;
+            let response = backend.get_object(&id, access_time, None).await?;
             if let Some((metadata, _, _)) = &response
                 && let Some(expire_at) = metadata.check_tti_bump(access_time)
             {
@@ -326,17 +330,19 @@ async fn execute_operation(
         Operation::Insert(insert) => {
             let id = ObjectId::optional(context, insert.key);
             let stream = crate::stream::single(insert.payload);
-            backend.put_object(&id, &insert.metadata, stream).await?;
+            backend
+                .put_object(&id, &insert.metadata, stream, access_time)
+                .await?;
             Ok(OpResponse::Inserted { id })
         }
         Operation::Delete(delete) => {
             let id = ObjectId::new(context, delete.key);
-            backend.delete_object(&id).await?;
+            backend.delete_object(&id, access_time).await?;
             Ok(OpResponse::Deleted { key: id.key })
         }
         Operation::Head(head) => {
             let id = ObjectId::new(context, head.key);
-            let metadata = backend.get_metadata(&id).await?;
+            let metadata = backend.get_metadata(&id, access_time).await?;
             if let Some(metadata) = &metadata
                 && let Some(expire_at) = metadata.check_tti_bump(access_time)
             {
@@ -410,11 +416,12 @@ mod tests {
             inner: &InMemoryBackend,
             id: &ObjectId,
             expire_at: Timestamp,
+            access_time: Timestamp,
         ) -> Result<bool> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.started.notify_one();
             self.resume.notified().await;
-            inner.set_expiry(id, expire_at).await
+            inner.set_expiry(id, expire_at, access_time).await
         }
     }
 
@@ -431,7 +438,7 @@ mod tests {
             let id = ObjectId::new(context.clone(), key.into());
             backend
                 .inner
-                .put_object(&id, &metadata, stream::single("payload"))
+                .put_object(&id, &metadata, stream::single("payload"), Timestamp::now())
                 .await
                 .unwrap();
         }
@@ -448,6 +455,7 @@ mod tests {
                         Operation::Get(Get { key: "get".into() }),
                         Operation::Head(Head { key: "head".into() }),
                     ]),
+                    Timestamp::now(),
                 )
                 .collect::<Vec<_>>(),
         )
@@ -477,6 +485,7 @@ mod tests {
             .execute(
                 make_context(),
                 futures_util::stream::empty::<(usize, Result<Operation, Error>)>(),
+                Timestamp::now(),
             )
             .collect()
             .await;
@@ -495,6 +504,7 @@ mod tests {
                 Some("key1".into()),
                 Metadata::default(),
                 stream::single("hello"),
+                Timestamp::now(),
             )
             .await
             .unwrap();
@@ -513,7 +523,10 @@ mod tests {
         ];
 
         let executor = service.stream();
-        let outcomes: Vec<_> = executor.execute(context, indexed_ok(ops)).collect().await;
+        let outcomes: Vec<_> = executor
+            .execute(context, indexed_ok(ops), Timestamp::now())
+            .collect()
+            .await;
 
         assert_eq!(outcomes.len(), 4);
 
@@ -539,6 +552,7 @@ mod tests {
                 Some("exists".into()),
                 Metadata::default(),
                 stream::single("data"),
+                Timestamp::now(),
             )
             .await
             .unwrap();
@@ -553,7 +567,10 @@ mod tests {
         ];
 
         let executor = service.stream();
-        let mut outcomes: Vec<_> = executor.execute(context, indexed_ok(ops)).collect().await;
+        let mut outcomes: Vec<_> = executor
+            .execute(context, indexed_ok(ops), Timestamp::now())
+            .collect()
+            .await;
         outcomes.sort_by_key(|(idx, _)| *idx);
 
         assert_eq!(outcomes.len(), 2);
@@ -597,11 +614,12 @@ mod tests {
             id: &ObjectId,
             metadata: &Metadata,
             stream: ClientStream,
+            access_time: Timestamp,
         ) -> Result<PutResponse> {
             self.in_flight.fetch_add(1, Ordering::SeqCst);
             let _ = self.paused_tx.send(()).await;
             self.resume.notified().await;
-            let result = inner.put_object(id, metadata, stream).await;
+            let result = inner.put_object(id, metadata, stream, access_time).await;
             self.in_flight.fetch_sub(1, Ordering::SeqCst);
             result
         }
@@ -634,7 +652,7 @@ mod tests {
         let executor = service.stream();
         let exec_handle = tokio::spawn(async move {
             executor
-                .execute(make_context(), indexed_ok(ops))
+                .execute(make_context(), indexed_ok(ops), Timestamp::now())
                 .collect::<Vec<_>>()
                 .await
         });
@@ -683,7 +701,7 @@ mod tests {
 
         let executor = service.stream();
         let outcomes: Vec<_> = executor
-            .execute(make_context(), indexed_ok(ops))
+            .execute(make_context(), indexed_ok(ops), Timestamp::now())
             .collect()
             .await;
 

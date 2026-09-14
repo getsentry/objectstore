@@ -34,6 +34,12 @@ pub type MetadataResponse = Option<Metadata>;
 pub type DeleteResponse = ();
 
 /// Trait implemented by all storage backends.
+///
+/// Object operations take `access_time`, the timestamp of the caller's operation.
+/// Use it to decide whether an object or redirect has expired, so all steps of
+/// an operation use the same time, including retries and calls to other backends.
+/// An object is expired when its deadline is strictly earlier than `access_time`.
+/// Writes preserve the creation time and deadline in the supplied metadata.
 #[async_trait::async_trait]
 pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// The backend name, used for diagnostics.
@@ -45,16 +51,26 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
         id: &ObjectId,
         metadata: &Metadata,
         stream: ClientStream,
+        access_time: Timestamp,
     ) -> Result<PutResponse>;
 
     /// Retrieves (part of) an object at the given path, returning its metadata, a description of
     /// the part being returned, and the payload.
-    async fn get_object(&self, id: &ObjectId, range: Option<ByteRange>) -> Result<GetResponse>;
+    async fn get_object(
+        &self,
+        id: &ObjectId,
+        access_time: Timestamp,
+        range: Option<ByteRange>,
+    ) -> Result<GetResponse>;
 
     /// Retrieves only the metadata for an object, without the payload.
-    async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
+    async fn get_metadata(
+        &self,
+        id: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<MetadataResponse> {
         Ok(self
-            .get_object(id, None)
+            .get_object(id, access_time, None)
             .await?
             .map(|(metadata, _range, _stream)| metadata))
     }
@@ -67,10 +83,15 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// Returns `true` when the deadline was extended or was already at least as
     /// late as `expire_at`. Returns `false` when the object is absent, expired,
     /// manually expired, or changed concurrently.
-    async fn set_expiry(&self, id: &ObjectId, expire_at: Timestamp) -> Result<bool>;
+    async fn set_expiry(
+        &self,
+        id: &ObjectId,
+        expire_at: Timestamp,
+        access_time: Timestamp,
+    ) -> Result<bool>;
 
     /// Deletes the object at the given path.
-    async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse>;
+    async fn delete_object(&self, id: &ObjectId, access_time: Timestamp) -> Result<DeleteResponse>;
 
     /// Waits for any outstanding background operations to complete before shutdown.
     ///
@@ -212,6 +233,7 @@ pub trait MultipartUploadBackend: Backend + fmt::Debug + Send + Sync + 'static {
         id: &ObjectId,
         upload_id: &UploadId,
         parts: Vec<CompletedPart>,
+        access_time: Timestamp,
     ) -> Result<CompleteMultipartResponse>;
 }
 
@@ -237,20 +259,29 @@ pub trait HighVolumeBackend: Backend {
         id: &ObjectId,
         metadata: &Metadata,
         payload: Bytes,
+        access_time: Timestamp,
     ) -> Result<Option<Tombstone>>;
 
     /// Retrieves (part of) an object with explicit tombstone awareness.
     ///
     /// Returns [`TieredGet::Tombstone`] instead of synthesizing a tombstone
     /// object, making the caller's routing logic a compile-time distinction.
-    async fn get_tiered_object(&self, id: &ObjectId, range: Option<ByteRange>)
-    -> Result<TieredGet>;
+    async fn get_tiered_object(
+        &self,
+        id: &ObjectId,
+        access_time: Timestamp,
+        range: Option<ByteRange>,
+    ) -> Result<TieredGet>;
 
     /// Retrieves only metadata with explicit tombstone awareness.
     ///
     /// Implementations should skip the payload column where possible to avoid
     /// fetching up to 1 MiB of data just to discover a tombstone.
-    async fn get_tiered_metadata(&self, id: &ObjectId) -> Result<TieredMetadata>;
+    async fn get_tiered_metadata(
+        &self,
+        id: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<TieredMetadata>;
 
     /// Deletes the object only if it is NOT a redirect tombstone.
     ///
@@ -259,7 +290,11 @@ pub trait HighVolumeBackend: Backend {
     /// redirect tombstone. The returned tombstone carries the target LT
     /// `ObjectId` so the caller can delete from long-term storage directly,
     /// without a second round trip.
-    async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<Option<Tombstone>>;
+    async fn delete_non_tombstone(
+        &self,
+        id: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<Option<Tombstone>>;
 
     /// Atomically mutates the row if the current redirect state matches.
     ///
@@ -280,6 +315,7 @@ pub trait HighVolumeBackend: Backend {
         id: &ObjectId,
         current: Option<&ObjectId>,
         write: TieredWrite,
+        access_time: Timestamp,
     ) -> Result<bool>;
 
     /// Atomically updates an existing row if its kind and redirect target match.
@@ -296,6 +332,7 @@ pub trait HighVolumeBackend: Backend {
         id: &ObjectId,
         current: Option<&ObjectId>,
         update: TieredUpdate,
+        access_time: Timestamp,
     ) -> Result<bool>;
 }
 

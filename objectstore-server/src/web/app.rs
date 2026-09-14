@@ -32,6 +32,7 @@ impl App {
         //  - Requests go from top to bottom
         //  - Responses go from bottom to top
         let middleware = ServiceBuilder::new()
+            .layer(axum::middleware::from_fn(m::capture_request_time))
             .layer(NewSentryLayer::new_from_top())
             .layer(SentryHttpLayer::new().enable_transaction())
             .layer(axum::middleware::from_fn(m::emit_request_metrics))

@@ -118,6 +118,7 @@ impl Backend for LocalFsBackend {
         id: &ObjectId,
         metadata: &Metadata,
         stream: ClientStream,
+        _access_time: Timestamp,
     ) -> Result<PutResponse> {
         let path = self.path(id);
         objectstore_log::debug!(path=%path.display(), "Writing to local_fs backend");
@@ -142,10 +143,15 @@ impl Backend for LocalFsBackend {
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
-    async fn get_object(&self, id: &ObjectId, range: Option<ByteRange>) -> Result<GetResponse> {
+    async fn get_object(
+        &self,
+        id: &ObjectId,
+        access_time: Timestamp,
+        range: Option<ByteRange>,
+    ) -> Result<GetResponse> {
         objectstore_log::debug!("Reading from local_fs backend");
         let path = self.path(id);
-        let Some(object) = ObjectFile::try_open(&path).await? else {
+        let Some(object) = ObjectFile::try_open(&path, access_time).await? else {
             objectstore_log::debug!("Object not found");
             return Ok(None);
         };
@@ -178,11 +184,16 @@ impl Backend for LocalFsBackend {
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
-    async fn set_expiry(&self, id: &ObjectId, expire_at: Timestamp) -> Result<bool> {
+    async fn set_expiry(
+        &self,
+        id: &ObjectId,
+        expire_at: Timestamp,
+        access_time: Timestamp,
+    ) -> Result<bool> {
         let _guard = self.locks.acquire(id).await?;
 
         let path = self.path(id);
-        let Some(object) = ObjectFile::try_open(&path).await? else {
+        let Some(object) = ObjectFile::try_open(&path, access_time).await? else {
             return Ok(false);
         };
         let ObjectFile {
@@ -211,7 +222,11 @@ impl Backend for LocalFsBackend {
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
-    async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
+    async fn delete_object(
+        &self,
+        id: &ObjectId,
+        _access_time: Timestamp,
+    ) -> Result<DeleteResponse> {
         let _guard = self.locks.acquire(id).await?;
 
         objectstore_log::debug!("Deleting from local_fs backend");
@@ -449,6 +464,7 @@ impl MultipartUploadBackend for LocalFsBackend {
         id: &ObjectId,
         upload_id: &UploadId,
         parts: Vec<CompletedPart>,
+        _access_time: Timestamp,
     ) -> Result<CompleteMultipartResponse> {
         let dir = self.multipart_dir(id, upload_id);
         if !tokio::fs::try_exists(&dir).await.context(
@@ -629,7 +645,7 @@ where
 
 impl ObjectFile {
     /// Opens an object file, returning `None` when it does not exist.
-    async fn try_open(path: &Path) -> Result<Option<Self>> {
+    async fn try_open(path: &Path, access_time: Timestamp) -> Result<Option<Self>> {
         let file = match OpenOptions::new().read(true).open(path).await {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -639,7 +655,7 @@ impl ObjectFile {
         let mut reader = BufReader::new(file);
         let (mut metadata, preamble_len) = read_metadata_preamble(&mut reader).await?;
 
-        if metadata.is_expired(Timestamp::now()) {
+        if metadata.is_expired(access_time) {
             objectstore_log::debug!("Object found but past expiry");
             return Ok(None);
         }
@@ -804,11 +820,15 @@ mod tests {
             size: None,
         };
         backend
-            .put_object(&id, &metadata, stream::single("oh hai!"))
+            .put_object(&id, &metadata, stream::single("oh hai!"), Timestamp::now())
             .await
             .unwrap();
 
-        let (read_metadata, _, stream) = backend.get_object(&id, None).await.unwrap().unwrap();
+        let (read_metadata, _, stream) = backend
+            .get_object(&id, Timestamp::now(), None)
+            .await
+            .unwrap()
+            .unwrap();
         let file_contents: BytesMut = stream.try_collect().await.unwrap();
 
         assert_eq!(
@@ -822,7 +842,7 @@ mod tests {
 
         let lock_path = backend.locks.path(&id);
         assert!(lock_path.exists());
-        backend.delete_object(&id).await.unwrap();
+        backend.delete_object(&id, Timestamp::now()).await.unwrap();
         assert!(lock_path.exists());
     }
 
@@ -876,17 +896,26 @@ mod tests {
         let id = ObjectId::from_parts("testing".into(), Scopes::empty(), "foo".into());
         assert!(
             !backend
-                .set_expiry(&id, Timestamp::now() + Duration::from_hours(1))
+                .set_expiry(
+                    &id,
+                    Timestamp::now() + Duration::from_hours(1),
+                    Timestamp::now()
+                )
                 .await
                 .unwrap()
         );
         let descendant = ObjectId::new(id.context.clone(), "foo/bar".into());
         backend
-            .put_object(&descendant, &Metadata::default(), stream::single("payload"))
+            .put_object(
+                &descendant,
+                &Metadata::default(),
+                stream::single("payload"),
+                Timestamp::now(),
+            )
             .await
             .unwrap();
         let (_, _, payload) = backend
-            .get_object(&descendant, None)
+            .get_object(&descendant, Timestamp::now(), None)
             .await
             .unwrap()
             .unwrap();
@@ -902,7 +931,12 @@ mod tests {
             ..Default::default()
         };
         backend
-            .put_object(&id, &original_metadata, stream::single("original"))
+            .put_object(
+                &id,
+                &original_metadata,
+                stream::single("original"),
+                Timestamp::now(),
+            )
             .await
             .unwrap();
 
@@ -918,12 +952,16 @@ mod tests {
         ])
         .boxed();
         let error = backend
-            .put_object(&id, &replacement_metadata, replacement)
+            .put_object(&id, &replacement_metadata, replacement, Timestamp::now())
             .await
             .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::ClientStream);
 
-        let (metadata, _, payload) = backend.get_object(&id, None).await.unwrap().unwrap();
+        let (metadata, _, payload) = backend
+            .get_object(&id, Timestamp::now(), None)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(metadata.content_type, original_metadata.content_type);
         assert_eq!(stream::read_to_vec(payload).await.unwrap(), b"original");
 
@@ -936,7 +974,12 @@ mod tests {
         let backend = Arc::new(backend);
         let id = make_id();
         backend
-            .put_object(&id, &Metadata::default(), stream::single("original"))
+            .put_object(
+                &id,
+                &Metadata::default(),
+                stream::single("original"),
+                Timestamp::now(),
+            )
             .await
             .unwrap();
 
@@ -953,7 +996,7 @@ mod tests {
             let id = id.clone();
             async move {
                 backend
-                    .put_object(&id, &Metadata::default(), replacement)
+                    .put_object(&id, &Metadata::default(), replacement, Timestamp::now())
                     .await
             }
         });
@@ -963,7 +1006,11 @@ mod tests {
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
 
-        let (_, _, payload) = backend.get_object(&id, None).await.unwrap().unwrap();
+        let (_, _, payload) = backend
+            .get_object(&id, Timestamp::now(), None)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(stream::read_to_vec(payload).await.unwrap(), b"original");
 
         assert_eq!(draft_count(&backend, &id), 0);
@@ -981,13 +1028,22 @@ mod tests {
             ..Default::default()
         };
         backend
-            .put_object(&id, &metadata, stream::single("payload"))
+            .put_object(&id, &metadata, stream::single("payload"), Timestamp::now())
             .await
             .unwrap();
 
         let requested = old_expiry + Duration::from_hours(1) + Duration::from_nanos(999);
-        assert!(backend.set_expiry(&id, requested).await.unwrap());
-        let (updated, _, payload) = backend.get_object(&id, None).await.unwrap().unwrap();
+        assert!(
+            backend
+                .set_expiry(&id, requested, Timestamp::now())
+                .await
+                .unwrap()
+        );
+        let (updated, _, payload) = backend
+            .get_object(&id, Timestamp::now(), None)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(updated.expiration_policy, metadata.expiration_policy);
         assert_eq!(updated.custom, metadata.custom);
         assert_eq!(updated.time_expires, Some(requested));
@@ -1006,14 +1062,24 @@ mod tests {
             ..Default::default()
         };
         backend
-            .put_object(&id, &metadata, stream::single("expired"))
+            .put_object(&id, &metadata, stream::single("expired"), Timestamp::now())
             .await
             .unwrap();
 
-        assert!(backend.get_object(&id, None).await.unwrap().is_none());
+        assert!(
+            backend
+                .get_object(&id, Timestamp::now(), None)
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert!(
             !backend
-                .set_expiry(&id, Timestamp::now() + Duration::from_hours(1))
+                .set_expiry(
+                    &id,
+                    Timestamp::now() + Duration::from_hours(1),
+                    Timestamp::now()
+                )
                 .await
                 .unwrap()
         );
@@ -1039,11 +1105,15 @@ mod tests {
             ..Default::default()
         };
         backend
-            .put_object(&id, &metadata, stream::single("oh hai!"))
+            .put_object(&id, &metadata, stream::single("oh hai!"), Timestamp::now())
             .await
             .unwrap();
 
-        let read_metadata = backend.get_metadata(&id).await.unwrap().unwrap();
+        let read_metadata = backend
+            .get_metadata(&id, Timestamp::now())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(
             read_metadata,
             Metadata {
@@ -1065,7 +1135,7 @@ mod tests {
             scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
         });
 
-        let result = backend.get_metadata(&id).await.unwrap();
+        let result = backend.get_metadata(&id, Timestamp::now()).await.unwrap();
         assert!(result.is_none());
     }
 
@@ -1128,12 +1198,17 @@ mod tests {
                     part_number: NonZeroU32::new(1).unwrap(),
                     etag,
                 }],
+                Timestamp::now(),
             )
             .await
             .unwrap();
         assert!(result.is_none(), "expected no error on complete");
 
-        let (meta, _, body) = backend.get_object(&id, None).await.unwrap().unwrap();
+        let (meta, _, body) = backend
+            .get_object(&id, Timestamp::now(), None)
+            .await
+            .unwrap()
+            .unwrap();
         let payload: BytesMut = body.try_collect().await.unwrap();
         assert_eq!(payload.as_ref(), data);
         assert_eq!(meta.content_type, "text/plain".to_string());
@@ -1209,12 +1284,17 @@ mod tests {
                         etag: etag3,
                     },
                 ],
+                Timestamp::now(),
             )
             .await
             .unwrap();
         assert!(result.is_none());
 
-        let (_, _, body) = backend.get_object(&id, None).await.unwrap().unwrap();
+        let (_, _, body) = backend
+            .get_object(&id, Timestamp::now(), None)
+            .await
+            .unwrap()
+            .unwrap();
         let payload: BytesMut = body.try_collect().await.unwrap();
         assert_eq!(payload.as_ref(), b"aaaabbbbcc");
     }
@@ -1290,13 +1370,18 @@ mod tests {
 
         let payload = b"Hello, range requests!";
         backend
-            .put_object(&id, &metadata, stream::single(payload.to_vec()))
+            .put_object(
+                &id,
+                &metadata,
+                stream::single(payload.to_vec()),
+                Timestamp::now(),
+            )
             .await
             .unwrap();
 
         // Request bytes 7-11 → "range"
         let (_, content_range, body) = backend
-            .get_object(&id, Some(ByteRange::Bounded(7, 11)))
+            .get_object(&id, Timestamp::now(), Some(ByteRange::Bounded(7, 11)))
             .await
             .unwrap()
             .unwrap();
@@ -1317,13 +1402,18 @@ mod tests {
 
         let payload = b"Hello, range requests!";
         backend
-            .put_object(&id, &metadata, stream::single(payload.to_vec()))
+            .put_object(
+                &id,
+                &metadata,
+                stream::single(payload.to_vec()),
+                Timestamp::now(),
+            )
             .await
             .unwrap();
 
         // Request bytes 7- → "range requests!"
         let (_, content_range, body) = backend
-            .get_object(&id, Some(ByteRange::From(7)))
+            .get_object(&id, Timestamp::now(), Some(ByteRange::From(7)))
             .await
             .unwrap()
             .unwrap();
@@ -1344,13 +1434,18 @@ mod tests {
 
         let payload = b"Hello, range requests!";
         backend
-            .put_object(&id, &metadata, stream::single(payload.to_vec()))
+            .put_object(
+                &id,
+                &metadata,
+                stream::single(payload.to_vec()),
+                Timestamp::now(),
+            )
             .await
             .unwrap();
 
         // Request last 9 bytes → "requests!"
         let (_, content_range, body) = backend
-            .get_object(&id, Some(ByteRange::Last(9)))
+            .get_object(&id, Timestamp::now(), Some(ByteRange::Last(9)))
             .await
             .unwrap()
             .unwrap();
@@ -1370,11 +1465,19 @@ mod tests {
         let metadata = Metadata::default();
 
         backend
-            .put_object(&id, &metadata, stream::single(b"short".to_vec()))
+            .put_object(
+                &id,
+                &metadata,
+                stream::single(b"short".to_vec()),
+                Timestamp::now(),
+            )
             .await
             .unwrap();
 
-        match backend.get_object(&id, Some(ByteRange::From(100))).await {
+        match backend
+            .get_object(&id, Timestamp::now(), Some(ByteRange::From(100)))
+            .await
+        {
             Err(error) if matches!(error.kind(), ErrorKind::RangeNotSatisfiable { total: 5 }) => {}
             Err(other) => panic!("expected RangeNotSatisfiable, got: {other:?}"),
             Ok(_) => panic!("expected RangeNotSatisfiable, got Ok"),
@@ -1403,7 +1506,10 @@ mod tests {
 
         backend.abort_multipart(&id, &upload_id).await.unwrap();
 
-        let result = backend.get_object(&id, None).await.unwrap();
+        let result = backend
+            .get_object(&id, Timestamp::now(), None)
+            .await
+            .unwrap();
         assert!(result.is_none(), "object should not exist after abort");
     }
 
@@ -1435,6 +1541,7 @@ mod tests {
                     part_number: NonZeroU32::new(1).unwrap(),
                     etag: "wrong-etag".into(),
                 }],
+                Timestamp::now(),
             )
             .await
             .unwrap();
@@ -1450,6 +1557,7 @@ mod tests {
                     part_number: NonZeroU32::new(1).unwrap(),
                     etag,
                 }],
+                Timestamp::now(),
             )
             .await
             .unwrap();
@@ -1484,6 +1592,7 @@ mod tests {
                     part_number: NonZeroU32::new(99).unwrap(),
                     etag: "whatever".into(),
                 }],
+                Timestamp::now(),
             )
             .await
             .unwrap();
@@ -1499,6 +1608,7 @@ mod tests {
                     part_number: NonZeroU32::new(1).unwrap(),
                     etag,
                 }],
+                Timestamp::now(),
             )
             .await
             .unwrap();

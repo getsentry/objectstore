@@ -5,6 +5,7 @@ use crate::auth::AuthAwareService;
 use crate::endpoints::common::{ApiError, ApiResult};
 use crate::extractors::Xt;
 use crate::extractors::body::MeteredBody;
+use crate::extractors::request_time::RequestTime;
 use crate::state::ServiceState;
 use axum::body::Body;
 use axum::extract::{Query, State};
@@ -23,6 +24,7 @@ use objectstore_types::multipart::{
     CompleteErrorDetail, CompleteErrorResponse, CompleteRequest, CompleteSuccessResponse,
     InitiateResponse, ListPartsResponse, PartInfo, UploadPartResponse,
 };
+use objectstore_types::time::Timestamp;
 use serde::Deserialize;
 
 pub fn router() -> Router<ServiceState> {
@@ -74,8 +76,9 @@ async fn initiate_put(
     state: State<ServiceState>,
     Xt(id): Xt<ObjectId>,
     headers: HeaderMap,
+    RequestTime(access_time): RequestTime,
 ) -> ApiResult<Response> {
-    initiate_inner(service, state, id, headers).await
+    initiate_inner(service, state, id, headers, access_time).await
 }
 
 async fn initiate_post(
@@ -83,9 +86,10 @@ async fn initiate_post(
     state: State<ServiceState>,
     Xt(context): Xt<ObjectContext>,
     headers: HeaderMap,
+    RequestTime(access_time): RequestTime,
 ) -> ApiResult<Response> {
     let id = ObjectId::optional(context, None);
-    initiate_inner(service, state, id, headers).await
+    initiate_inner(service, state, id, headers, access_time).await
 }
 
 async fn initiate_inner(
@@ -93,9 +97,10 @@ async fn initiate_inner(
     State(state): State<ServiceState>,
     id: ObjectId,
     headers: HeaderMap,
+    access_time: Timestamp,
 ) -> ApiResult<Response> {
     // TODO: Update time_created in `complete`, when we have a Service API to mutate metadata.
-    let metadata = Metadata::from_insert_headers(&headers, "")?;
+    let metadata = Metadata::from_insert_headers(&headers, "", access_time)?;
 
     state
         .config
@@ -191,6 +196,7 @@ async fn complete(
     service: AuthAwareService,
     Xt(id): Xt<ObjectId>,
     Query(params): Query<UploadIdQuery>,
+    RequestTime(access_time): RequestTime,
     Json(body): Json<CompleteRequest>,
 ) -> ApiResult<Response> {
     let key = id.key().to_string();
@@ -209,7 +215,7 @@ async fn complete(
     // This operation can take a while at the service level, so we stream whitespace to the client
     // until we have a response body, to keep the connection from being terminated.
     let stream = async_stream::stream! {
-        let fut = service.complete_multipart(id, upload_id, parts);
+        let fut = service.complete_multipart(id, upload_id, parts, access_time);
         tokio::pin!(fut);
 
         let mut keepalive = tokio::time::interval(Duration::from_secs(1));

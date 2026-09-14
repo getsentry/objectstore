@@ -12,6 +12,11 @@
 //! | Offset query | `PUT …/{key}?session=<s>` with `Upload-Offset: *` | `204` + `Upload-Offset`, or `201` + `{"key"}` |
 //! | Cancel | `DELETE …/{key}?session=<s>` | `204` |
 
+#![expect(
+    clippy::too_many_arguments,
+    reason = "keep request extractors explicit"
+)]
+
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -26,9 +31,11 @@ use objectstore_types::resumable::{
     CompleteUploadResponse, CreateSessionResponse, HEADER_UPLOAD_OFFSET, UploadOffset,
     UploadProgress,
 };
+use objectstore_types::time::Timestamp;
 
 use crate::auth::AuthAwareService;
 use crate::endpoints::common::{ApiError, ApiResult};
+use crate::extractors::request_time::RequestTime;
 use crate::extractors::{Xt, body::MeteredBody};
 use crate::resumable::{Session, UploadLengthHeader, UploadOffsetHeader, require_empty_body};
 use crate::state::ServiceState;
@@ -39,8 +46,9 @@ pub(super) async fn create_session(
     State(state): State<ServiceState>,
     Xt(context): Xt<ObjectContext>,
     TypedHeader(UploadLengthHeader(total_length)): TypedHeader<UploadLengthHeader>,
-    content_length: Option<TypedHeader<ContentLength>>,
     headers: HeaderMap,
+    RequestTime(access_time): RequestTime,
+    content_length: Option<TypedHeader<ContentLength>>,
     MeteredBody(body): MeteredBody,
 ) -> ApiResult<Response> {
     create_session_for_id(
@@ -48,9 +56,10 @@ pub(super) async fn create_session(
         state,
         ObjectId::optional(context, None),
         total_length,
-        content_length.map(|TypedHeader(header)| header),
         headers,
         body,
+        access_time,
+        content_length.map(|TypedHeader(header)| header),
     )
     .await
 }
@@ -61,8 +70,9 @@ pub(super) async fn create_session_for_key(
     State(state): State<ServiceState>,
     Xt(id): Xt<ObjectId>,
     TypedHeader(UploadLengthHeader(total_length)): TypedHeader<UploadLengthHeader>,
-    content_length: Option<TypedHeader<ContentLength>>,
     headers: HeaderMap,
+    RequestTime(access_time): RequestTime,
+    content_length: Option<TypedHeader<ContentLength>>,
     MeteredBody(body): MeteredBody,
 ) -> ApiResult<Response> {
     create_session_for_id(
@@ -70,9 +80,10 @@ pub(super) async fn create_session_for_key(
         state,
         id,
         total_length,
-        content_length.map(|TypedHeader(header)| header),
         headers,
         body,
+        access_time,
+        content_length.map(|TypedHeader(header)| header),
     )
     .await
 }
@@ -86,12 +97,13 @@ async fn create_session_for_id(
     state: ServiceState,
     id: ObjectId,
     total_length: u64,
-    content_length: Option<ContentLength>,
     headers: HeaderMap,
     body: ClientStream,
+    access_time: Timestamp,
+    content_length: Option<ContentLength>,
 ) -> ApiResult<Response> {
     require_empty_body(content_length, body, "resumable session creation").await?;
-    let metadata = Metadata::from_insert_headers(&headers, "")?;
+    let metadata = Metadata::from_insert_headers(&headers, "", access_time)?;
 
     state
         .config

@@ -22,8 +22,8 @@ shape of every route.
 
 A request flows through several layers before reaching the storage service:
 
-1. **Middleware**: metrics collection, in-flight request tracking, panic
-   recovery, Sentry transaction tracing, distributed tracing.
+1. **Middleware**: request-time capture, metrics collection, in-flight request
+   tracking, panic recovery, Sentry transaction tracing, distributed tracing.
 2. **Extractors**: extracts object context from path parameters and then
    constructs a service wrapper that authorizes all operations on the target
    resource. Other endpoint-specific extractors also run at this stage.
