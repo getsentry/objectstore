@@ -2,11 +2,11 @@
 
 use std::fmt;
 use std::num::NonZeroU64;
-use std::time::SystemTime;
 
 use objectstore_types::metadata::Metadata;
 use objectstore_types::range::{ByteRange, ContentRange};
 use objectstore_types::resumable::UploadProgress;
+use objectstore_types::time::Timestamp;
 
 use bytes::Bytes;
 
@@ -67,7 +67,7 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// Returns `true` when the deadline was extended or was already at least as
     /// late as `expire_at`. Returns `false` when the object is absent, expired,
     /// manually expired, or changed concurrently.
-    async fn set_expiry(&self, id: &ObjectId, expire_at: SystemTime) -> Result<bool>;
+    async fn set_expiry(&self, id: &ObjectId, expire_at: Timestamp) -> Result<bool>;
 
     /// Deletes the object at the given path.
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse>;
@@ -309,12 +309,12 @@ pub struct Tombstone {
     pub target: ObjectId,
 
     /// The concrete deadline stored on the redirect.
-    pub time_expires: Option<SystemTime>,
+    pub time_expires: Option<Timestamp>,
 }
 
 impl Tombstone {
     /// Returns whether the tombstone has expired at the given time.
-    pub fn is_expired(&self, now: SystemTime) -> bool {
+    pub fn is_expired(&self, now: Timestamp) -> bool {
         self.time_expires.is_some_and(|deadline| deadline < now)
     }
 }
@@ -379,7 +379,7 @@ impl TieredWrite {
 #[derive(Clone, Debug)]
 pub enum TieredUpdate {
     /// Extend the deadline while preserving all other stored data.
-    SetExpiry(SystemTime),
+    SetExpiry(Timestamp),
 }
 
 /// Creates a reqwest client with required defaults.

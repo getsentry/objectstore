@@ -16,11 +16,11 @@
 
 use std::num::NonZeroU64;
 use std::sync::Arc;
-use std::time::SystemTime;
 
 use objectstore_types::metadata::Metadata;
 use objectstore_types::range::ByteRange;
 use objectstore_types::resumable::UploadProgress;
+use objectstore_types::time::Timestamp;
 
 use crate::backend::common::{
     Backend, DeleteResponse, GetResponse, MetadataResponse, MultipartUploadBackend, PutResponse,
@@ -90,7 +90,7 @@ impl Backend for CountingBackend {
         self.inner.get_metadata(id).await
     }
 
-    async fn set_expiry(&self, id: &ObjectId, expire_at: SystemTime) -> Result<bool> {
+    async fn set_expiry(&self, id: &ObjectId, expire_at: Timestamp) -> Result<bool> {
         count(&id.context.usecase);
         self.inner.set_expiry(id, expire_at).await
     }

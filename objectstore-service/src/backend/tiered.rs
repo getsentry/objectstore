@@ -120,6 +120,7 @@ use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
 use objectstore_types::metadata::Metadata;
 use objectstore_types::range::ByteRange;
+use objectstore_types::time::Timestamp;
 use sentry::{Hub, SentryFutureExt};
 use serde::{Deserialize, Serialize};
 
@@ -506,7 +507,7 @@ impl Backend for TieredStorage {
         Ok(result)
     }
 
-    async fn set_expiry(&self, id: &ObjectId, expire_at: SystemTime) -> Result<bool> {
+    async fn set_expiry(&self, id: &ObjectId, expire_at: Timestamp) -> Result<bool> {
         match self.inner.high_volume.get_tiered_metadata(id).await? {
             TieredMetadata::NotFound => Ok(false),
             TieredMetadata::Object(_) => {
@@ -616,9 +617,9 @@ impl std::fmt::Display for BackendChoice {
 ///
 /// This is used to ensure correct expiry if they ever drift.
 fn effective_expiry(
-    redirect_expiry: Option<SystemTime>,
-    blob_expiry: Option<SystemTime>,
-) -> Option<SystemTime> {
+    redirect_expiry: Option<Timestamp>,
+    blob_expiry: Option<Timestamp>,
+) -> Option<Timestamp> {
     match (redirect_expiry, blob_expiry) {
         (Some(redirect), Some(blob)) => Some(redirect.min(blob)),
         (Some(expiry), None) | (None, Some(expiry)) => Some(expiry),
@@ -1013,7 +1014,7 @@ mod tests {
             &self,
             inner: &InMemoryBackend,
             id: &ObjectId,
-            expire_at: SystemTime,
+            expire_at: Timestamp,
         ) -> Result<bool> {
             self.events.lock().unwrap().push(self.label);
             if self.reject {
@@ -1064,7 +1065,7 @@ mod tests {
         lt: &InMemoryBackend,
         id: &ObjectId,
         target: &ObjectId,
-        expiry: SystemTime,
+        expiry: Timestamp,
     ) {
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
@@ -1091,10 +1092,10 @@ mod tests {
         let (storage, hv, lt, events) = tiered_with_expiry_hooks(false, false);
         let id = make_id("tiered-expiry-order");
         let target = new_long_term_revision(&id);
-        let old_expiry = SystemTime::now() + Duration::from_mins(10);
+        let old_expiry = Timestamp::now() + Duration::from_mins(10);
         seed_redirect(&hv.inner, &lt.inner, &id, &target, old_expiry).await;
 
-        let requested = SystemTime::now() + Duration::from_hours(1);
+        let requested = Timestamp::now() + Duration::from_hours(1);
         assert!(storage.set_expiry(&id, requested).await.unwrap());
         assert_eq!(events.lock().unwrap().as_slice(), &["lt", "hv"]);
         assert_eq!(
@@ -1112,10 +1113,10 @@ mod tests {
         let (storage, hv, lt, events) = tiered_with_expiry_hooks(true, false);
         let id = make_id("tiered-hv-failure");
         let target = new_long_term_revision(&id);
-        let old_expiry = SystemTime::now() + Duration::from_mins(10);
+        let old_expiry = Timestamp::now() + Duration::from_mins(10);
         seed_redirect(&hv.inner, &lt.inner, &id, &target, old_expiry).await;
 
-        let requested = SystemTime::now() + Duration::from_hours(1);
+        let requested = Timestamp::now() + Duration::from_hours(1);
         assert!(!storage.set_expiry(&id, requested).await.unwrap());
         assert_eq!(events.lock().unwrap().as_slice(), &["lt", "hv"]);
         assert_eq!(
@@ -1144,13 +1145,13 @@ mod tests {
             &lt.inner,
             &id,
             &target,
-            SystemTime::now() + Duration::from_mins(10),
+            Timestamp::now() + Duration::from_mins(10),
         )
         .await;
 
         assert!(
             !storage
-                .set_expiry(&id, SystemTime::now() + Duration::from_hours(1))
+                .set_expiry(&id, Timestamp::now() + Duration::from_hours(1))
                 .await
                 .unwrap()
         );
@@ -1242,7 +1243,7 @@ mod tests {
         let metadata_in = Metadata {
             content_type: "image/png".into(),
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
-            time_expires: Some(SystemTime::now() + Duration::from_hours(1)),
+            time_expires: Some(Timestamp::now() + Duration::from_hours(1)),
             origin: Some("10.0.0.1".into()),
             ..Metadata::default()
         };
@@ -1906,7 +1907,7 @@ mod tests {
         let metadata = Metadata {
             content_type: "application/octet-stream".into(),
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
-            time_expires: Some(SystemTime::now() + Duration::from_hours(1)),
+            time_expires: Some(Timestamp::now() + Duration::from_hours(1)),
             ..Metadata::default()
         };
         let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB

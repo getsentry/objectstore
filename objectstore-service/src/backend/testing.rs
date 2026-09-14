@@ -36,10 +36,10 @@
 
 use std::fmt;
 use std::num::NonZeroU64;
-use std::time::SystemTime;
 
 use bytes::Bytes;
 use objectstore_types::metadata::Metadata;
+use objectstore_types::time::Timestamp;
 
 use objectstore_types::range::ByteRange;
 use objectstore_types::resumable::UploadProgress;
@@ -111,7 +111,7 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         &self,
         inner: &InMemoryBackend,
         id: &ObjectId,
-        expire_at: SystemTime,
+        expire_at: Timestamp,
     ) -> Result<bool> {
         inner.set_expiry(id, expire_at).await
     }
@@ -380,7 +380,7 @@ impl<H: Hooks> Backend for TestBackend<H> {
         self.hooks.get_metadata(&self.inner, id).await
     }
 
-    async fn set_expiry(&self, id: &ObjectId, expire_at: SystemTime) -> Result<bool> {
+    async fn set_expiry(&self, id: &ObjectId, expire_at: Timestamp) -> Result<bool> {
         self.hooks.set_expiry(&self.inner, id, expire_at).await
     }
 

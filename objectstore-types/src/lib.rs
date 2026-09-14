@@ -14,3 +14,4 @@ pub mod presign;
 pub mod range;
 pub mod resumable;
 pub mod scope;
+pub mod time;

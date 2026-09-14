@@ -8,6 +8,8 @@ use objectstore_inventory_tracker::{BoxError, InventoryTracker, Producer};
 use crate::change_stream::{
     ChangeStream, CostTrackerStreamConfig, SCOPE_ORGANIZATION, SCOPE_PROJECT, scope_id,
 };
+use objectstore_types::time::Timestamp;
+
 use crate::id::ObjectId;
 
 /// Reports through an [`InventoryTracker`], which hashes each [`ObjectId`] both to
@@ -71,25 +73,25 @@ where
     P: Producer + Clone + Send + Sync + 'static,
     P::Error: Into<BoxError> + Send + 'static,
 {
-    fn write(&self, id: &ObjectId, size: u64, expires_at: Option<SystemTime>) {
+    fn write(&self, id: &ObjectId, size: u64, expires_at: Option<Timestamp>) {
         let result = self.tracker.write(
             &id.as_storage_path().to_string(),
             id.usecase(),
             size,
             SystemTime::now(),
-            expires_at,
+            expires_at.map(Into::into),
             scope_id(id, SCOPE_ORGANIZATION),
             scope_id(id, SCOPE_PROJECT),
         );
         self.swallow("write", result);
     }
 
-    fn update(&self, id: &ObjectId, expires_at: Option<SystemTime>) {
+    fn update(&self, id: &ObjectId, expires_at: Option<Timestamp>) {
         let result = self.tracker.update(
             &id.as_storage_path().to_string(),
             id.usecase(),
             SystemTime::now(),
-            expires_at,
+            expires_at.map(Into::into),
             scope_id(id, SCOPE_ORGANIZATION),
             scope_id(id, SCOPE_PROJECT),
         );
@@ -204,7 +206,7 @@ mod tests {
         let id = object_id("attachments/org.1/project.2/objects/abc");
 
         stream.write(&id, 10, None);
-        stream.update(&id, Some(SystemTime::now()));
+        stream.update(&id, Some(Timestamp::now()));
         stream.delete(&id);
 
         let records = producer.records();
@@ -237,13 +239,14 @@ mod tests {
         let (producer, stream) = stream(1.0);
         let id = object_id("attachments/org.1/project.2/objects/abc");
 
-        stream.update(&id, Some(SystemTime::now()));
+        let expires = Timestamp::from_unix_micros(1_800_000_000_123_456).unwrap();
+        stream.update(&id, Some(expires));
         stream.delete(&id);
 
         let records = producer.records();
         assert_eq!(records[0].op_type, OpType::Update);
         assert_eq!(records[0].size, None);
-        assert!(records[0].expiration_time.is_some());
+        assert_eq!(records[0].expiration_time, Some(1_800_000_001_000_000));
         assert_eq!(records[1].op_type, OpType::Delete);
         assert_eq!(records[1].size, None);
         assert_eq!(records[1].expiration_time, None);

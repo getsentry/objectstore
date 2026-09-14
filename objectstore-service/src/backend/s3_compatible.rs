@@ -2,12 +2,12 @@
 
 use std::convert::Infallible;
 use std::error::Error as StdError;
-use std::time::SystemTime;
 use std::{fmt, io};
 
 use futures_util::{StreamExt, TryStreamExt};
 use objectstore_types::metadata::{HEADER_SIZE, Metadata};
 use objectstore_types::range::{ByteRange, ContentRange};
+use objectstore_types::time::Timestamp;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, Response, StatusCode};
 
@@ -144,7 +144,7 @@ fn metadata_to_gcs_headers(
 
     // GCS custom-time for lifecycle expiration
     if let Some(expires_at) = metadata.time_expires {
-        let expires_at = humantime::format_rfc3339_seconds(expires_at);
+        let expires_at = expires_at.as_rfc3339();
         headers.append(GCS_CUSTOM_TIME, expires_at.to_string().parse()?);
     }
     Ok(headers)
@@ -242,7 +242,7 @@ where
             None
         };
 
-        let access_time = SystemTime::now();
+        let access_time = Timestamp::now();
 
         // Filter already expired objects but leave them to garbage collection
         if metadata.is_expired(access_time) {
@@ -371,7 +371,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
-    async fn set_expiry(&self, id: &ObjectId, expire_at: SystemTime) -> Result<bool> {
+    async fn set_expiry(&self, id: &ObjectId, expire_at: Timestamp) -> Result<bool> {
         let Some((mut metadata, _, response)) = self.request_object(Method::HEAD, id, None).await?
         else {
             return Ok(false);
@@ -534,7 +534,7 @@ mod tests {
 
     #[test]
     fn metadata_to_gcs_headers_uses_time_expires() {
-        let expires = SystemTime::now() + Duration::from_hours(1);
+        let expires = Timestamp::now() + Duration::from_hours(1);
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
             time_expires: Some(expires),
@@ -543,7 +543,7 @@ mod tests {
 
         let headers = metadata_to_gcs_headers(&metadata, GCS_CUSTOM_PREFIX).unwrap();
         let custom_time = headers.get(GCS_CUSTOM_TIME).unwrap().to_str().unwrap();
-        let expected = humantime::format_rfc3339_seconds(expires).to_string();
+        let expected = expires.as_rfc3339().to_string();
         assert_eq!(custom_time, expected);
     }
 
@@ -606,7 +606,7 @@ mod tests {
         let id = make_id();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
-            time_expires: Some(SystemTime::now()),
+            time_expires: Some(Timestamp::now() - Duration::from_secs(1)),
             ..Default::default()
         };
 
@@ -630,7 +630,7 @@ mod tests {
         let id = make_id();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(0)),
-            time_expires: Some(SystemTime::now()),
+            time_expires: Some(Timestamp::now() - Duration::from_secs(1)),
             ..Default::default()
         };
 

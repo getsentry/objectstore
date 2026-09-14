@@ -32,7 +32,7 @@
 use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use bigtable_rs::bigtable::{BigTableConnection, Error as BigTableError, RowCell};
 use bigtable_rs::google::bigtable::v2::{self, mutation};
@@ -40,6 +40,7 @@ use bytes::Bytes;
 use futures_util::TryStreamExt;
 use objectstore_types::metadata::Metadata;
 use objectstore_types::range::{ByteRange, ContentRange};
+use objectstore_types::time::Timestamp;
 use serde::{Deserialize, Serialize};
 use tonic::Code;
 use tracing::Instrument;
@@ -243,9 +244,10 @@ fn legacy_tombstone_filter() -> v2::RowFilter {
 }
 
 /// Wraps `inner` so that it only matches live (non-expired) cells.
-fn live_row_filter(inner: v2::RowFilter) -> v2::RowFilter {
-    let now_micros = time_to_micros_saturating(SystemTime::now());
-
+///
+/// Uses the rounded access time directly. Legacy fractional cell timestamps can be excluded
+/// up to one second before their rounded metadata deadline; new writes are second-aligned.
+fn live_row_filter(inner: v2::RowFilter, now: Timestamp) -> v2::RowFilter {
     v2::RowFilter {
         filter: Some(v2::row_filter::Filter::Interleave(
             v2::row_filter::Interleave {
@@ -275,7 +277,7 @@ fn live_row_filter(inner: v2::RowFilter) -> v2::RowFilter {
                                 v2::RowFilter {
                                     filter: Some(v2::row_filter::Filter::TimestampRangeFilter(
                                         v2::TimestampRange {
-                                            start_timestamp_micros: now_micros,
+                                            start_timestamp_micros: now.as_micros() as i64,
                                             end_timestamp_micros: 0,
                                         },
                                     )),
@@ -305,7 +307,7 @@ fn tombstone_filter() -> v2::RowFilter {
             },
         )),
     };
-    live_row_filter(filter)
+    live_row_filter(filter, Timestamp::now())
 }
 
 /// Returns a [`MutatePredicate`] that matches any live tombstone row.
@@ -389,7 +391,7 @@ fn redirect_target_filter(target: &ObjectId, own_id: &ObjectId) -> v2::RowFilter
     };
 
     if target != own_id {
-        return live_row_filter(exact_match);
+        return live_row_filter(exact_match, Timestamp::now());
     }
 
     let empty_redirect_match = v2::RowFilter {
@@ -413,7 +415,7 @@ fn redirect_target_filter(target: &ObjectId, own_id: &ObjectId) -> v2::RowFilter
             },
         )),
     };
-    live_row_filter(filter)
+    live_row_filter(filter, Timestamp::now())
 }
 
 /// Returns a [`MutatePredicate`] that matches tombstones whose redirect resolves to either `old` or `new`.
@@ -460,8 +462,7 @@ fn optional_target_predicate(target: &ObjectId, own_id: &ObjectId) -> MutatePred
     })
 }
 
-fn exact_expiry_filter(expire_at: SystemTime) -> Result<v2::RowFilter> {
-    let start = system_time_to_micros(expire_at)?;
+fn exact_expiry_filter(start: i64) -> Result<v2::RowFilter> {
     let end = start.checked_add(1).ok_or_else(|| {
         Error::new(
             ErrorKind::Internal,
@@ -490,7 +491,7 @@ fn exact_expiry_filter(expire_at: SystemTime) -> Result<v2::RowFilter> {
 }
 
 /// Matches an inline row whose metadata cell has the observed expiry timestamp.
-fn inline_expiry_predicate(observed_expiry: SystemTime) -> Result<MutatePredicate> {
+fn inline_expiry_predicate(observed_expiry: i64) -> Result<MutatePredicate> {
     let inline_at_expiry = v2::RowFilter {
         filter: Some(v2::row_filter::Filter::Chain(v2::row_filter::Chain {
             filters: vec![
@@ -516,7 +517,7 @@ fn inline_expiry_predicate(observed_expiry: SystemTime) -> Result<MutatePredicat
 fn redirect_expiry_predicate(
     target: &ObjectId,
     own_id: &ObjectId,
-    observed_expiry: SystemTime,
+    observed_expiry: i64,
 ) -> Result<MutatePredicate> {
     Ok(MutatePredicate::Include(v2::RowFilter {
         filter: Some(v2::row_filter::Filter::Chain(v2::row_filter::Chain {
@@ -581,7 +582,7 @@ fn object_mutations(
 ) -> Result<([v2::Mutation; 3], u64)> {
     let (family, timestamp_micros) = match metadata.time_expires {
         None => (FAMILY_MANUAL, -1),
-        Some(deadline) => (FAMILY_GC, system_time_to_micros(deadline)?),
+        Some(deadline) => (FAMILY_GC, deadline.as_micros() as i64),
     };
 
     // Record the payload size in the metadata before persisting it.
@@ -631,13 +632,13 @@ fn row_size(path: &[u8], mutations: &[v2::Mutation]) -> u64 {
 /// then set the redirect cell.
 ///
 /// Used by both unconditional tombstone writes and the conditional expiry-extension paths.
-fn tombstone_mutations(tombstone: &Tombstone) -> Result<[v2::Mutation; 2]> {
+fn tombstone_mutations(tombstone: &Tombstone) -> [v2::Mutation; 2] {
     let (family, timestamp_micros) = match tombstone.time_expires {
         None => (FAMILY_MANUAL, -1),
-        Some(deadline) => (FAMILY_GC, system_time_to_micros(deadline)?),
+        Some(deadline) => (FAMILY_GC, deadline.as_micros() as i64),
     };
 
-    Ok([
+    [
         delete_row_mutation(),
         mutation(mutation::Mutation::SetCell(mutation::SetCell {
             family_name: family.to_owned(),
@@ -645,7 +646,7 @@ fn tombstone_mutations(tombstone: &Tombstone) -> Result<[v2::Mutation; 2]> {
             timestamp_micros,
             value: tombstone.target.as_storage_path().to_string().into_bytes(),
         })),
-    ])
+    ]
 }
 
 /// Subset of [`Metadata`] that indicates a row is a tombstone instead of a real object.
@@ -669,11 +670,15 @@ enum RowData {
     Object {
         metadata: Metadata,
         payload: Vec<u8>,
+        /// Original GC timestamp for exact CAS matching, including legacy fractional seconds.
+        expiry_micros: i64,
     },
     /// A tombstone row indicating the real payload lives on the long-term backend.
     Tombstone {
         target: Vec<u8>,
-        time_expires: Option<SystemTime>,
+        time_expires: Option<Timestamp>,
+        /// Original GC timestamp for exact CAS matching, including legacy fractional seconds.
+        expiry_micros: i64,
     },
 }
 
@@ -689,6 +694,7 @@ impl RowData {
         let mut redirect_detected = false;
         let mut redirect_target = Vec::new();
         let mut expire_at = None;
+        let mut expiry_micros = 0;
         let mut payload = Vec::new();
 
         for cell in cells {
@@ -697,7 +703,11 @@ impl RowData {
             // Only derive expiration from GC-family cells — manual-family cells
             // use server-assigned timestamps that don't represent expiration.
             if cell.family_name == FAMILY_GC {
-                expire_at = micros_to_time(cell.timestamp_micros);
+                expiry_micros = cell.timestamp_micros;
+                expire_at = Some(Timestamp::from_unix_micros(expiry_micros).context(
+                    ErrorKind::CorruptData,
+                    "decoding Bigtable expiration timestamp",
+                )?);
             }
 
             match cell.qualifier.as_slice() {
@@ -730,17 +740,22 @@ impl RowData {
             RowData::Tombstone {
                 target: redirect_target,
                 time_expires: expire_at,
+                expiry_micros,
             }
         } else {
             // Metadata may have been skipped by a payload-only internal read.
             let mut metadata = metadata_opt.unwrap_or_default();
             metadata.time_expires = expire_at;
-            RowData::Object { metadata, payload }
+            RowData::Object {
+                metadata,
+                payload,
+                expiry_micros,
+            }
         })
     }
 
     /// Returns the resolved expiration timestamp for this row, regardless of variant.
-    fn time_expires(&self) -> Option<SystemTime> {
+    fn time_expires(&self) -> Option<Timestamp> {
         match self {
             RowData::Object { metadata, .. } => metadata.time_expires,
             RowData::Tombstone { time_expires, .. } => *time_expires,
@@ -750,7 +765,7 @@ impl RowData {
     /// Returns `true` if this row is expired as of the given `time`.
     ///
     /// Only applies to rows with an expiration deadline.
-    fn expires_before(&self, time: SystemTime) -> bool {
+    fn expires_before(&self, time: Timestamp) -> bool {
         self.time_expires().is_some_and(|ts| ts < time)
     }
 }
@@ -860,7 +875,7 @@ impl BigTableBackend {
         };
 
         let row = RowData::from_cells(cells)?;
-        Ok(if row.expires_before(SystemTime::now()) {
+        Ok(if row.expires_before(Timestamp::now()) {
             None
         } else {
             Some(row)
@@ -985,7 +1000,7 @@ impl Backend for BigTableBackend {
         }
     }
 
-    async fn set_expiry(&self, id: &ObjectId, expire_at: SystemTime) -> Result<bool> {
+    async fn set_expiry(&self, id: &ObjectId, expire_at: Timestamp) -> Result<bool> {
         self.compare_and_update(id, None, TieredUpdate::SetExpiry(expire_at))
             .await
     }
@@ -1044,6 +1059,7 @@ impl HighVolumeBackend for BigTableBackend {
                 Some(RowData::Tombstone {
                     target,
                     time_expires,
+                    ..
                 }) => {
                     return Ok(Some(Tombstone {
                         target: parse_redirect_target(&target, id)?,
@@ -1080,11 +1096,14 @@ impl HighVolumeBackend for BigTableBackend {
             RowData::Tombstone {
                 target,
                 time_expires,
+                ..
             } => TieredGet::Tombstone(Tombstone {
                 target: parse_redirect_target(&target, id)?,
                 time_expires,
             }),
-            RowData::Object { metadata, payload } => {
+            RowData::Object {
+                metadata, payload, ..
+            } => {
                 let mut metadata = metadata;
                 let payload = Bytes::from(payload);
                 if metadata.size.is_none() {
@@ -1117,6 +1136,7 @@ impl HighVolumeBackend for BigTableBackend {
             RowData::Tombstone {
                 target,
                 time_expires,
+                ..
             } => TieredMetadata::Tombstone(Tombstone {
                 target: parse_redirect_target(&target, id)?,
                 time_expires,
@@ -1134,7 +1154,7 @@ impl HighVolumeBackend for BigTableBackend {
     ) -> Result<bool> {
         let TieredUpdate::SetExpiry(expire_at) = update;
         let path = id.as_storage_path().to_string().into_bytes();
-        let access_time = SystemTime::now();
+        let access_time = Timestamp::now();
 
         // Inline extension needs metadata and payload from the same read so a
         // successful conditional rewrite can preserve the payload verbatim.
@@ -1143,7 +1163,11 @@ impl HighVolumeBackend for BigTableBackend {
         };
 
         let (predicate, mutations): (_, Vec<_>) = match row {
-            RowData::Object { metadata, payload } => {
+            RowData::Object {
+                metadata,
+                payload,
+                expiry_micros,
+            } => {
                 if current.is_some() {
                     return Ok(false); // wrong row kind
                 }
@@ -1160,7 +1184,7 @@ impl HighVolumeBackend for BigTableBackend {
                 // Observing a live cell here is not atomic with wall-clock
                 // expiry or Bigtable GC. The conditional write may still lose
                 // to either and then returns false.
-                let predicate = inline_expiry_predicate(old_expiry)?;
+                let predicate = inline_expiry_predicate(expiry_micros)?;
                 let mut metadata = metadata;
                 metadata.time_expires = Some(expire_at);
                 let (mutations, _) = object_mutations(&path, metadata, payload)?;
@@ -1169,6 +1193,7 @@ impl HighVolumeBackend for BigTableBackend {
             RowData::Tombstone {
                 target,
                 time_expires,
+                expiry_micros,
             } => {
                 let Some(expected) = current else {
                     return Ok(false); // wrong row kind
@@ -1184,12 +1209,12 @@ impl HighVolumeBackend for BigTableBackend {
                     return Ok(true); // already satisfied
                 }
 
-                let predicate = redirect_expiry_predicate(expected, id, old_expiry)?;
+                let predicate = redirect_expiry_predicate(expected, id, expiry_micros)?;
                 let tombstone = Tombstone {
                     target,
                     time_expires: Some(expire_at),
                 };
-                (predicate, tombstone_mutations(&tombstone)?.into())
+                (predicate, tombstone_mutations(&tombstone).into())
             }
         };
 
@@ -1235,6 +1260,7 @@ impl HighVolumeBackend for BigTableBackend {
                 Some(RowData::Tombstone {
                     target,
                     time_expires,
+                    ..
                 }) => {
                     return Ok(Some(Tombstone {
                         target: parse_redirect_target(&target, id)?,
@@ -1274,9 +1300,9 @@ impl HighVolumeBackend for BigTableBackend {
         // Get the correct set of mutations to apply as well as the new expiration date.
         // If we're deleting something, `expires_at` is `None`. If we're writing something
         // without an expiration date, `expires_at` is `Some(None)`.
-        let (mutations, expires_at): (Vec<v2::Mutation>, Option<Option<SystemTime>>) = match write {
+        let (mutations, expires_at): (Vec<v2::Mutation>, Option<Option<Timestamp>>) = match write {
             TieredWrite::Tombstone(tombstone) => (
-                tombstone_mutations(&tombstone)?.into(),
+                tombstone_mutations(&tombstone).into(),
                 Some(tombstone.time_expires),
             ),
             TieredWrite::Object(m, p) => {
@@ -1310,38 +1336,6 @@ impl HighVolumeBackend for BigTableBackend {
 
         Ok(written)
     }
-}
-
-/// Converts a [`SystemTime`] to a microsecond-precision unix timestamp.
-///
-/// As required by BigTable, the resulting timestamp has millisecond precision, with the last digits
-/// at 0.
-fn system_time_to_micros(deadline: SystemTime) -> Result<i64> {
-    let millis = deadline
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .context(ErrorKind::Internal, "converting Bigtable timestamp")?
-        .as_millis();
-
-    (millis * 1000)
-        .try_into()
-        .context(ErrorKind::Internal, "converting Bigtable timestamp")
-}
-
-/// Converts a wall-clock time to Bigtable's microsecond timestamp, saturating at `i64::MAX`
-/// (unreachable until approximately year 294,247).
-fn time_to_micros_saturating(t: SystemTime) -> i64 {
-    let millis = t
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    i64::try_from(millis * 1000).unwrap_or(i64::MAX)
-}
-
-/// Converts a microsecond-precision unix timestamp to a `SystemTime`.
-fn micros_to_time(micros: i64) -> Option<SystemTime> {
-    let micros = u64::try_from(micros).ok()?;
-    let duration = Duration::from_micros(micros);
-    SystemTime::UNIX_EPOCH.checked_add(duration)
 }
 
 /// Retries a BigTable RPC on transient errors.
@@ -1455,10 +1449,6 @@ mod tests {
     use crate::id::ObjectContext;
     use crate::stream;
 
-    fn persisted_expiry(expire_at: SystemTime) -> SystemTime {
-        micros_to_time(system_time_to_micros(expire_at).unwrap()).unwrap()
-    }
-
     // NB: Most of these tests require a BigTable emulator running. This is done
     // automatically in CI.
     //
@@ -1506,7 +1496,7 @@ mod tests {
         id: &ObjectId,
         metadata: &Metadata,
         payload: &[u8],
-        now: SystemTime,
+        now: Timestamp,
     ) -> Result<()> {
         let path = id.as_storage_path().to_string().into_bytes();
         // Resolve `time_expires` from `now` (as `from_insert_headers` does) unless the test set
@@ -1526,7 +1516,7 @@ mod tests {
         tombstone: &Tombstone,
     ) -> Result<()> {
         let path = id.as_storage_path().to_string().into_bytes();
-        let mutations = tombstone_mutations(tombstone)?;
+        let mutations = tombstone_mutations(tombstone);
         backend.mutate(path, mutations, "test-setup").await?;
         Ok(())
     }
@@ -1536,7 +1526,7 @@ mod tests {
         backend: &BigTableBackend,
         id: &ObjectId,
         expiration_policy: ExpirationPolicy,
-        time_expires: Option<SystemTime>,
+        time_expires: Option<Timestamp>,
     ) -> Result<()> {
         let meta = if expiration_policy.is_manual() {
             r#"{"is_redirect_tombstone":true}"#.to_owned()
@@ -1549,8 +1539,8 @@ mod tests {
             (FAMILY_MANUAL, -1)
         } else {
             let t =
-                time_expires.unwrap_or(SystemTime::now() + expiration_policy.expires_in().unwrap());
-            (FAMILY_GC, time_to_micros_saturating(t))
+                time_expires.unwrap_or(Timestamp::now() + expiration_policy.expires_in().unwrap());
+            (FAMILY_GC, t.as_micros() as i64)
         };
 
         let path = id.as_storage_path().to_string().into_bytes();
@@ -1602,7 +1592,7 @@ mod tests {
         let id = make_id();
         let metadata = Metadata {
             content_type: "text/plain".into(),
-            time_created: Some(SystemTime::now()),
+            time_created: Some(Timestamp::now()),
             custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
             ..Default::default()
         };
@@ -1631,23 +1621,16 @@ mod tests {
 
         let id = make_id();
         let ttl = Duration::from_hours(2 * 24);
-        let expires = SystemTime::now() + ttl;
+        let expires = Timestamp::now() + ttl;
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToLive(ttl),
             time_expires: Some(expires),
             ..Default::default()
         };
-        create_object(&backend, &id, &metadata, b"data", SystemTime::now()).await?;
+        create_object(&backend, &id, &metadata, b"data", Timestamp::now()).await?;
 
         let meta = backend.get_metadata(&id).await?.unwrap();
-        // Bigtable stores the deadline as the GC cell timestamp at millisecond precision.
-        let stored_ms = meta
-            .time_expires
-            .unwrap()
-            .duration_since(SystemTime::UNIX_EPOCH)?
-            .as_millis();
-        let expected_ms = expires.duration_since(SystemTime::UNIX_EPOCH)?.as_millis();
-        assert_eq!(stored_ms, expected_ms);
+        assert_eq!(meta.time_expires, Some(expires));
 
         Ok(())
     }
@@ -1674,7 +1657,7 @@ mod tests {
             custom: BTreeMap::from_iter([("invalid".into(), "invalid".into())]),
             ..Default::default()
         };
-        create_object(&backend, &id, &first_metadata, b"hello", SystemTime::now()).await?;
+        create_object(&backend, &id, &first_metadata, b"hello", Timestamp::now()).await?;
 
         let second_metadata = Metadata {
             custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
@@ -1698,7 +1681,7 @@ mod tests {
 
         let id = make_id();
         let metadata = Metadata::default();
-        create_object(&backend, &id, &metadata, b"hello", SystemTime::now()).await?;
+        create_object(&backend, &id, &metadata, b"hello", Timestamp::now()).await?;
         backend.delete_object(&id).await?;
 
         assert!(backend.get_object(&id, None).await?.is_none());
@@ -1711,16 +1694,26 @@ mod tests {
     async fn test_set_expiry() -> Result<()> {
         let backend = create_test_backend().await?;
         let tti = Duration::from_hours(2 * 24);
-        let metadata = Metadata {
+        let mut metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToIdle(tti),
             ..Default::default()
         };
 
         // Backdate `now` so the written expiry (past_now + tti) is stale but not expired.
-        let past_now = SystemTime::now() - tti + Duration::from_mins(1);
+        let past_now = Timestamp::now() - tti + Duration::from_mins(1);
 
         let id = make_id();
-        create_object(&backend, &id, &metadata, b"hello, world", past_now).await?;
+        metadata.time_expires = Some(past_now + tti);
+        let path = id.as_storage_path().to_string().into_bytes();
+        let (mutations, _) = object_mutations(&path, metadata, b"hello, world".to_vec())?;
+        // Simulate a legacy fractional deadline. Renewal must match the raw GC timestamp.
+        let mutations = mutations.map(|mut mutation| {
+            if let Some(mutation::Mutation::SetCell(cell)) = &mut mutation.mutation {
+                cell.timestamp_micros -= 500_000;
+            }
+            mutation
+        });
+        backend.mutate(path, mutations, "test-setup").await?;
 
         let (observed, _, _) = backend.get_object(&id, None).await?.unwrap();
         let observed_expiry = observed.time_expires.unwrap();
@@ -1730,11 +1723,11 @@ mod tests {
             "backend reads must not renew TTI"
         );
 
-        let requested = SystemTime::now() + tti;
+        let requested = Timestamp::now() + tti;
         assert!(backend.set_expiry(&id, requested).await?);
         assert_eq!(
             backend.get_metadata(&id).await?.unwrap().time_expires,
-            Some(persisted_expiry(requested))
+            Some(requested)
         );
         let (_, _, stream) = backend.get_object(&id, None).await?.unwrap();
         let payload = stream::read_to_vec(stream).await?;
@@ -1749,24 +1742,24 @@ mod tests {
         let missing = make_id();
         assert!(
             !backend
-                .set_expiry(&missing, SystemTime::now() + Duration::from_hours(2))
+                .set_expiry(&missing, Timestamp::now() + Duration::from_hours(2))
                 .await?
         );
 
         let id = make_id();
-        let observed_expiry = persisted_expiry(SystemTime::now() + Duration::from_hours(1));
+        let observed_expiry = Timestamp::now() + Duration::from_hours(1);
         let original = Metadata {
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
             time_expires: Some(observed_expiry),
             ..Default::default()
         };
-        create_object(&backend, &id, &original, b"original", SystemTime::now()).await?;
+        create_object(&backend, &id, &original, b"original", Timestamp::now()).await?;
 
         let path = id.as_storage_path().to_string().into_bytes();
         let mut extended = original.clone();
         extended.time_expires = Some(observed_expiry + Duration::from_hours(1));
         let (extension, _) = object_mutations(&path, extended, b"original".to_vec())?;
-        let predicate = inline_expiry_predicate(observed_expiry)?;
+        let predicate = inline_expiry_predicate(observed_expiry.as_micros() as i64)?;
 
         let mut replacement = original.clone();
         replacement.time_expires = Some(observed_expiry + Duration::from_mins(1));
@@ -1775,7 +1768,7 @@ mod tests {
             &id,
             &replacement,
             b"replacement",
-            SystemTime::now(),
+            Timestamp::now(),
         )
         .await?;
         assert!(
@@ -1794,16 +1787,19 @@ mod tests {
         let id = make_id();
         let target = ObjectId::random(id.context().clone());
         let wrong_target = ObjectId::random(id.context().clone());
-        let old_expiry = persisted_expiry(SystemTime::now() + Duration::from_hours(1));
-        create_tombstone(
-            &backend,
-            &id,
-            &Tombstone {
-                target: target.clone(),
-                time_expires: Some(old_expiry),
-            },
-        )
-        .await?;
+        let old_expiry = Timestamp::now() + Duration::from_hours(1);
+        let path = id.as_storage_path().to_string().into_bytes();
+        let mutations = tombstone_mutations(&Tombstone {
+            target: target.clone(),
+            time_expires: Some(old_expiry),
+        })
+        .map(|mut mutation| {
+            if let Some(mutation::Mutation::SetCell(cell)) = &mut mutation.mutation {
+                cell.timestamp_micros -= 500_000;
+            }
+            mutation
+        });
+        backend.mutate(path, mutations, "test-setup").await?;
 
         let later = old_expiry + Duration::from_hours(2);
         assert!(
@@ -1844,9 +1840,10 @@ mod tests {
         let id = make_id();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
+            time_expires: Some(Timestamp::now() - Duration::from_secs(1)),
             ..Default::default()
         };
-        create_object(&backend, &id, &metadata, b"hello, world", SystemTime::now()).await?;
+        create_object(&backend, &id, &metadata, b"hello, world", Timestamp::now()).await?;
 
         assert!(backend.get_object(&id, None).await?.is_none());
 
@@ -1863,9 +1860,10 @@ mod tests {
         let id = make_id();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(0)),
+            time_expires: Some(Timestamp::now() - Duration::from_secs(1)),
             ..Default::default()
         };
-        create_object(&backend, &id, &metadata, b"hello, world", SystemTime::now()).await?;
+        create_object(&backend, &id, &metadata, b"hello, world", Timestamp::now()).await?;
 
         assert!(backend.get_object(&id, None).await?.is_none());
 
@@ -1902,7 +1900,7 @@ mod tests {
             custom: BTreeMap::from_iter([("k".into(), "v".into())]),
             ..Default::default()
         };
-        create_object(&backend, &id, &put_meta, b"payload", SystemTime::now()).await?;
+        create_object(&backend, &id, &put_meta, b"payload", Timestamp::now()).await?;
 
         let TieredGet::Object(obj_meta, _, obj_stream) =
             backend.get_tiered_object(&id, None).await?
@@ -1962,7 +1960,7 @@ mod tests {
 
         // object: put_non_tombstone on existing object replaces payload, returns None.
         let id = make_id();
-        create_object(&backend, &id, &metadata, b"old", SystemTime::now()).await?;
+        create_object(&backend, &id, &metadata, b"old", Timestamp::now()).await?;
         let result = backend
             .put_non_tombstone(&id, &metadata, Bytes::from_static(b"new"))
             .await?;
@@ -2013,7 +2011,7 @@ mod tests {
         // object
         let id = make_id();
         let metadata = Metadata::default();
-        create_object(&backend, &id, &metadata, b"hello, world", SystemTime::now()).await?;
+        create_object(&backend, &id, &metadata, b"hello, world", Timestamp::now()).await?;
         assert_eq!(backend.delete_non_tombstone(&id).await?, None);
         assert!(backend.get_object(&id, None).await?.is_none());
 
@@ -2051,9 +2049,7 @@ mod tests {
 
         let hv_id = make_id();
         let lt_id = ObjectId::random(hv_id.context().clone());
-        let time_expires = Some(persisted_expiry(
-            SystemTime::now() + Duration::from_hours(1),
-        ));
+        let time_expires = Some(Timestamp::now() + Duration::from_hours(1));
         let tombstone = Tombstone {
             target: lt_id.clone(),
             time_expires,
@@ -2257,7 +2253,7 @@ mod tests {
         let id2 = make_id();
         let fake_lt_id = ObjectId::random(id2.context().clone());
         let metadata = Metadata::default();
-        create_object(&backend, &id2, &metadata, b"data", SystemTime::now()).await?;
+        create_object(&backend, &id2, &metadata, b"data", Timestamp::now()).await?;
         let deleted = backend
             .compare_and_write(&id2, Some(&fake_lt_id), TieredWrite::Delete)
             .await?;
@@ -2315,7 +2311,7 @@ mod tests {
         let tti = Duration::from_hours(2 * 24);
 
         // Place time_expires near expiry but still in the future.
-        let old_deadline = persisted_expiry(SystemTime::now() + Duration::from_mins(1));
+        let old_deadline = Timestamp::now() + Duration::from_mins(1);
         write_legacy_tombstone(
             &backend,
             &id,
@@ -2336,7 +2332,7 @@ mod tests {
             Some(old_deadline)
         );
 
-        let requested = SystemTime::now() + tti;
+        let requested = Timestamp::now() + tti;
         assert!(
             backend
                 .compare_and_update(&id, Some(&id), TieredUpdate::SetExpiry(requested))
@@ -2439,14 +2435,14 @@ mod tests {
         let old_lt_id = ObjectId::random(id.context().clone());
         let old_tombstone = Tombstone {
             target: old_lt_id,
-            time_expires: Some(SystemTime::now() - Duration::from_secs(1)),
+            time_expires: Some(Timestamp::now() - Duration::from_secs(1)),
         };
         create_tombstone(&backend, &id, &old_tombstone).await?;
 
         let new_lt_id = ObjectId::random(id.context().clone());
         let new_tombstone = Tombstone {
             target: new_lt_id.clone(),
-            time_expires: Some(SystemTime::now() + Duration::from_hours(1)),
+            time_expires: Some(Timestamp::now() + Duration::from_hours(1)),
         };
         let committed = backend
             .compare_and_write(&id, None, TieredWrite::Tombstone(new_tombstone))
@@ -2474,7 +2470,7 @@ mod tests {
         let lt_id = ObjectId::random(id.context().clone());
         let tombstone = Tombstone {
             target: lt_id,
-            time_expires: Some(SystemTime::now() - Duration::from_secs(1)),
+            time_expires: Some(Timestamp::now() - Duration::from_secs(1)),
         };
         create_tombstone(&backend, &id, &tombstone).await?;
 
@@ -2617,12 +2613,12 @@ mod tests {
     #[test]
     fn row_size_is_nonzero_for_tombstones() {
         let path = b"attachments/org.1/objects/abc";
-        let time_expires = SystemTime::now() + Duration::from_secs(60);
+        let time_expires = Timestamp::now() + Duration::from_secs(60);
         let tombstone = Tombstone {
             target: ObjectId::from_storage_path("attachments/org.1/objects/abc/0199").unwrap(),
             time_expires: Some(time_expires),
         };
-        let mutations = tombstone_mutations(&tombstone).unwrap();
+        let mutations = tombstone_mutations(&tombstone);
 
         assert_eq!(mutations.len(), 2);
         let set_cell = mutations[1].mutation.as_ref().unwrap();
@@ -2631,10 +2627,7 @@ mod tests {
         };
         assert_eq!(set_cell.family_name, FAMILY_GC);
         assert_eq!(set_cell.column_qualifier, COLUMN_REDIRECT);
-        assert_eq!(
-            set_cell.timestamp_micros,
-            system_time_to_micros(time_expires).unwrap()
-        );
+        assert_eq!(set_cell.timestamp_micros, time_expires.as_micros() as i64);
         assert!(row_size(path, &mutations) > path.len() as u64);
     }
 
@@ -2645,7 +2638,7 @@ mod tests {
         let id = make_id();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(3600)),
-            time_expires: Some(SystemTime::now() + Duration::from_secs(3600)),
+            time_expires: Some(Timestamp::now() + Duration::from_secs(3600)),
             ..Default::default()
         };
 
@@ -2685,7 +2678,7 @@ mod tests {
         let id = make_id();
         let tombstone = Tombstone {
             target: ObjectId::random(id.context().clone()),
-            time_expires: Some(SystemTime::now() - Duration::from_secs(1)),
+            time_expires: Some(Timestamp::now() - Duration::from_secs(1)),
         };
         create_tombstone(&backend, &id, &tombstone).await?;
         assert_eq!(
@@ -2701,9 +2694,10 @@ mod tests {
         let id = make_id();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
+            time_expires: Some(Timestamp::now() - Duration::from_secs(1)),
             ..Default::default()
         };
-        create_object(&backend, &id, &metadata, b"gone", SystemTime::now()).await?;
+        create_object(&backend, &id, &metadata, b"gone", Timestamp::now()).await?;
         producer.clear();
         assert_eq!(backend.delete_non_tombstone(&id).await?, None);
         let records = producer.records();
@@ -2722,7 +2716,7 @@ mod tests {
 
         let tombstone = Tombstone {
             target: target.clone(),
-            time_expires: Some(SystemTime::now() + Duration::from_secs(3600)),
+            time_expires: Some(Timestamp::now() + Duration::from_secs(3600)),
         };
         let written = backend
             .compare_and_write(&id, None, TieredWrite::Tombstone(tombstone))
@@ -2748,7 +2742,7 @@ mod tests {
         let id = make_id();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(3600)),
-            time_expires: Some(SystemTime::now() + Duration::from_secs(1)),
+            time_expires: Some(Timestamp::now() + Duration::from_secs(1)),
             ..Default::default()
         };
 
@@ -2762,7 +2756,7 @@ mod tests {
         producer.clear();
 
         backend
-            .set_expiry(&id, SystemTime::now() + Duration::from_secs(3600))
+            .set_expiry(&id, Timestamp::now() + Duration::from_secs(3600))
             .await?;
 
         let records = producer.records();

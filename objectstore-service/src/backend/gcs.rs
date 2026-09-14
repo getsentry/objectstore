@@ -13,6 +13,7 @@ use gcp_auth::TokenProvider;
 use objectstore_types::headers;
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use objectstore_types::range::{ByteRange, ContentRange};
+use objectstore_types::time::{Rfc3339Timestamp, Timestamp};
 use reqwest::header::HeaderName;
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode, Url, header, multipart};
 use serde::{Deserialize, Serialize};
@@ -150,12 +151,8 @@ struct GcsObject {
     pub content_encoding: Option<String>,
 
     /// Custom time stamp used for time-based expiration.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "humantime_serde"
-    )]
-    pub custom_time: Option<SystemTime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_time: Option<Rfc3339Timestamp>,
 
     /// The `Content-Length` of the data in bytes. GCS returns this as a string.
     ///
@@ -164,12 +161,8 @@ struct GcsObject {
     pub size: Option<String>,
 
     /// Timestamp of when this object was created.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "humantime_serde"
-    )]
-    pub time_created: Option<SystemTime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_created: Option<Rfc3339Timestamp>,
 
     /// User-provided metadata, including our built-in metadata.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -197,9 +190,9 @@ impl GcsObject {
     }
 
     /// Returns `true` if the object is expired at the given access time.
-    pub fn is_expired(&self, access_time: SystemTime) -> bool {
+    pub fn is_expired(&self, access_time: Timestamp) -> bool {
         match self.custom_time {
-            Some(expires_at) => access_time > expires_at,
+            Some(expires_at) => access_time > expires_at.into_inner(),
             None => false,
         }
     }
@@ -216,7 +209,7 @@ impl GcsObject {
             size: metadata.size.map(|size| size.to_string()),
             content_encoding: None,
             custom_time: None,
-            time_created: metadata.time_created,
+            time_created: metadata.time_created.map(Timestamp::as_rfc3339),
             metadata: BTreeMap::new(),
             generation: String::new(),
             metageneration: String::new(),
@@ -225,7 +218,7 @@ impl GcsObject {
         // For time-based expiration, set the `customTime` field. The bucket must have a
         // `daysSinceCustomTime` lifecycle rule configured to delete objects with this field set.
         // This rule automatically skips objects without `customTime` set.
-        gcs_object.custom_time = metadata.time_expires;
+        gcs_object.custom_time = metadata.time_expires.map(Timestamp::as_rfc3339);
 
         if let Some(compression) = metadata.compression {
             gcs_object.content_encoding = Some(compression.to_string());
@@ -299,7 +292,7 @@ impl GcsObject {
             .map(|size| size.parse())
             .transpose()
             .context(ErrorKind::CorruptData, "decoding GCS object size")?;
-        let time_created = self.time_created;
+        let time_created = self.time_created.map(Rfc3339Timestamp::into_inner);
 
         // At this point, all built-in metadata should have been removed from self.metadata.
         let mut custom = BTreeMap::new();
@@ -326,7 +319,7 @@ impl GcsObject {
             size,
             custom,
             time_created,
-            time_expires: self.custom_time,
+            time_expires: self.custom_time.map(Rfc3339Timestamp::into_inner),
         })
     }
 }
@@ -406,7 +399,7 @@ fn metadata_to_gcs_headers(metadata: &Metadata) -> Result<header::HeaderMap> {
     let mut headers = header::HeaderMap::new();
 
     if let Some(custom_time) = metadata.time_expires {
-        let formatted = humantime::format_rfc3339_seconds(custom_time);
+        let formatted = custom_time.as_rfc3339();
         headers.insert(
             HeaderName::from_static("x-goog-custom-time"),
             formatted
@@ -709,7 +702,7 @@ impl GcsBackend {
         };
 
         // Filter already expired objects but leave them to garbage collection
-        let access_time = SystemTime::now();
+        let access_time = Timestamp::now();
         if gcs_metadata.is_expired(access_time) {
             objectstore_log::debug!("Object found but past expiry");
             return Ok(None);
@@ -725,14 +718,13 @@ impl GcsBackend {
     async fn update_custom_time(
         &self,
         object_url: Url,
-        custom_time: SystemTime,
+        custom_time: Timestamp,
         generations: GcsGenerations<'_>,
     ) -> Result<bool> {
         #[derive(Debug, Serialize)]
         #[serde(rename_all = "camelCase")]
         struct CustomTimeRequest {
-            #[serde(with = "humantime_serde")]
-            custom_time: SystemTime,
+            custom_time: Rfc3339Timestamp,
         }
 
         let mut object_url = object_url;
@@ -741,6 +733,7 @@ impl GcsBackend {
             .append_pair("ifGenerationMatch", generations.0)
             .append_pair("ifMetagenerationMatch", generations.1);
 
+        let custom_time = custom_time.as_rfc3339();
         self.with_retry("update_custom_time", || async {
             let response = self
                 .request(Method::PATCH, object_url.clone())
@@ -777,7 +770,7 @@ impl GcsBackend {
         id: &ObjectId,
         stored_size: Option<u64>,
         metadata_size: u64,
-        expires_at: Option<SystemTime>,
+        expires_at: Option<Timestamp>,
     ) {
         match stored_size {
             Some(stored_size) => {
@@ -1063,7 +1056,7 @@ impl Backend for GcsBackend {
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
-    async fn set_expiry(&self, id: &ObjectId, expire_at: SystemTime) -> Result<bool> {
+    async fn set_expiry(&self, id: &ObjectId, expire_at: Timestamp) -> Result<bool> {
         let object_url = self.object_url(id)?;
         let Some(object) = self.get_gcs_metadata(&object_url).await? else {
             return Ok(false);
@@ -1071,7 +1064,7 @@ impl Backend for GcsBackend {
         let Some(current_expiry) = object.custom_time else {
             return Ok(false);
         };
-        if current_expiry >= expire_at {
+        if current_expiry.into_inner() >= expire_at {
             return Ok(true); // already satisfied
         }
 
@@ -1230,7 +1223,8 @@ impl Backend for GcsBackend {
         let progress = range_response_to_upload_progress(&session, response).await?;
         if let GcsUploadProgress::Complete(ref object) = progress {
             let stored_size = object.size.as_deref().and_then(|size| size.parse().ok());
-            self.report_object_write(id, stored_size, object.metadata_size(), object.custom_time);
+            let expires_at = object.custom_time.map(Rfc3339Timestamp::into_inner);
+            self.report_object_write(id, stored_size, object.metadata_size(), expires_at);
         }
         Ok(progress.into())
     }
@@ -1257,12 +1251,8 @@ impl Backend for GcsBackend {
             // reading its response, so completion observed here must be reported too.
             if let GcsUploadProgress::Complete(ref object) = progress {
                 let stored_size = object.size.as_deref().and_then(|size| size.parse().ok());
-                self.report_object_write(
-                    id,
-                    stored_size,
-                    object.metadata_size(),
-                    object.custom_time,
-                );
+                let expires_at = object.custom_time.map(Rfc3339Timestamp::into_inner);
+                self.report_object_write(id, stored_size, object.metadata_size(), expires_at);
             }
             Ok(progress.into())
         })
@@ -2254,7 +2244,7 @@ mod tests {
             origin: Some("203.0.113.42".into()),
             filename: Some("hello.txt".into()),
             custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
-            time_created: Some(SystemTime::now()),
+            time_created: Some(Timestamp::now()),
             time_expires: None,
             size: None,
         };
@@ -2323,17 +2313,21 @@ mod tests {
 
     #[test]
     fn from_metadata_uses_provided_time_expires() {
-        let expires = SystemTime::now() + Duration::from_hours(1);
+        let created = Timestamp::now();
+        let expires = created + Duration::from_hours(1);
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
+            time_created: Some(created),
             time_expires: Some(expires),
             ..Default::default()
         };
 
         let gcs_object = GcsObject::from_metadata(&metadata);
-        assert_eq!(gcs_object.custom_time, Some(expires));
+        let custom_time = gcs_object.custom_time.map(Rfc3339Timestamp::into_inner);
+        assert_eq!(custom_time, Some(expires));
 
         let roundtripped = gcs_object.into_metadata().unwrap();
+        assert_eq!(roundtripped.time_created, Some(created));
         assert_eq!(roundtripped.time_expires, Some(expires));
     }
 
@@ -2420,7 +2414,7 @@ mod tests {
         let id = make_id();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
-            time_expires: Some(SystemTime::now()),
+            time_expires: Some(Timestamp::now() - Duration::from_secs(1)),
             ..Default::default()
         };
 
@@ -2444,7 +2438,7 @@ mod tests {
         let id = make_id();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(0)),
-            time_expires: Some(SystemTime::now()),
+            time_expires: Some(Timestamp::now() - Duration::from_secs(1)),
             ..Default::default()
         };
 
@@ -2502,7 +2496,7 @@ mod tests {
         let metadata = Metadata {
             content_type: "text/plain".into(),
             expiration_policy: ExpirationPolicy::TimeToIdle(tti),
-            time_expires: Some(SystemTime::now() + tti),
+            time_expires: Some(Timestamp::now() + tti),
             ..Default::default()
         };
 
@@ -2512,7 +2506,7 @@ mod tests {
 
         // Backdate custom_time while keeping the object live.
         let object_url = backend.object_url(&id)?;
-        let old_deadline = SystemTime::now() + Duration::from_mins(1);
+        let old_deadline = Timestamp::now() + Duration::from_mins(1);
         let generations = get_gcs_generations(&backend, object_url.clone()).await?;
         backend
             .update_custom_time(object_url, old_deadline, (&generations.0, &generations.1))
@@ -2526,7 +2520,7 @@ mod tests {
             Some(pre_expiry)
         );
 
-        let requested = SystemTime::now() + tti;
+        let requested = Timestamp::now() + tti;
         assert!(backend.set_expiry(&id, requested).await?);
         assert_eq!(
             backend.get_metadata(&id).await?.unwrap().time_expires,
@@ -2547,7 +2541,7 @@ mod tests {
         let id = make_id();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
-            time_expires: Some(SystemTime::now() + Duration::from_mins(10)),
+            time_expires: Some(Timestamp::now() + Duration::from_mins(10)),
             ..Default::default()
         };
         backend
@@ -2560,7 +2554,7 @@ mod tests {
             backend
                 .update_custom_time(
                     object_url.clone(),
-                    SystemTime::now() + Duration::from_hours(1),
+                    Timestamp::now() + Duration::from_hours(1),
                     (&generations.0, &generations.1),
                 )
                 .await?
@@ -2569,7 +2563,7 @@ mod tests {
             !backend
                 .update_custom_time(
                     object_url.clone(),
-                    SystemTime::now() + Duration::from_hours(2),
+                    Timestamp::now() + Duration::from_hours(2),
                     (&generations.0, &generations.1),
                 )
                 .await?
@@ -2580,7 +2574,7 @@ mod tests {
             !backend
                 .update_custom_time(
                     object_url,
-                    SystemTime::now() + Duration::from_hours(2),
+                    Timestamp::now() + Duration::from_hours(2),
                     (&generations.0, &generations.1),
                 )
                 .await?
@@ -2965,7 +2959,7 @@ mod tests {
         let id = make_id();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
-            time_expires: Some(SystemTime::now()),
+            time_expires: Some(Timestamp::now() - Duration::from_secs(1)),
             ..Default::default()
         };
 
@@ -2983,7 +2977,7 @@ mod tests {
         let id = make_id();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(0)),
-            time_expires: Some(SystemTime::now()),
+            time_expires: Some(Timestamp::now() - Duration::from_secs(1)),
             ..Default::default()
         };
 
@@ -3033,7 +3027,7 @@ mod tests {
         let payload = vec![b'x'; 4096];
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(3600)),
-            time_expires: Some(SystemTime::now() + Duration::from_secs(3600)),
+            time_expires: Some(Timestamp::now() + Duration::from_secs(3600)),
             ..Default::default()
         };
 
@@ -3066,7 +3060,7 @@ mod tests {
         let id = make_id();
         let payload = b"resumable payload".to_vec();
         let metadata = Metadata {
-            time_expires: Some(SystemTime::now() + Duration::from_secs(3600)),
+            time_expires: Some(Timestamp::now() + Duration::from_secs(3600)),
             ..Default::default()
         };
         let token = backend
@@ -3230,7 +3224,7 @@ mod tests {
         let id = make_id();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(3600)),
-            time_expires: Some(SystemTime::now() + Duration::from_secs(1)),
+            time_expires: Some(Timestamp::now() + Duration::from_secs(1)),
             ..Default::default()
         };
 
@@ -3247,7 +3241,7 @@ mod tests {
         assert!(producer.records().is_empty());
 
         backend
-            .set_expiry(&id, SystemTime::now() + Duration::from_secs(3600))
+            .set_expiry(&id, Timestamp::now() + Duration::from_secs(3600))
             .await?;
 
         let records = producer.records();
