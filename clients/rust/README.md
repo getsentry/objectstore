@@ -198,7 +198,7 @@ async fn upload_large_object(session: &Session, object: Bytes) -> Result<()> {
         // Send everything after the authoritative offset.
         // The first request therefore attempts to upload the whole object in one request.
         let result = upload
-            .put_chunk(offset, object.slice(offset as usize..))
+            .put(offset, object.slice(offset as usize..))
             .send()
             .await;
 

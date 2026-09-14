@@ -123,13 +123,13 @@ impl ResumableUpload {
 
     /// Builds a request to write `chunk` starting at `offset`.
     ///
-    /// `put_chunk` doesn't perform any automatic compression of the payload, so the caller is
+    /// `put` doesn't perform any automatic compression of the payload, so the caller is
     /// responsible for applying compression to the entire payload beforehand and passing chunks
     /// of the already compressed payload to this method.
     ///
     /// The returned progress contains the authoritative server offset, which should be used for
     /// subsequent requests.
-    pub fn put_chunk(&self, offset: u64, chunk: impl Into<Bytes>) -> PutChunkBuilder {
+    pub fn put(&self, offset: u64, chunk: impl Into<Bytes>) -> PutChunkBuilder {
         PutChunkBuilder {
             upload: self.clone(),
             offset,
@@ -270,7 +270,7 @@ impl UploadProgressBuilder {
     }
 }
 
-/// A builder for [`ResumableUpload::put_chunk`].
+/// A builder for [`ResumableUpload::put`].
 pub struct PutChunkBuilder {
     upload: ResumableUpload,
     offset: u64,
