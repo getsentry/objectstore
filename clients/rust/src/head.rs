@@ -44,7 +44,6 @@ impl HeadBuilder {
         let response = response.error_for_status_and_drain().await?;
         let metadata = Metadata::from_headers(response.headers(), "");
         response.drain_body().await;
-        let metadata = metadata?;
-        Ok(Some(metadata))
+        Ok(Some(metadata?))
     }
 }
