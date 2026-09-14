@@ -43,6 +43,7 @@ impl Timestamp {
     /// The Unix epoch.
     pub const UNIX_EPOCH: Self = Self(0);
 
+    /// The maximum supported timestamp, `9999-12-31T23:59:59Z`.
     const MAX: u64 = 253_402_300_799;
 
     /// Captures the current wall-clock time, rounded up to a whole second.
