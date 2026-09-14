@@ -507,10 +507,10 @@ fn matches_redirect(
 /// Extends an active expiry time to `expire_at` where valid.
 ///
 /// Returns `true` if expiry was extended or already satisfied, and `false` if the expiry could not
-/// be extended (e.g. manual expiration policy or already expired).
+/// be extended (e.g. no deadline is set or it is already expired).
 fn extend_expiry(field: &mut Option<SystemTime>, expire_at: SystemTime, now: SystemTime) -> bool {
     let Some(time_expires) = *field else {
-        return false; // manual expiration policy cannot be extended
+        return false; // entries without a deadline cannot be extended
     };
 
     if time_expires < now {
@@ -686,7 +686,6 @@ mod tests {
                 None,
                 TieredWrite::Tombstone(Tombstone {
                     target: target.clone(),
-                    expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
                     time_expires: Some(old_expiry),
                 }),
             )
