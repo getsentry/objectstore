@@ -278,11 +278,8 @@ impl PutChunkBuilder {
     /// let offset = match upload.put(offset, chunk).send().await {
     ///     Ok(UploadProgress::Complete) => return Ok(()),
     ///     Ok(UploadProgress::Incomplete { offset }) => offset,
-    ///     Err(error @ Error::ResumableUploadUnavailable) => {
-    ///         // The caller must start the entire upload again with a new session.
-    ///         return Err(error);
-    ///     }
-    ///     Err(error) => return Err(error),
+    ///     Err(error @ Error::ResumableUploadUnavailable) => todo!("retry the whole upload"),
+    ///     Err(error) => todo!("handle error"),
     /// };
     /// ```
     pub async fn send(self) -> crate::Result<UploadProgress> {
