@@ -20,7 +20,7 @@ jsonwebtoken = { workspace = true }
 multer = { workspace = true }
 objectstore-types = { workspace = true }
 # Pinned below workspace version for MSRV compatibility
-reqwest = { version = "0.13.1", default-features = false, features = ["charset", "http2", "system-proxy", "json", "stream", "multipart"] }
+reqwest = { version = "0.13.1", default-features = false, features = ["charset", "http2", "system-proxy", "json", "stream", "multipart", "query"] }
 sentry-core = { version = ">=0.41", default-features = false, features = ["client"] }
 serde = { workspace = true }
 thiserror = { workspace = true }
