@@ -69,10 +69,10 @@ pub enum Error {
         /// The error message.
         message: String,
     },
-    /// Error returned by the low-level resumable uploads API.
+    /// A resumable upload session expired, was canceled, or could otherwise not be found.
     #[cfg(feature = "resumable-upload-api")]
-    #[error(transparent)]
-    ResumableUpload(#[from] crate::ResumableUploadError),
+    #[error("resumable upload session is not available")]
+    ResumableUploadUnavailable,
 }
 
 /// A convenience alias that defaults our [`Error`] type.

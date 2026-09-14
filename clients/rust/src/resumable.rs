@@ -23,38 +23,6 @@ pub use objectstore_types::resumable::{SessionToken, UploadProgress};
 
 use crate::{Compression, Error, ExpirationPolicy, ObjectKey, Session};
 
-/// A known error returned from a resumable upload request.
-#[derive(Debug, thiserror::Error)]
-pub enum ResumableUploadError {
-    /// The submitted chunk did not start at the server's current offset.
-    ///
-    /// Continue from `offset`, treating it as authoritative. Reposition the input before sending
-    /// another chunk.
-    #[error("resumable upload offset mismatch; server offset is {offset}")]
-    OffsetMismatch {
-        /// The authoritative offset reported by the server.
-        offset: u64,
-    },
-
-    /// The server knows that the upload expired or was canceled.
-    ///
-    /// This handle cannot be used again. Start a new upload.
-    #[error("resumable upload is gone")]
-    Gone,
-
-    /// The server could not find the upload session.
-    ///
-    /// This handle cannot be resumed. Start a new upload.
-    #[error("resumable upload was not found")]
-    NotFound,
-
-    /// The server or selected backend declined this resumable upload.
-    ///
-    /// Fall back to a regular [`Session::put`].
-    #[error("resumable upload was declined")]
-    Declined,
-}
-
 /// A handle bound to one resumable upload session.
 ///
 /// See the [crate-level documentation](crate#resumable-upload-api) for more information and
@@ -217,12 +185,9 @@ impl CreateResumableUploadBuilder {
 
     /// Creates the resumable upload and returns a handle bound to it.
     ///
-    /// # Errors
-    ///
-    /// Returns [`ResumableUploadError::Declined`] when the server refuses resumable uploads
-    /// for this object. Callers should handle that error by falling back to a regular
-    /// [`Session::put`].
-    pub async fn send(self) -> crate::Result<ResumableUpload> {
+    /// Returns `None` when the server declines resumable uploads for this object.
+    /// Callers should fall back to a regular [`Session::put`] in that case.
+    pub async fn send(self) -> crate::Result<Option<ResumableUpload>> {
         let method = if self.key.is_some() {
             Method::PUT
         } else {
@@ -239,15 +204,21 @@ impl CreateResumableUploadBuilder {
             .header(HEADER_UPLOAD_LENGTH, self.total_length.to_string());
         let response = request.send().await?;
 
-        if response.status() != StatusCode::OK {
-            return Err(parse_error_response(
-                response,
-                "creating a resumable upload",
-            ));
+        match response.status() {
+            StatusCode::OK => {}
+            StatusCode::NOT_IMPLEMENTED => return Ok(None),
+            status => {
+                response.error_for_status_ref()?;
+                return Err(Error::MalformedResponse(format!(
+                    "unexpected HTTP status {status} while creating a resumable upload"
+                )));
+            }
         }
 
         let response: CreateSessionResponse = response.json().await?;
-        Ok(self.session.resume_upload(response.key, response.session))
+        Ok(Some(
+            self.session.resume_upload(response.key, response.session),
+        ))
     }
 }
 
@@ -259,6 +230,11 @@ pub struct UploadProgressBuilder {
 
 impl UploadProgressBuilder {
     /// Queries the server's authoritative upload progress.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ResumableUploadUnavailable`] when the session expired, was canceled, or
+    /// could not be found. The upload must be restarted with a new session in that case.
     pub async fn send(self) -> crate::Result<UploadProgress> {
         let response = self
             .upload
@@ -289,6 +265,14 @@ impl fmt::Debug for PutChunkBuilder {
 
 impl PutChunkBuilder {
     /// Writes this chunk and returns the server's authoritative progress.
+    ///
+    /// If `offset` differs from the server's current offset, the response is returned as
+    /// [`UploadProgress::Incomplete`] with the server's authoritative offset.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ResumableUploadUnavailable`] when the session expired, was canceled, or
+    /// could not be found. The upload must be restarted with a new session in that case.
     pub async fn send(self) -> crate::Result<UploadProgress> {
         let content_length = self.chunk.len();
         let response = self
@@ -311,22 +295,29 @@ pub struct CancelUploadBuilder {
 
 impl CancelUploadBuilder {
     /// Cancels this upload and discards any bytes already uploaded.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ResumableUploadUnavailable`] when the session expired, was already
+    /// canceled, or could not be found.
     pub async fn send(self) -> crate::Result<()> {
         let response = self.upload.request(Method::DELETE)?.send().await?;
-        if response.status() == StatusCode::NO_CONTENT {
-            Ok(())
-        } else {
-            Err(parse_error_response(
-                response,
-                "canceling a resumable upload",
-            ))
+        match response.status() {
+            StatusCode::NO_CONTENT => Ok(()),
+            StatusCode::NOT_FOUND | StatusCode::GONE => Err(Error::ResumableUploadUnavailable),
+            status => {
+                response.error_for_status_ref()?;
+                Err(Error::MalformedResponse(format!(
+                    "unexpected HTTP status {status} while canceling a resumable upload"
+                )))
+            }
         }
     }
 }
 
 async fn parse_progress_response(response: Response) -> crate::Result<UploadProgress> {
     match response.status() {
-        StatusCode::NO_CONTENT => {
+        StatusCode::NO_CONTENT | StatusCode::CONFLICT => {
             let offset = parse_offset(&response).ok_or_else(|| {
                 crate::Error::MalformedResponse(
                     "resumable upload response has no valid Upload-Offset header".into(),
@@ -338,10 +329,13 @@ async fn parse_progress_response(response: Response) -> crate::Result<UploadProg
             let _: CompleteUploadResponse = response.json().await?;
             Ok(UploadProgress::Complete)
         }
-        _ => Err(parse_error_response(
-            response,
-            "continuing a resumable upload",
-        )),
+        StatusCode::NOT_FOUND | StatusCode::GONE => Err(Error::ResumableUploadUnavailable),
+        status => {
+            response.error_for_status_ref()?;
+            Err(Error::MalformedResponse(format!(
+                "unexpected HTTP status {status} while continuing a resumable upload"
+            )))
+        }
     }
 }
 
@@ -355,28 +349,4 @@ fn parse_offset(response: &Response) -> Option<u64> {
         UploadOffset::At(offset) => Some(offset),
         UploadOffset::Unknown => None,
     }
-}
-
-fn parse_error_response(response: Response, operation: &str) -> Error {
-    if response.status() == StatusCode::CONFLICT
-        && let Some(offset) = parse_offset(&response)
-    {
-        return ResumableUploadError::OffsetMismatch { offset }.into();
-    }
-
-    match response.status() {
-        StatusCode::GONE => return ResumableUploadError::Gone.into(),
-        StatusCode::NOT_FOUND => return ResumableUploadError::NotFound.into(),
-        StatusCode::NOT_IMPLEMENTED => return ResumableUploadError::Declined.into(),
-        _ => {}
-    }
-
-    if let Err(err) = response.error_for_status_ref() {
-        return Error::Reqwest(err);
-    }
-
-    crate::Error::MalformedResponse(format!(
-        "unexpected HTTP status {} while {operation}",
-        response.status()
-    ))
 }

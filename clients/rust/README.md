@@ -163,7 +163,7 @@ The object length and all offsets refer to the bytes after compression.
 #![cfg(feature = "resumable-upload-api")]
 
 use bytes::Bytes;
-use objectstore_client::{Error, ResumableUploadError, Result, Session, UploadProgress};
+use objectstore_client::{Error, Result, Session, UploadProgress};
 
 async fn upload_large_object(session: &Session, object: Bytes) -> Result<()> {
     const KEY: &str = "my-large-object";
@@ -176,9 +176,9 @@ async fn upload_large_object(session: &Session, object: Bytes) -> Result<()> {
         .send()
         .await
     {
-        Ok(upload) => upload,
-        Err(Error::ResumableUpload(ResumableUploadError::Declined)) => {
-            // Objectstore refused the upload creation request for this object.
+        Ok(Some(upload)) => upload,
+        Ok(None) => {
+            // Objectstore declined resumable uploads for this object.
             // Fall back to a normal PUT.
             session
                 .put(object)
@@ -205,19 +205,12 @@ async fn upload_large_object(session: &Session, object: Bytes) -> Result<()> {
         offset = match result {
             Ok(UploadProgress::Complete) => return Ok(()),
 
-            Err(Error::ResumableUpload(error @ ResumableUploadError::Gone))
-            | Err(Error::ResumableUpload(
-                error @ ResumableUploadError::NotFound,
-            )) => {
-                // The upload session doesn't exist (anymore).
-                // The whole upload must be retried.
-                return Err(error.into());
+            Err(error @ Error::ResumableUploadUnavailable) => {
+                // A terminal error occurred. The whole session must be retried.
+                return Err(error);
             }
 
-            Ok(UploadProgress::Incomplete { offset: next })
-            | Err(Error::ResumableUpload(
-                ResumableUploadError::OffsetMismatch { offset: next },
-            )) => next,
+            Ok(UploadProgress::Incomplete { offset: next }) => next,
 
             // A network error happened, or an unexpected HTTP error status was returned.
             Err(Error::Reqwest(_)) => {
