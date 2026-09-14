@@ -72,10 +72,11 @@
 //!
 //! | Status | Meaning | Client action |
 //! |--------|---------|---------------|
-//! | `400`  | Malformed: unknown upload session, missing `Upload-Length`, nonempty offset query, or a chunk exceeding the declared length | Terminal |
-//! | `409`  | A chunk's offset does not match, with the authoritative offset in `Upload-Offset` | Resynchronize |
-//! | `410`  | The session expired or was canceled; nothing was retained | Start a new session |
-//! | `501`  | The configured backend does not implement resumable uploads | Fall back to a regular upload |
+//! | `400`  | Malformed session token, missing `Upload-Length`, nonempty offset query, or a chunk exceeding the declared length | Correct the request |
+//! | `404`  | The upload session is unknown or does not belong to this object | Start a new session or correct the request |
+//! | `409`  | A chunk's offset does not match the authoritative offset | Query the offset and continue from there |
+//! | `410`  | The session expired or was canceled | Start a new session |
+//! | `501`  | The server declined the resumable upload session creation for the requested object | Fall back to a regular upload |
 //!
 //! # Multipart Upload Endpoints
 //!

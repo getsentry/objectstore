@@ -30,6 +30,7 @@ url = { workspace = true }
 zstd-safe = { workspace = true }
 
 [dev-dependencies]
+anyhow = { workspace = true }
 futures-util = { workspace = true }
 http-body-util = { workspace = true }
 jsonwebtoken = { workspace = true }
@@ -42,6 +43,7 @@ zstd = { workspace = true }
 [features]
 default = ["native-tls", "hickory-dns"]
 multipart = ["dep:base64"]
+resumable-upload-api = []
 
 rustls = ["reqwest/rustls"]
 native-tls = ["reqwest/native-tls"]

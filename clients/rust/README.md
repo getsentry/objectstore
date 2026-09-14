@@ -133,6 +133,58 @@ session.put("payload")
     .send().await?;
 ```
 
+### Resumable Upload API
+
+> **Feature flag required:** Enable `resumable-upload-api` to use this API.
+>
+> ```toml
+> objectstore-client = { version = "...", features = ["resumable-upload-api"] }
+> ```
+
+The resumable upload API allows you to upload an object across multiple requests.
+It is particularly suitable for large objects, where restarting an upload from
+scratch would be expensive.
+It's recommended to always try to upload the whole object in a single request if
+possible, as that's always the more efficient approach.
+If the request fails midway, it will be possible to resume it from the persisted offset.
+
+**Important:** resumable uploads do not automatically compress chunk contents. The `compression`
+setting only records how the object is encoded; the caller must compress the payload accordingly.
+The object length and all offsets refer to the bytes after compression.
+
+```rust,no_run
+#![cfg(feature = "resumable-upload-api")]
+
+use bytes::Bytes;
+use anyhow::{Context as _, Result};
+use objectstore_client::{Session, UploadProgress};
+
+async fn upload_large_object(session: &Session, object: Bytes) -> Result<()> {
+    let upload = session
+        .create_upload(object.len() as u64)
+        .key("my-large-object")
+        .content_type("application/octet-stream")
+        .send()
+        .await?
+        // Fall back to a regular [`Session:;put`].
+        .context("resumable upload declined for this object")?;
+
+    let mut offset = 0;
+    loop {
+        // Send everything after the authoritative offset.
+        // The first request therefore attempts to upload the whole object in one request.
+        offset = match upload
+            .put(offset, object.slice(offset as usize..))
+            .send()
+            .await?
+        {
+            UploadProgress::Complete => return Ok(()),
+            UploadProgress::Incomplete { offset: next } => next,
+        };
+    }
+}
+```
+
 ### Multipart Upload API
 
 > **Feature flag required:** Enable the `multipart` Cargo feature to use this API.

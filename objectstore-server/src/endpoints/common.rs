@@ -134,8 +134,8 @@ impl ApiError {
                 ServiceErrorKind::InvalidMetadata
                 | ServiceErrorKind::InvalidUploadId
                 | ServiceErrorKind::ClientStream
-                | ServiceErrorKind::UnknownUploadSession
                 | ServiceErrorKind::ChunkExceedsUploadLength { .. } => StatusCode::BAD_REQUEST,
+                ServiceErrorKind::UnknownUploadSession => StatusCode::NOT_FOUND,
                 ServiceErrorKind::RangeNotSatisfiable { .. } => StatusCode::RANGE_NOT_SATISFIABLE,
                 ServiceErrorKind::UploadOffsetMismatch { .. } => StatusCode::CONFLICT,
                 ServiceErrorKind::UploadSessionGone => StatusCode::GONE,
