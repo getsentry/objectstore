@@ -14,6 +14,7 @@ use reqwest::multipart::Part;
 
 use crate::error::Error;
 use crate::put::{CompressionMode, PutBody};
+use crate::response::ResponseExt as _;
 use crate::{
     DeleteBuilder, DeleteResponse, GetBuilder, GetResponse, HeadBuilder, HeadResponse, ObjectKey,
     PutBuilder, PutResponse, Session, get, put,
@@ -489,7 +490,7 @@ async fn send_batch(
     }
 
     let request = session.batch_request()?.multipart(form);
-    let response = request.send().await?.error_for_status()?;
+    let response = request.send().await?.error_for_status_and_drain().await?;
 
     let boundary = response
         .headers()
@@ -498,6 +499,9 @@ async fn send_batch(
         .ok_or_else(|| Error::MalformedResponse("missing Content-Type header".to_owned()))
         .map(multer::parse_boundary)??;
 
+    // XXX: We don't use `drain_body` here, as that would require buffering the entire batch
+    // response. That's because `multer` doesn't drain nor expose its underlying stream after a
+    // parse error.
     let byte_stream = response.bytes_stream().map(|r| r.map_err(io::Error::other));
     let mut multipart = multer::Multipart::new(byte_stream, boundary);
 

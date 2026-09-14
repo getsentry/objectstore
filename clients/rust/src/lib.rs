@@ -13,6 +13,7 @@ mod many;
 #[cfg(feature = "multipart")]
 mod multipart;
 mod put;
+mod response;
 #[cfg(feature = "resumable-upload-api")]
 mod resumable;
 pub mod utils;
