@@ -120,7 +120,7 @@ jobs:
             -p 8089:9000 \
             --entrypoint /run-minio.sh \
             -v $PWD/devservices/run-minio.sh:/run-minio.sh \
-            minio/minio
+            quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
 
       - name: Install Rust Toolchain
         run: |
