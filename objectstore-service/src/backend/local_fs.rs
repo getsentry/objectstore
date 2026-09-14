@@ -22,6 +22,7 @@ use std::time::SystemTime;
 use futures_util::StreamExt;
 use objectstore_types::metadata::Metadata;
 use objectstore_types::range::ByteRange;
+use objectstore_types::time::Timestamp;
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::sync::Semaphore;
@@ -177,7 +178,7 @@ impl Backend for LocalFsBackend {
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
-    async fn set_expiry(&self, id: &ObjectId, expire_at: SystemTime) -> Result<bool> {
+    async fn set_expiry(&self, id: &ObjectId, expire_at: Timestamp) -> Result<bool> {
         let _guard = self.locks.acquire(id).await?;
 
         let path = self.path(id);
@@ -638,7 +639,7 @@ impl ObjectFile {
         let mut reader = BufReader::new(file);
         let (mut metadata, preamble_len) = read_metadata_preamble(&mut reader).await?;
 
-        if metadata.is_expired(SystemTime::now()) {
+        if metadata.is_expired(Timestamp::now()) {
             objectstore_log::debug!("Object found but past expiry");
             return Ok(None);
         }
@@ -767,12 +768,13 @@ mod tests {
     use std::collections::HashMap;
     use std::num::NonZeroU32;
     use std::sync::Arc;
-    use std::time::{Duration, SystemTime};
+    use std::time::Duration;
 
     use bytes::{Bytes, BytesMut};
     use futures_util::{TryStreamExt, stream as futures_stream};
     use objectstore_types::metadata::{Compression, ExpirationPolicy};
     use objectstore_types::scope::{Scope, Scopes};
+    use objectstore_types::time::Timestamp;
 
     use super::*;
     use crate::id::ObjectContext;
@@ -793,8 +795,8 @@ mod tests {
         let metadata = Metadata {
             content_type: "text/plain".into(),
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
-            time_created: Some(SystemTime::now()),
-            time_expires: Some(SystemTime::now() + Duration::from_hours(1)),
+            time_created: Some(Timestamp::now()),
+            time_expires: Some(Timestamp::now() + Duration::from_hours(1)),
             compression: Some(Compression::Zstd),
             origin: Some("203.0.113.42".into()),
             filename: Some("hello.txt".into()),
@@ -874,7 +876,7 @@ mod tests {
         let id = ObjectId::from_parts("testing".into(), Scopes::empty(), "foo".into());
         assert!(
             !backend
-                .set_expiry(&id, SystemTime::now() + Duration::from_hours(1))
+                .set_expiry(&id, Timestamp::now() + Duration::from_hours(1))
                 .await
                 .unwrap()
         );
@@ -971,7 +973,7 @@ mod tests {
     async fn set_expiry() {
         let (_tempdir, backend) = make_backend();
         let id = make_id();
-        let old_expiry = SystemTime::now() + Duration::from_hours(1);
+        let old_expiry = Timestamp::now() + Duration::from_hours(1);
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
             time_expires: Some(old_expiry),
@@ -1000,7 +1002,7 @@ mod tests {
         let id = make_id();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
-            time_expires: Some(SystemTime::now() - Duration::from_secs(1)),
+            time_expires: Some(Timestamp::now() - Duration::from_secs(1)),
             ..Default::default()
         };
         backend
@@ -1011,7 +1013,7 @@ mod tests {
         assert!(backend.get_object(&id, None).await.unwrap().is_none());
         assert!(
             !backend
-                .set_expiry(&id, SystemTime::now() + Duration::from_hours(1))
+                .set_expiry(&id, Timestamp::now() + Duration::from_hours(1))
                 .await
                 .unwrap()
         );

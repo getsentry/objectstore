@@ -9,8 +9,9 @@
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
+use objectstore_types::time::Timestamp;
 use tokio::sync::{Notify, mpsc};
 
 use crate::backend::common::Backend;
@@ -66,7 +67,7 @@ impl Drop for PendingGuard {
 #[derive(Debug)]
 struct Renewal {
     id: ObjectId,
-    expire_at: SystemTime,
+    expire_at: Timestamp,
     pending: PendingGuard,
     queued: QueueCounterGuard,
 }
@@ -212,7 +213,7 @@ impl RenewalScheduler {
     /// Schedules an expiry renewal without waiting for queue or execution capacity.
     ///
     /// [`Self::start`] must be called before scheduling renewals.
-    pub fn schedule(&self, id: ObjectId, expire_at: SystemTime) {
+    pub fn schedule(&self, id: ObjectId, expire_at: Timestamp) {
         let pending = Arc::clone(&self.inner.pending);
         if !pending.pin().insert(id.clone()) {
             objectstore_metrics::count!(

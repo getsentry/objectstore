@@ -50,14 +50,14 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::num::ParseIntError;
 use std::str::FromStr;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use http::header::{self, HeaderMap, HeaderName};
-use humantime::{format_rfc3339_micros, parse_rfc3339};
 use serde::{Deserialize, Serialize};
 
 use crate::duration::{ParseDurationError, format_duration, parse_duration};
 use crate::headers;
+use crate::time::{InvalidTimestamp, Timestamp};
 
 /// The custom HTTP header that contains the serialized [`ExpirationPolicy`].
 pub const HEADER_EXPIRATION: &str = "x-sn-expiration";
@@ -103,6 +103,9 @@ pub enum Error {
     /// The creation time is invalid.
     #[error("invalid creation time")]
     CreationTime(#[from] humantime::TimestampError),
+    /// The expiration timestamp is outside the supported range.
+    #[error("invalid expiration time")]
+    ExpirationTime(#[from] InvalidTimestamp),
     /// The object size is not a valid byte count.
     #[error("invalid object size")]
     Size(#[from] ParseIntError),
@@ -187,21 +190,21 @@ impl ExpirationPolicy {
     /// Returns `Some(new_expire_at)` when the current deadline is stale enough
     /// to justify a write, `None` otherwise. The debounce window scales with the
     /// TTI duration so short-TTI objects get bumped more frequently.
+    ///
+    /// Returns `None` if the new deadline would exceed the supported timestamp range.
     pub fn check_tti_bump(
         &self,
-        time_expires: Option<SystemTime>,
-        access_time: SystemTime,
-    ) -> Option<SystemTime> {
+        time_expires: Option<Timestamp>,
+        access_time: Timestamp,
+    ) -> Option<Timestamp> {
         let ExpirationPolicy::TimeToIdle(tti) = *self else {
             return None;
         };
 
-        let new_expire_at = access_time + tti;
+        let time_expires = time_expires?;
+        let new_expire_at = access_time.checked_add(tti)?;
         let debounce = (tti / 4).min(MAX_TTI_DEBOUNCE);
-        match time_expires {
-            Some(ts) if ts < new_expire_at - debounce => Some(new_expire_at),
-            _ => None,
-        }
+        (new_expire_at.checked_duration_since(time_expires)? > debounce).then_some(new_expire_at)
     }
 }
 impl fmt::Display for ExpirationPolicy {
@@ -297,15 +300,17 @@ pub struct Metadata {
     /// Set by the server every time an object is put, i.e. when objects are first
     /// created and when existing objects are overwritten.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub time_created: Option<SystemTime>,
+    pub time_created: Option<Timestamp>,
 
     /// The resolved expiration timestamp (header: `x-sn-time-expires`).
     ///
     /// Derived from the [`expiration_policy`](Self::expiration_policy). When using
     /// a time-to-idle policy, this reflects the expiration timestamp present
     /// *prior to* the current access to the object.
+    ///
+    /// Fractional deadlines round up to whole seconds; see [`Timestamp`].
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub time_expires: Option<SystemTime>,
+    pub time_expires: Option<Timestamp>,
 
     /// IANA media type of the object (header: `Content-Type`).
     ///
@@ -364,9 +369,13 @@ impl Metadata {
     pub fn from_insert_headers(headers: &HeaderMap, prefix: &str) -> Result<Self, Error> {
         let mut metadata = Self::parse_headers(headers, prefix, true)?;
 
-        let now = SystemTime::now();
-        metadata.time_created = Some(now);
-        metadata.time_expires = metadata.expiration_policy.expires_in().map(|ttl| now + ttl);
+        let time_created = Timestamp::now();
+        metadata.time_created = Some(time_created);
+        metadata.time_expires = metadata
+            .expiration_policy
+            .expires_in()
+            .map(|ttl| time_created.checked_add(ttl).ok_or(InvalidTimestamp))
+            .transpose()?;
 
         Ok(metadata)
     }
@@ -391,14 +400,15 @@ impl Metadata {
     }
 
     /// Returns whether the object has expired at the given time.
-    pub fn is_expired(&self, now: SystemTime) -> bool {
-        self.time_expires.is_some_and(|deadline| deadline < now)
+    pub fn is_expired(&self, access_time: Timestamp) -> bool {
+        self.time_expires
+            .is_some_and(|deadline| deadline < access_time)
     }
 
     /// Checks whether this object's TTI deadline needs bumping.
     ///
     /// See [`ExpirationPolicy::check_tti_bump`] for details.
-    pub fn check_tti_bump(&self, access_time: SystemTime) -> Option<SystemTime> {
+    pub fn check_tti_bump(&self, access_time: Timestamp) -> Option<Timestamp> {
         self.expiration_policy
             .check_tti_bump(self.time_expires, access_time)
     }
@@ -448,12 +458,12 @@ impl Metadata {
                         }
                         HEADER_TIME_CREATED if !skip_read_only => {
                             let timestamp = value.to_str()?;
-                            let time = parse_rfc3339(timestamp)?;
+                            let time = Timestamp::from_rfc3339(timestamp)?;
                             metadata.time_created = Some(time);
                         }
                         HEADER_TIME_EXPIRES if !skip_read_only => {
                             let timestamp = value.to_str()?;
-                            let time = parse_rfc3339(timestamp)?;
+                            let time = Timestamp::from_rfc3339(timestamp)?;
                             metadata.time_expires = Some(time);
                         }
                         HEADER_ORIGIN => {
@@ -513,12 +523,12 @@ impl Metadata {
         }
         if let Some(time) = time_created {
             let name = HeaderName::try_from(format!("{prefix}{HEADER_TIME_CREATED}"))?;
-            let timestamp = format_rfc3339_micros(*time);
+            let timestamp = time.as_rfc3339();
             headers.append(name, timestamp.to_string().parse()?);
         }
         if let Some(time) = time_expires {
             let name = HeaderName::try_from(format!("{prefix}{HEADER_TIME_EXPIRES}"))?;
-            let timestamp = format_rfc3339_micros(*time);
+            let timestamp = time.as_rfc3339();
             headers.append(name, timestamp.to_string().parse()?);
         }
         if let Some(origin) = origin {
@@ -751,16 +761,21 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             HEADER_TIME_CREATED,
-            "2024-01-15T12:00:00.000000Z".parse().unwrap(),
+            "2024-01-15T12:00:00.123456Z".parse().unwrap(),
         );
         headers.insert(
             HEADER_TIME_EXPIRES,
-            "2024-01-16T12:00:00.000000Z".parse().unwrap(),
+            "2024-01-16T12:00:00.123456Z".parse().unwrap(),
         );
 
         let metadata = Metadata::from_headers(&headers, "").unwrap();
-        assert!(metadata.time_created.is_some());
-        assert!(metadata.time_expires.is_some());
+        let encoded = metadata.to_headers("").unwrap();
+        assert_eq!(encoded[HEADER_TIME_CREATED], "2024-01-15T12:00:01Z");
+        assert_eq!(encoded[HEADER_TIME_EXPIRES], "2024-01-16T12:00:01Z");
+        let deadline = metadata.time_expires.unwrap();
+        assert!(!metadata.is_expired(deadline - Duration::from_secs(1)));
+        assert!(!metadata.is_expired(deadline));
+        assert!(metadata.is_expired(deadline + Duration::from_secs(1)));
     }
 
     #[test]
@@ -779,7 +794,7 @@ mod tests {
         let metadata = Metadata::from_insert_headers(&headers, "").unwrap();
         // `time_created` is stamped by the server, not the client's forged value.
         let created = metadata.time_created.unwrap();
-        assert_ne!(created, parse_rfc3339(forged_created).unwrap());
+        assert_ne!(created, Timestamp::from_rfc3339(forged_created).unwrap());
         assert!(metadata.time_expires.is_none());
         assert!(metadata.size.is_none());
         // Client-settable fields are still parsed.
@@ -806,7 +821,6 @@ mod tests {
         let metadata = Metadata::from_insert_headers(&headers, "").unwrap();
         let created = metadata.time_created.unwrap();
         let expires = metadata.time_expires.unwrap();
-        // Both timestamps derive from the same `now`, so the expiry is exact.
         assert_eq!(expires, created + Duration::from_secs(30));
     }
 
@@ -833,7 +847,7 @@ mod tests {
     fn validate_accepts_resolved_timeout() {
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(30)),
-            time_expires: Some(SystemTime::now() + Duration::from_secs(30)),
+            time_expires: Some(Timestamp::now() + Duration::from_secs(30)),
             ..Default::default()
         };
         assert!(metadata.validate().is_ok());
@@ -916,8 +930,8 @@ mod tests {
     fn to_headers_all_fields() {
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_mins(1)),
-            time_created: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
-            time_expires: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_060)),
+            time_created: Some(Timestamp::from_unix_secs(1_700_000_000).unwrap()),
+            time_expires: Some(Timestamp::from_unix_secs(1_700_000_060).unwrap()),
             content_type: "text/html".into(),
             compression: Some(Compression::Zstd),
             origin: Some("10.0.0.1".into()),
@@ -939,8 +953,8 @@ mod tests {
             "pfx-x-sn-expiration": "ttl:1m",
             "pfx-x-sn-filename": "report.pdf",
             "pfx-x-sn-origin": "10.0.0.1",
-            "pfx-x-sn-time-created": "2023-11-14T22:13:20.000000Z",
-            "pfx-x-sn-time-expires": "2023-11-14T22:14:20.000000Z",
+            "pfx-x-sn-time-created": "2023-11-14T22:13:20Z",
+            "pfx-x-sn-time-expires": "2023-11-14T22:14:20Z",
             "pfx-x-snme-foo": "bar",
         }
         "#);
@@ -951,8 +965,8 @@ mod tests {
         let prefix = "x-test-";
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(2)),
-            time_created: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
-            time_expires: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_007_200)),
+            time_created: Some(Timestamp::from_unix_secs(1_700_000_000).unwrap()),
+            time_expires: Some(Timestamp::from_unix_secs(1_700_007_200).unwrap()),
             content_type: "image/png".into(),
             compression: Some(Compression::Zstd),
             origin: Some("192.168.1.1".into()),
@@ -1009,8 +1023,8 @@ mod tests {
     fn serde_roundtrip_all_fields() {
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
-            time_created: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
-            time_expires: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_003_600)),
+            time_created: Some(Timestamp::from_unix_secs(1_700_000_000).unwrap()),
+            time_expires: Some(Timestamp::from_unix_secs(1_700_003_600).unwrap()),
             content_type: "application/json".into(),
             compression: Some(Compression::Zstd),
             origin: Some("10.0.0.1".into()),
@@ -1138,12 +1152,12 @@ mod tests {
     #[test]
     fn check_tti_bump_returns_none_for_manual() {
         let metadata = Metadata::default();
-        assert!(metadata.check_tti_bump(SystemTime::now()).is_none());
+        assert!(metadata.check_tti_bump(Timestamp::now()).is_none());
     }
 
     #[test]
     fn check_tti_bump_returns_none_for_ttl() {
-        let now = SystemTime::now();
+        let now = Timestamp::now();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
             time_expires: Some(now + Duration::from_hours(1)),
@@ -1154,7 +1168,7 @@ mod tests {
 
     #[test]
     fn check_tti_bump_returns_none_when_fresh() {
-        let now = SystemTime::now();
+        let now = Timestamp::now();
         let tti = Duration::from_hours(2 * 24);
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToIdle(tti),
@@ -1166,7 +1180,7 @@ mod tests {
 
     #[test]
     fn check_tti_bump_returns_new_deadline_when_stale() {
-        let now = SystemTime::now();
+        let now = Timestamp::now();
         let tti = Duration::from_hours(2 * 24);
         let debounce = tti / 4;
         let stale_deadline = now + tti - debounce - Duration::from_mins(1);
@@ -1181,22 +1195,28 @@ mod tests {
 
     #[test]
     fn check_tti_bump_short_tti_triggers_bump() {
-        let now = SystemTime::now();
-        let tti = Duration::from_hours(2);
-        let debounce = tti / 4;
-        let stale_deadline = now + tti - debounce - Duration::from_mins(1);
-        let metadata = Metadata {
-            expiration_policy: ExpirationPolicy::TimeToIdle(tti),
-            time_expires: Some(stale_deadline),
-            ..Default::default()
-        };
-        let new_deadline = metadata.check_tti_bump(now).unwrap();
-        assert_eq!(new_deadline, now + tti);
+        let now = Timestamp::now();
+        for tti in [
+            Duration::from_hours(2),
+            Duration::from_secs(3),
+            Duration::from_secs(4),
+        ] {
+            let debounce = tti / 4;
+            let new_deadline = now + tti;
+            let mut metadata = Metadata {
+                expiration_policy: ExpirationPolicy::TimeToIdle(tti),
+                time_expires: Some(new_deadline - Duration::from_secs(debounce.as_secs() + 1)),
+                ..Default::default()
+            };
+            assert_eq!(metadata.check_tti_bump(now), Some(new_deadline));
+            metadata.time_expires = Some(new_deadline - Duration::from_secs(debounce.as_secs()));
+            assert!(metadata.check_tti_bump(now).is_none());
+        }
     }
 
     #[test]
     fn check_tti_bump_debounce_caps_at_24h() {
-        let now = SystemTime::now();
+        let now = Timestamp::now();
         let tti = Duration::from_hours(30 * 24);
         let capped_debounce = Duration::from_hours(24);
         let stale_deadline = now + tti - capped_debounce - Duration::from_mins(1);
@@ -1222,6 +1242,6 @@ mod tests {
             time_expires: None,
             ..Default::default()
         };
-        assert!(metadata.check_tti_bump(SystemTime::now()).is_none());
+        assert!(metadata.check_tti_bump(Timestamp::now()).is_none());
     }
 }

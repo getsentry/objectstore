@@ -9,9 +9,11 @@
 
 use std::fmt;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+
+use objectstore_types::time::Timestamp;
 
 use crate::id::ObjectId;
 
@@ -79,10 +81,10 @@ fn default_sample_rate() -> f64 {
 #[async_trait::async_trait]
 pub trait ChangeStream: fmt::Debug + Send + Sync + 'static {
     /// Reports that `id` now occupies `size` bytes. Used for new writes and overwrites.
-    fn write(&self, id: &ObjectId, size: u64, expires_at: Option<SystemTime>);
+    fn write(&self, id: &ObjectId, size: u64, expires_at: Option<Timestamp>);
 
     /// Reports that `id`'s expiration moved, with its stored size unchanged.
-    fn update(&self, id: &ObjectId, expires_at: Option<SystemTime>);
+    fn update(&self, id: &ObjectId, expires_at: Option<Timestamp>);
 
     /// Reports that `id` was deleted explicitly. Does not account for automatic GC.
     fn delete(&self, id: &ObjectId);
@@ -111,9 +113,9 @@ pub struct NoopStream;
 
 #[async_trait::async_trait]
 impl ChangeStream for NoopStream {
-    fn write(&self, _id: &ObjectId, _size: u64, _expires_at: Option<SystemTime>) {}
+    fn write(&self, _id: &ObjectId, _size: u64, _expires_at: Option<Timestamp>) {}
 
-    fn update(&self, _id: &ObjectId, _expires_at: Option<SystemTime>) {}
+    fn update(&self, _id: &ObjectId, _expires_at: Option<Timestamp>) {}
 
     fn delete(&self, _id: &ObjectId) {}
 

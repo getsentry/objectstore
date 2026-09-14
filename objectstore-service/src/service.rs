@@ -8,11 +8,11 @@
 use std::future::Future;
 use std::num::NonZeroU64;
 use std::sync::Arc;
-use std::time::SystemTime;
 
 use objectstore_types::metadata::Metadata;
 use objectstore_types::range::{ByteRange, ContentRange};
 use objectstore_types::resumable::{SessionToken as EncryptedSessionToken, UploadProgress};
+use objectstore_types::time::Timestamp;
 
 use crate::backend::common::Backend;
 use crate::backend::counting::CountingBackend;
@@ -255,7 +255,7 @@ impl StorageService {
 
     /// Retrieves only the metadata for an object, without the payload.
     pub async fn get_metadata(&self, id: ObjectId) -> Result<MetadataResponse> {
-        let access_time = SystemTime::now();
+        let access_time = Timestamp::now();
         let inner = Arc::clone(&self.inner);
         let renewals = self.renewals.clone();
         self.spawn("get_metadata", async move {
@@ -272,7 +272,7 @@ impl StorageService {
 
     /// Streams (part of) the contents of an object.
     pub async fn get_object(&self, id: ObjectId, range: Option<ByteRange>) -> Result<GetResponse> {
-        let access_time = SystemTime::now();
+        let access_time = Timestamp::now();
         let inner = Arc::clone(&self.inner);
         let renewals = self.renewals.clone();
         self.spawn("get", async move {
@@ -288,7 +288,7 @@ impl StorageService {
     }
 
     /// Extends an existing TTL or TTI object's deadline.
-    pub async fn set_expiry(&self, id: ObjectId, expire_at: SystemTime) -> Result<bool> {
+    pub async fn set_expiry(&self, id: ObjectId, expire_at: Timestamp) -> Result<bool> {
         let inner = Arc::clone(&self.inner);
         self.spawn("set_expiry", async move {
             inner.set_expiry(&id, expire_at).await
@@ -779,7 +779,7 @@ mod tests {
     #[tokio::test]
     async fn set_expiry() {
         let service = make_service();
-        let old_expiry = SystemTime::now() + Duration::from_hours(1);
+        let old_expiry = Timestamp::now() + Duration::from_hours(1);
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
             time_expires: Some(old_expiry),
@@ -857,7 +857,7 @@ mod tests {
             &self,
             inner: &InMemoryBackend,
             id: &ObjectId,
-            expire_at: SystemTime,
+            expire_at: Timestamp,
         ) -> Result<bool> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.started.notify_one();
@@ -869,7 +869,7 @@ mod tests {
     fn stale_tti_metadata() -> Metadata {
         Metadata {
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
-            time_expires: Some(SystemTime::now() + Duration::from_mins(1)),
+            time_expires: Some(Timestamp::now() + Duration::from_mins(1)),
             ..Default::default()
         }
     }
@@ -947,7 +947,7 @@ mod tests {
         let id = ObjectId::new(make_context(), "ttl-no-renewal".into());
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
-            time_expires: Some(SystemTime::now() + Duration::from_mins(1)),
+            time_expires: Some(Timestamp::now() + Duration::from_mins(1)),
             ..Default::default()
         };
         backend
@@ -981,7 +981,7 @@ mod tests {
 
         let concurrency = ConcurrencyLimiter::new(1);
         let mut scheduler = RenewalScheduler::new(Arc::new(backend.clone()), concurrency, 1);
-        let expire_at = SystemTime::now() + Duration::from_hours(1);
+        let expire_at = Timestamp::now() + Duration::from_hours(1);
         scheduler.schedule(first, expire_at);
         assert_eq!(scheduler.queued(), 1);
         scheduler.start();
@@ -1023,7 +1023,7 @@ mod tests {
             &self,
             inner: &InMemoryBackend,
             id: &ObjectId,
-            expire_at: SystemTime,
+            expire_at: Timestamp,
         ) -> Result<bool> {
             if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 assert!(!self.panic, "intentional renewal panic");
@@ -1050,7 +1050,7 @@ mod tests {
             let concurrency = ConcurrencyLimiter::new(1);
             let mut scheduler = RenewalScheduler::new(Arc::new(backend.clone()), concurrency, 1);
             scheduler.start();
-            let expire_at = metadata.check_tti_bump(SystemTime::now()).unwrap();
+            let expire_at = metadata.check_tti_bump(Timestamp::now()).unwrap();
 
             scheduler.schedule(id.clone(), expire_at);
             tokio::time::timeout(Duration::from_secs(1), async {

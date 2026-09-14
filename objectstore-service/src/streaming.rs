@@ -24,10 +24,10 @@
 //! the others.
 
 use std::sync::Arc;
-use std::time::SystemTime;
 
 use futures_util::{Stream, StreamExt};
 use objectstore_types::metadata::Metadata;
+use objectstore_types::time::Timestamp;
 
 use crate::backend::common::Backend;
 use crate::background::RenewalScheduler;
@@ -264,7 +264,7 @@ impl StreamExecutor {
             .then(move |(idx, item)| {
                 let concurrency = concurrency.clone();
                 async move {
-                    let access_time = SystemTime::now();
+                    let access_time = Timestamp::now();
                     let op = match item {
                         Ok(op) => op,
                         Err(e) => return (idx, Err(e)),
@@ -307,7 +307,7 @@ async fn execute_operation(
     renewals: RenewalScheduler,
     context: ObjectContext,
     op: Operation,
-    access_time: SystemTime,
+    access_time: Timestamp,
 ) -> Result<OpResponse> {
     match op {
         Operation::Get(get) => {
@@ -354,12 +354,13 @@ async fn execute_operation(
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::{Duration, SystemTime};
+    use std::time::Duration;
 
     use bytes::Bytes;
     use futures_util::StreamExt;
     use objectstore_types::metadata::{ExpirationPolicy, Metadata};
     use objectstore_types::scope::{Scope, Scopes};
+    use objectstore_types::time::Timestamp;
 
     use super::*;
     use crate::backend::common::PutResponse;
@@ -408,7 +409,7 @@ mod tests {
             &self,
             inner: &InMemoryBackend,
             id: &ObjectId,
-            expire_at: SystemTime,
+            expire_at: Timestamp,
         ) -> Result<bool> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.started.notify_one();
@@ -423,7 +424,7 @@ mod tests {
         let context = make_context();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
-            time_expires: Some(SystemTime::now() + Duration::from_mins(1)),
+            time_expires: Some(Timestamp::now() + Duration::from_mins(1)),
             ..Default::default()
         };
         for key in ["get", "head"] {
