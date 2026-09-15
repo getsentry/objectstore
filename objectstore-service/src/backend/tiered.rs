@@ -112,12 +112,12 @@
 //! the long-term write sequence.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime};
 
 use base64::Engine as _;
 use bytes::Bytes;
-use futures_util::{Stream, StreamExt};
+use futures_util::StreamExt;
 use objectstore_types::metadata::Metadata;
 use objectstore_types::range::ByteRange;
 use objectstore_types::time::Timestamp;
@@ -137,7 +137,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
-use crate::stream::{ClientStream, SizedPeek};
+use crate::stream::{ClientStream, SizedPeek, counting_stream};
 
 /// The threshold up until which we will go to the "high volume" backend.
 const BACKEND_SIZE_THRESHOLD: usize = 1024 * 1024; // 1 MiB
@@ -634,26 +634,6 @@ fn effective_expiry(
 fn align_expiry(mut metadata: Metadata, tombstone: &Tombstone) -> Metadata {
     metadata.time_expires = effective_expiry(tombstone.time_expires, metadata.time_expires);
     metadata
-}
-
-/// Wraps a stream to count the total bytes yielded by successful chunks.
-///
-/// Returns the shared counter and the wrapped stream. The counter is incremented
-/// as the stream is consumed, so read it only after the stream is exhausted.
-fn counting_stream<S, E>(stream: S) -> (Arc<AtomicU64>, impl Stream<Item = Result<Bytes, E>>)
-where
-    S: Stream<Item = Result<Bytes, E>>,
-{
-    let counter = Arc::new(AtomicU64::new(0));
-
-    (
-        counter.clone(),
-        stream.inspect(move |res| {
-            if let Ok(chunk) = res {
-                counter.fetch_add(chunk.len() as u64, Ordering::Relaxed);
-            }
-        }),
-    )
 }
 
 /// The multipart upload state for TieredStorage.
