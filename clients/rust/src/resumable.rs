@@ -18,11 +18,28 @@ use objectstore_types::resumable::{
     UploadOffset,
 };
 use reqwest::{Method, Response, StatusCode};
+use serde::Serialize;
 
 pub use objectstore_types::resumable::{SessionToken, UploadProgress};
 
 use crate::response::ResponseExt as _;
 use crate::{Compression, Error, ExpirationPolicy, ObjectKey, Session};
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum UploadType {
+    Resumable,
+}
+
+#[derive(Serialize)]
+struct UploadTypeQuery {
+    upload_type: UploadType,
+}
+
+#[derive(Serialize)]
+struct SessionQuery<'a> {
+    session: &'a SessionToken,
+}
 
 /// A handle bound to one resumable upload session.
 ///
@@ -114,9 +131,12 @@ impl ResumableUpload {
     }
 
     fn request(&self, method: Method) -> crate::Result<reqwest::RequestBuilder> {
-        let token = self.token.to_base64url();
-        self.session
-            .resumable_request(method, &self.key, ("session", &token))
+        Ok(self
+            .session
+            .request(method, &self.key)?
+            .query(&SessionQuery {
+                session: &self.token,
+            }))
     }
 }
 
@@ -196,11 +216,10 @@ impl CreateResumableUploadBuilder {
         };
         let request = self
             .session
-            .resumable_request(
-                method,
-                self.key.as_deref().unwrap_or_default(),
-                ("upload_type", "resumable"),
-            )?
+            .request(method, self.key.as_deref().unwrap_or_default())?
+            .query(&UploadTypeQuery {
+                upload_type: UploadType::Resumable,
+            })
             .headers(self.metadata.to_headers("")?)
             .header(HEADER_UPLOAD_LENGTH, self.total_length.to_string());
         let response = request.send().await?;
