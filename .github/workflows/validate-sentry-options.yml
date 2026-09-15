@@ -10,8 +10,8 @@ permissions:
 
 jobs:
   validate:
-    uses: getsentry/sentry-options/.github/workflows/validate-schema.yml@5792fdd90e854b6aa4747e89d61df07bfa6beaa6 # 1.1.3
+    uses: getsentry/sentry-options/.github/workflows/validate-schema.yml@e2766cbc2feca445d5c52ce61d111d97834d7ae1
     secrets:
-      SENTRY_INTERNAL_APP_PRIVATE_KEY: ${{ secrets.SENTRY_INTERNAL_APP_PRIVATE_KEY }}
+      SENTRY_READONLYBOT_PRIVATE_KEY: ${{ secrets.SENTRY_READONLYBOT_PRIVATE_KEY }}
     with:
       schemas-path: sentry-options/schemas
