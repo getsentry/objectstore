@@ -20,6 +20,7 @@ use super::common::{
     DeleteResponse, GetResponse, HighVolumeBackend, MultipartUploadBackend, PutResponse, TieredGet,
     TieredMetadata, TieredUpdate, TieredWrite, Tombstone,
 };
+use crate::change_stream::{ChangeStream, NoopStream, flush_change_stream};
 use crate::error::{Error, ErrorKind, Result};
 use crate::id::ObjectId;
 use crate::multipart::{
@@ -40,6 +41,19 @@ impl StoreEntry {
         match self {
             StoreEntry::Object(metadata, _) => metadata.is_expired(now),
             StoreEntry::Tombstone(tombstone) => tombstone.is_expired(now),
+        }
+    }
+
+    /// Number of bytes an entry occupies (payload plus serialized metadata)
+    pub(crate) fn stored_size(&self) -> usize {
+        match self {
+            StoreEntry::Object(metadata, payload) => json_len(metadata) + payload.len(),
+            // A tombstone carries no payload: its bytes are the redirect target plus the
+            // deadline stored alongside it.
+            StoreEntry::Tombstone(tombstone) => {
+                tombstone.target.as_storage_path().to_string().len()
+                    + tombstone.time_expires.map_or(0, |d| json_len(&d))
+            }
         }
     }
 }
@@ -71,6 +85,7 @@ pub struct InMemoryBackend {
     name: &'static str,
     store: Arc<Mutex<Store>>,
     multipart_store: Arc<Mutex<MultipartStore>>,
+    change_stream: Arc<dyn ChangeStream>,
 }
 
 impl InMemoryBackend {
@@ -80,7 +95,14 @@ impl InMemoryBackend {
             name,
             store: Arc::new(Mutex::new(HashMap::new())),
             multipart_store: Arc::new(Mutex::new(HashMap::new())),
+            change_stream: Arc::new(NoopStream),
         }
+    }
+
+    /// Publishes this backend's changes to `change_stream`.
+    pub fn with_change_stream(mut self, change_stream: Arc<dyn ChangeStream>) -> Self {
+        self.change_stream = change_stream;
+        self
     }
 
     /// Returns the stored entry for `id`, for direct inspection in tests.
@@ -127,10 +149,11 @@ impl super::common::Backend for InMemoryBackend {
         stream: ClientStream,
     ) -> Result<PutResponse> {
         let bytes: BytesMut = stream.try_collect().await?;
-        self.store.lock().unwrap().insert(
-            id.clone(),
-            StoreEntry::Object(metadata.clone(), bytes.freeze()),
-        );
+        let entry = StoreEntry::Object(metadata.clone(), bytes.freeze());
+        let size = entry.stored_size();
+        self.store.lock().unwrap().insert(id.clone(), entry);
+        self.change_stream
+            .write(id, size as u64, metadata.time_expires);
         Ok(())
     }
 
@@ -165,18 +188,32 @@ impl super::common::Backend for InMemoryBackend {
 
     async fn set_expiry(&self, id: &ObjectId, expire_at: Timestamp) -> Result<bool> {
         let now = Timestamp::now();
-        let mut store = self.store.lock().unwrap();
-        Ok(match store.get_mut(id) {
-            Some(StoreEntry::Object(metadata, _)) => {
-                extend_expiry(&mut metadata.time_expires, expire_at, now)
+        let outcome = {
+            let mut store = self.store.lock().unwrap();
+            match store.get_mut(id) {
+                Some(StoreEntry::Object(metadata, _)) => {
+                    extend_expiry(&mut metadata.time_expires, expire_at, now)
+                }
+                _ => ExpiryOutcome::Rejected,
             }
-            _ => false,
-        })
+        };
+
+        if outcome == ExpiryOutcome::Extended {
+            self.change_stream.update(id, Some(expire_at));
+        }
+
+        Ok(outcome.is_satisfied())
     }
 
     async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
-        self.store.lock().unwrap().remove(id);
+        if self.store.lock().unwrap().remove(id).is_some() {
+            self.change_stream.delete(id);
+        }
         Ok(())
+    }
+
+    async fn join(&self) {
+        flush_change_stream(&self.change_stream).await;
     }
 }
 
@@ -197,7 +234,11 @@ impl HighVolumeBackend for InMemoryBackend {
 
         let mut metadata = metadata.clone();
         metadata.size = Some(payload.len());
-        store.insert(id.clone(), StoreEntry::Object(metadata, payload));
+        let expires_at = metadata.time_expires;
+        let entry = StoreEntry::Object(metadata, payload);
+        let size = entry.stored_size();
+        store.insert(id.clone(), entry);
+        self.change_stream.write(id, size as u64, expires_at);
         Ok(None)
     }
 
@@ -248,7 +289,9 @@ impl HighVolumeBackend for InMemoryBackend {
             return Ok(Some(tombstone));
         }
 
-        store.remove(id);
+        if store.remove(id).is_some() {
+            self.change_stream.delete(id);
+        }
         Ok(None)
     }
 
@@ -259,17 +302,24 @@ impl HighVolumeBackend for InMemoryBackend {
         update: TieredUpdate,
     ) -> Result<bool> {
         let TieredUpdate::SetExpiry(expire_at) = update;
-        let mut store = self.store.lock().unwrap();
+        let outcome = {
+            let mut store = self.store.lock().unwrap();
+            match (store.get_mut(id), current) {
+                (Some(StoreEntry::Object(metadata, _)), None) => {
+                    extend_expiry(&mut metadata.time_expires, expire_at, Timestamp::now())
+                }
+                (Some(StoreEntry::Tombstone(t)), Some(target)) if t.target == *target => {
+                    extend_expiry(&mut t.time_expires, expire_at, Timestamp::now())
+                }
+                _ => ExpiryOutcome::Rejected,
+            }
+        };
 
-        Ok(match (store.get_mut(id), current) {
-            (Some(StoreEntry::Object(metadata, _)), None) => {
-                extend_expiry(&mut metadata.time_expires, expire_at, Timestamp::now())
-            }
-            (Some(StoreEntry::Tombstone(t)), Some(target)) if t.target == *target => {
-                extend_expiry(&mut t.time_expires, expire_at, Timestamp::now())
-            }
-            _ => false,
-        })
+        if outcome == ExpiryOutcome::Extended {
+            self.change_stream.update(id, Some(expire_at));
+        }
+
+        Ok(outcome.is_satisfied())
     }
 
     async fn compare_and_write(
@@ -288,13 +338,23 @@ impl HighVolumeBackend for InMemoryBackend {
         if matches_current {
             match write {
                 TieredWrite::Tombstone(tombstone) => {
-                    store.insert(id.clone(), StoreEntry::Tombstone(tombstone));
+                    let expires_at = tombstone.time_expires;
+                    let entry = StoreEntry::Tombstone(tombstone);
+                    let size = entry.stored_size();
+                    store.insert(id.clone(), entry);
+                    self.change_stream.write(id, size as u64, expires_at);
                 }
                 TieredWrite::Object(metadata, payload) => {
-                    store.insert(id.clone(), StoreEntry::Object(metadata, payload));
+                    let expires_at = metadata.time_expires;
+                    let entry = StoreEntry::Object(metadata, payload);
+                    let size = entry.stored_size();
+                    store.insert(id.clone(), entry);
+                    self.change_stream.write(id, size as u64, expires_at);
                 }
                 TieredWrite::Delete => {
-                    store.remove(id);
+                    if store.remove(id).is_some() {
+                        self.change_stream.delete(id);
+                    }
                 }
             }
         }
@@ -431,7 +491,7 @@ impl MultipartUploadBackend for InMemoryBackend {
         // Validate and assemble while holding the multipart lock, but don't
         // remove the upload yet — a failed validation must leave it intact so
         // the client can retry.
-        let assembled = {
+        let (metadata, payload) = {
             let store = self.multipart_store.lock().unwrap();
             let upload = store.get(&key).ok_or_else(|| {
                 Error::new(
@@ -476,15 +536,21 @@ impl MultipartUploadBackend for InMemoryBackend {
             (metadata, payload.freeze())
         };
 
-        self.store
-            .lock()
-            .unwrap()
-            .insert(id.clone(), StoreEntry::Object(assembled.0, assembled.1));
+        let expires_at = metadata.time_expires;
+        let entry = StoreEntry::Object(metadata, payload);
+        let size = entry.stored_size();
+        self.store.lock().unwrap().insert(id.clone(), entry);
+        self.change_stream.write(id, size as u64, expires_at);
 
         self.multipart_store.lock().unwrap().remove(&key);
 
         Ok(None)
     }
+}
+
+/// Serialized length of `value`, or `0` if it cannot be serialized.
+fn json_len<T: serde::Serialize>(value: &T) -> usize {
+    serde_json::to_string(value).map_or(0, |json| json.len())
 }
 
 /// Returns `true` if `entry` matches the expected tombstone redirect state.
@@ -505,22 +571,45 @@ fn matches_redirect(
     }
 }
 
-/// Extends an active expiry time to `expire_at` where valid.
+/// What [`extend_expiry`] did to an entry's deadline.
 ///
-/// Returns `true` if expiry was extended or already satisfied, and `false` if the expiry could not
-/// be extended (e.g. no deadline is set or it is already expired).
-fn extend_expiry(field: &mut Option<Timestamp>, expire_at: Timestamp, now: Timestamp) -> bool {
+/// Callers need to tell a deadline that actually moved apart from one that already
+/// covered the request, because only the former is a change worth reporting to the
+/// [`ChangeStream`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExpiryOutcome {
+    /// The deadline could not be extended. None is set, or it has already passed.
+    Rejected,
+    /// The stored deadline already covered `expire_at`. Nothing was written.
+    AlreadySatisfied,
+    /// The stored deadline moved out to `expire_at`.
+    Extended,
+}
+
+impl ExpiryOutcome {
+    /// Whether the entry now expires no earlier than the requested deadline.
+    fn is_satisfied(self) -> bool {
+        !matches!(self, Self::Rejected)
+    }
+}
+
+/// Extends an active expiry time to `expire_at` where valid.
+fn extend_expiry(
+    field: &mut Option<Timestamp>,
+    expire_at: Timestamp,
+    now: Timestamp,
+) -> ExpiryOutcome {
     let Some(time_expires) = *field else {
-        return false; // entries without a deadline cannot be extended
+        return ExpiryOutcome::Rejected; // entries without a deadline cannot be extended
     };
 
     if time_expires < now {
-        false // already expired
+        ExpiryOutcome::Rejected // already expired
     } else if time_expires >= expire_at {
-        true // already satisfied
+        ExpiryOutcome::AlreadySatisfied
     } else {
         *field = Some(expire_at);
-        true
+        ExpiryOutcome::Extended
     }
 }
 
@@ -583,6 +672,11 @@ mod tests {
 
     use objectstore_types::metadata::ExpirationPolicy;
     use objectstore_types::scope::{Scope, Scopes};
+
+    #[cfg(feature = "storage-cogs")]
+    use objectstore_inventory_tracker::OpType;
+    #[cfg(feature = "storage-cogs")]
+    use objectstore_inventory_tracker::test_utils::DummyProducer;
 
     use super::*;
     use crate::backend::common::Backend;
@@ -1040,5 +1134,118 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_none(), "retry with correct part should succeed");
+    }
+
+    #[cfg(feature = "storage-cogs")]
+    fn backend_with_change_stream() -> (InMemoryBackend, DummyProducer) {
+        use crate::change_stream::CostTrackerStreamConfig;
+
+        let (streams, producer) = crate::change_stream::dummy_factory();
+        let change_stream = streams.build(Some(&CostTrackerStreamConfig {
+            shared_resource_id: "in_memory_objectstore".into(),
+            sample_rate: 1.0,
+        }));
+        (
+            InMemoryBackend::new("test").with_change_stream(change_stream),
+            producer,
+        )
+    }
+
+    #[cfg(feature = "storage-cogs")]
+    #[tokio::test]
+    async fn change_stream_reports_writes_and_deletes() {
+        let (backend, producer) = backend_with_change_stream();
+        let id = make_id();
+        let metadata = Metadata::default();
+        let payload = b"hello";
+
+        backend
+            .put_object(&id, &metadata, stream::single(payload.to_vec()))
+            .await
+            .unwrap();
+        backend.delete_object(&id).await.unwrap();
+        // The object is already gone, so this reports nothing.
+        backend.delete_object(&id).await.unwrap();
+
+        let records = producer.records();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].op_type, OpType::Write);
+        assert_eq!(records[0].app_feature, "testing");
+        assert_eq!(
+            records[0].size,
+            Some((json_len(&metadata) + payload.len()) as u64),
+            "the reported size covers metadata as well as the payload"
+        );
+        assert!(json_len(&metadata) > 0, "metadata must contribute bytes");
+        assert_eq!(records[1].op_type, OpType::Delete);
+    }
+
+    #[cfg(feature = "storage-cogs")]
+    #[tokio::test]
+    async fn change_stream_reports_expiry_extension_as_update() {
+        let (backend, producer) = backend_with_change_stream();
+        let id = make_id();
+        let expires = Timestamp::now() + Duration::from_secs(3600);
+        let metadata = Metadata {
+            time_expires: Some(expires),
+            ..Default::default()
+        };
+
+        backend
+            .put_object(&id, &metadata, stream::single(b"hello".to_vec()))
+            .await
+            .unwrap();
+        producer.clear();
+
+        let extended = expires + Duration::from_secs(3600);
+        assert!(backend.set_expiry(&id, extended).await.unwrap());
+
+        let records = producer.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].op_type, OpType::Update);
+
+        // A deadline that already covers the request writes nothing, so it reports nothing.
+        producer.clear();
+        assert!(
+            backend
+                .set_expiry(&id, expires + Duration::from_secs(60))
+                .await
+                .unwrap()
+        );
+        assert!(producer.records().is_empty());
+    }
+
+    #[cfg(feature = "storage-cogs")]
+    #[tokio::test]
+    async fn change_stream_reports_tombstone_expiry_extension() {
+        let (backend, producer) = backend_with_change_stream();
+        let id = make_id();
+        let target = make_id();
+        let expires = Timestamp::now() + Duration::from_secs(3600);
+
+        backend
+            .compare_and_write(
+                &id,
+                None,
+                TieredWrite::Tombstone(Tombstone {
+                    target: target.clone(),
+                    time_expires: Some(expires),
+                }),
+            )
+            .await
+            .unwrap();
+        producer.clear();
+
+        let extended = expires + Duration::from_secs(3600);
+        assert!(
+            backend
+                .compare_and_update(&id, Some(&target), TieredUpdate::SetExpiry(extended))
+                .await
+                .unwrap()
+        );
+
+        let records = producer.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].op_type, OpType::Update);
     }
 }

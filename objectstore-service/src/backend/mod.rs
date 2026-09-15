@@ -86,10 +86,10 @@ async fn from_leaf_config(
     streams: &ChangeStreamFactory,
 ) -> Result<Box<dyn common::Backend>> {
     Ok(match config {
-        StorageConfig::FileSystem(c) => Box::new(local_fs::LocalFsBackend::new(c)),
-        StorageConfig::S3Compatible(c) => {
-            Box::new(s3_compatible::S3CompatibleBackend::without_token(c))
-        }
+        StorageConfig::FileSystem(c) => Box::new(local_fs::LocalFsBackend::new(c, streams)),
+        StorageConfig::S3Compatible(c) => Box::new(
+            s3_compatible::S3CompatibleBackend::without_token(c, streams),
+        ),
         StorageConfig::Gcs(c) => Box::new(gcs::GcsBackend::new(c, streams).await?),
         StorageConfig::BigTable(c) => Box::new(bigtable::BigTableBackend::new(c, streams).await?),
         StorageConfig::Tiered(_) => anyhow::bail!("nested tiered storage is not supported"),
@@ -142,7 +142,9 @@ async fn lt_from_config(
     streams: &ChangeStreamFactory,
 ) -> Result<Box<dyn common::MultipartUploadBackend>> {
     Ok(match config {
-        MultipartUploadStorageConfig::FileSystem(c) => Box::new(local_fs::LocalFsBackend::new(c)),
+        MultipartUploadStorageConfig::FileSystem(c) => {
+            Box::new(local_fs::LocalFsBackend::new(c, streams))
+        }
         MultipartUploadStorageConfig::Gcs(c) => Box::new(gcs::GcsBackend::new(c, streams).await?),
     })
 }
