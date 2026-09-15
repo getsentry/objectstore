@@ -1,3 +1,4 @@
+use crate::response::ResponseExt as _;
 use crate::{ObjectKey, Session};
 
 /// The result from a successful [`delete()`](Session::delete) call.
@@ -27,7 +28,10 @@ impl DeleteBuilder {
             .request(reqwest::Method::DELETE, &self.key)?
             .send()
             .await?
-            .error_for_status()?;
+            .error_for_status_and_drain()
+            .await?
+            .drain_body()
+            .await;
         Ok(())
     }
 }

@@ -15,6 +15,7 @@ use tokio_util::io::{ReaderStream, StreamReader};
 
 pub use objectstore_types::metadata::{Compression, ExpirationPolicy};
 
+use crate::response::ResponseExt as _;
 use crate::{ClientStream, ObjectKey, Session};
 
 /// The response returned from the service after uploading an object.
@@ -338,7 +339,7 @@ impl PutBuilder {
         builder = builder.headers(self.metadata.to_headers("")?);
 
         let response = builder.body(body).send().await?;
-        Ok(response.error_for_status()?.json().await?)
+        Ok(response.error_for_status_and_drain().await?.json().await?)
     }
 }
 

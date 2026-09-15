@@ -7,6 +7,7 @@ use objectstore_types::metadata::{Compression, Metadata};
 use reqwest::StatusCode;
 use tokio_util::io::{ReaderStream, StreamReader};
 
+use crate::response::ResponseExt as _;
 use crate::{ClientStream, ObjectKey, Session};
 
 /// The result from a successful [`get()`](Session::get) call.
@@ -92,11 +93,18 @@ impl GetBuilder {
             .send()
             .await?;
         if response.status() == StatusCode::NOT_FOUND {
+            response.drain_body().await;
             return Ok(None);
         }
-        let response = response.error_for_status()?;
+        let response = response.error_for_status_and_drain().await?;
 
-        let mut metadata = Metadata::from_headers(response.headers(), "")?;
+        let mut metadata = match Metadata::from_headers(response.headers(), "") {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                response.drain_body().await;
+                return Err(error.into());
+            }
+        };
 
         let stream = response.bytes_stream().map_err(io::Error::other).boxed();
         let stream = maybe_decompress(
