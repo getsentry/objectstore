@@ -31,6 +31,9 @@ use tokio_util::io::{ReaderStream, StreamReader};
 use crate::backend::common::{
     Backend, DeleteResponse, GetResponse, MultipartUploadBackend, PutResponse,
 };
+use crate::change_stream::{
+    ChangeStream, ChangeStreamFactory, CostTrackerStreamConfig, flush_change_stream,
+};
 use crate::error::{Error, ErrorKind, Result, ResultExt as _};
 use crate::id::ObjectId;
 use crate::multipart::{
@@ -67,6 +70,19 @@ pub struct FileSystemConfig {
     /// - `OS__STORAGE__TYPE=filesystem`
     /// - `OS__STORAGE__PATH=/path/to/storage`
     pub path: PathBuf,
+
+    /// Reports what this backend stores, for per-usecase cost attribution.
+    ///
+    /// # Default
+    ///
+    /// `None`, which disables reporting for this backend.
+    ///
+    /// # Environment Variables
+    ///
+    /// - `OS__STORAGE__COGS__SHARED_RESOURCE_ID=filesystem_objectstore`
+    /// - `OS__STORAGE__COGS__SAMPLE_RATE=1.0` (optional)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cogs: Option<CostTrackerStreamConfig>,
 }
 
 /// Local filesystem backend for development and testing.
@@ -74,15 +90,19 @@ pub struct FileSystemConfig {
 pub struct LocalFsBackend {
     path: PathBuf,
     locks: ObjectLocks,
+
+    change_stream: Arc<dyn ChangeStream>,
 }
 
 impl LocalFsBackend {
     /// Creates a new [`LocalFsBackend`] rooted at the directory in `config`.
-    pub fn new(config: FileSystemConfig) -> Self {
-        let locks = ObjectLocks::new(&config.path);
+    pub fn new(config: FileSystemConfig, streams: &ChangeStreamFactory) -> Self {
+        let FileSystemConfig { path, cogs } = config;
+        let locks = ObjectLocks::new(&path);
         Self {
-            path: config.path,
+            path,
             locks,
+            change_stream: streams.build(cogs.as_ref()),
         }
     }
 
@@ -126,7 +146,7 @@ impl Backend for LocalFsBackend {
 
         let mut draft = Draft::create(&path, metadata).await?;
         let mut reader = pin!(StreamReader::new(stream));
-        tokio::io::copy(&mut reader, draft.writer())
+        let payload_size = tokio::io::copy(&mut reader, draft.writer())
             .await
             .map_err(|e| match stream::unpack_client_error(&e) {
                 Some(ce) => Error::from(ce),
@@ -137,9 +157,16 @@ impl Backend for LocalFsBackend {
                 ),
             })?;
 
+        let stored_size = draft.preamble_len() + payload_size;
+
         draft.prepare().await?;
         let _guard = self.locks.acquire(id).await?;
-        draft.publish().await
+        draft.publish().await?;
+
+        self.change_stream
+            .write(id, stored_size, metadata.time_expires);
+
+        Ok(())
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
@@ -218,6 +245,9 @@ impl Backend for LocalFsBackend {
 
         draft.prepare().await?;
         draft.publish().await?;
+
+        self.change_stream.update(id, Some(expire_at));
+
         Ok(true)
     }
 
@@ -232,7 +262,7 @@ impl Backend for LocalFsBackend {
         objectstore_log::debug!("Deleting from local_fs backend");
         let path = self.path(id);
         match tokio::fs::remove_file(path).await {
-            Ok(()) => {}
+            Ok(()) => self.change_stream.delete(id),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 objectstore_log::debug!("Object not found");
             }
@@ -242,6 +272,10 @@ impl Backend for LocalFsBackend {
         }
 
         Ok(())
+    }
+
+    async fn join(&self) {
+        flush_change_stream(&self.change_stream).await;
     }
 }
 
@@ -532,6 +566,8 @@ impl MultipartUploadBackend for LocalFsBackend {
         let path = self.path(id);
         Self::create_dir_all(&path).await?;
         let mut draft = Draft::create(&path, &metadata).await?;
+
+        let mut payload_size = 0;
         for completed in &parts {
             let part_path = dir.join(format!("{}.part", completed.part_number));
             let file = tokio::fs::File::open(&part_path)
@@ -543,16 +579,21 @@ impl MultipartUploadBackend for LocalFsBackend {
                 .read_line(&mut header_line)
                 .await
                 .context(ErrorKind::BackendFailure, "reading local-fs part header")?;
-            tokio::io::copy(&mut reader, draft.writer()).await.context(
+            payload_size += tokio::io::copy(&mut reader, draft.writer()).await.context(
                 ErrorKind::BackendFailure,
                 "assembling local-fs object payload",
             )?;
         }
 
+        let stored_size = draft.preamble_len() + payload_size;
+
         draft.prepare().await?;
         let guard = self.locks.acquire(id).await?;
         draft.publish().await?;
         drop(guard);
+
+        self.change_stream
+            .write(id, stored_size, metadata.time_expires);
 
         // Clean up multipart state
         tokio::fs::remove_dir_all(dir).await.context(
@@ -687,6 +728,8 @@ struct Draft {
     writer: BufWriter<tokio::fs::File>,
     path: tempfile::TempPath,
     target: PathBuf,
+    /// Bytes the metadata preamble occupies, counted as it is written.
+    preamble_len: u64,
 }
 
 impl Draft {
@@ -705,6 +748,7 @@ impl Draft {
             writer: BufWriter::new(tokio::fs::File::from_std(file)),
             path,
             target: target.to_path_buf(),
+            preamble_len: 0,
         };
 
         draft.write_preamble(metadata).await?;
@@ -725,11 +769,21 @@ impl Draft {
         self.writer.write_all(b"\n").await.context(
             ErrorKind::BackendFailure,
             "writing local-fs object metadata",
-        )
+        )?;
+
+        // The preamble is the encoded metadata plus the newline terminating it.
+        self.preamble_len = metadata_json.len() as u64 + 1;
+
+        Ok(())
     }
 
     fn writer(&mut self) -> &mut BufWriter<tokio::fs::File> {
         &mut self.writer
+    }
+
+    /// Bytes the metadata preamble occupies, for sizing the stored object.
+    fn preamble_len(&self) -> u64 {
+        self.preamble_len
     }
 
     async fn prepare(&mut self) -> Result<()> {
@@ -749,6 +803,7 @@ impl Draft {
             writer,
             path,
             target,
+            ..
         } = self;
 
         drop(writer);
@@ -792,6 +847,11 @@ mod tests {
     use objectstore_types::scope::{Scope, Scopes};
     use objectstore_types::time::Timestamp;
 
+    #[cfg(feature = "storage-cogs")]
+    use objectstore_inventory_tracker::OpType;
+    #[cfg(feature = "storage-cogs")]
+    use objectstore_inventory_tracker::test_utils::DummyProducer;
+
     use super::*;
     use crate::id::ObjectContext;
     use crate::stream;
@@ -799,9 +859,13 @@ mod tests {
     #[tokio::test]
     async fn stores_metadata() {
         let tempdir = tempfile::tempdir().unwrap();
-        let backend = LocalFsBackend::new(FileSystemConfig {
-            path: tempdir.path().to_path_buf(),
-        });
+        let backend = LocalFsBackend::new(
+            FileSystemConfig {
+                path: tempdir.path().to_path_buf(),
+                cogs: None,
+            },
+            &ChangeStreamFactory::default(),
+        );
 
         let id = ObjectId::random(ObjectContext {
             usecase: "testing".into(),
@@ -1088,9 +1152,13 @@ mod tests {
     #[tokio::test]
     async fn get_metadata_returns_metadata() {
         let tempdir = tempfile::tempdir().unwrap();
-        let backend = LocalFsBackend::new(FileSystemConfig {
-            path: tempdir.path().to_path_buf(),
-        });
+        let backend = LocalFsBackend::new(
+            FileSystemConfig {
+                path: tempdir.path().to_path_buf(),
+                cogs: None,
+            },
+            &ChangeStreamFactory::default(),
+        );
 
         let id = ObjectId::random(ObjectContext {
             usecase: "testing".into(),
@@ -1126,9 +1194,13 @@ mod tests {
     #[tokio::test]
     async fn get_metadata_nonexistent() {
         let tempdir = tempfile::tempdir().unwrap();
-        let backend = LocalFsBackend::new(FileSystemConfig {
-            path: tempdir.path().to_path_buf(),
-        });
+        let backend = LocalFsBackend::new(
+            FileSystemConfig {
+                path: tempdir.path().to_path_buf(),
+                cogs: None,
+            },
+            &ChangeStreamFactory::default(),
+        );
 
         let id = ObjectId::random(ObjectContext {
             usecase: "testing".into(),
@@ -1146,11 +1218,32 @@ mod tests {
         })
     }
 
+    #[cfg(feature = "storage-cogs")]
+    fn make_backend_with_change_stream() -> (tempfile::TempDir, LocalFsBackend, DummyProducer) {
+        let tempdir = tempfile::tempdir().unwrap();
+        let (streams, producer) = crate::change_stream::dummy_factory();
+        let backend = LocalFsBackend::new(
+            FileSystemConfig {
+                path: tempdir.path().to_path_buf(),
+                cogs: Some(CostTrackerStreamConfig {
+                    shared_resource_id: "filesystem_objectstore".into(),
+                    sample_rate: 1.0,
+                }),
+            },
+            &streams,
+        );
+        (tempdir, backend, producer)
+    }
+
     fn make_backend() -> (tempfile::TempDir, LocalFsBackend) {
         let tempdir = tempfile::tempdir().unwrap();
-        let backend = LocalFsBackend::new(FileSystemConfig {
-            path: tempdir.path().to_path_buf(),
-        });
+        let backend = LocalFsBackend::new(
+            FileSystemConfig {
+                path: tempdir.path().to_path_buf(),
+                cogs: None,
+            },
+            &ChangeStreamFactory::default(),
+        );
         (tempdir, backend)
     }
 
@@ -1613,5 +1706,126 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_none(), "retry with correct part should succeed");
+    }
+
+    #[cfg(feature = "storage-cogs")]
+    #[tokio::test]
+    async fn change_stream_reports_size_written_to_disk() {
+        let (tempdir, backend, producer) = make_backend_with_change_stream();
+        let id = make_id();
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
+            time_expires: Some(Timestamp::now() + Duration::from_hours(1)),
+            ..Default::default()
+        };
+        let payload = b"oh hai!";
+
+        backend
+            .put_object(
+                &id,
+                &metadata,
+                stream::single(payload.to_vec()),
+                Timestamp::now(),
+            )
+            .await
+            .unwrap();
+
+        let file = tokio::fs::read(tempdir.path().join(id.as_storage_path().to_string()))
+            .await
+            .unwrap();
+
+        let records = producer.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].op_type, OpType::Write);
+        assert_eq!(records[0].shared_resource_id, "filesystem_objectstore");
+        assert_eq!(records[0].app_feature, "testing");
+        assert_eq!(
+            records[0].size,
+            Some(file.len() as u64),
+            "the metadata header line counts towards the reported size"
+        );
+        assert!(records[0].expiration_time.is_some());
+    }
+
+    #[cfg(feature = "storage-cogs")]
+    #[tokio::test]
+    async fn change_stream_reports_assembled_multipart_size() {
+        let (tempdir, backend, producer) = make_backend_with_change_stream();
+        let id = make_id();
+        let metadata = Metadata::default();
+
+        let upload_id = backend.initiate_multipart(&id, &metadata).await.unwrap();
+
+        let mut completed = Vec::new();
+        for (number, payload) in [(1u32, b"aaaa".to_vec()), (2, b"bbbb".to_vec())] {
+            let part_number = NonZeroU32::new(number).unwrap();
+            let etag = backend
+                .upload_part(
+                    &id,
+                    &upload_id,
+                    part_number,
+                    payload.len() as u64,
+                    None,
+                    stream::single(payload),
+                )
+                .await
+                .unwrap();
+            completed.push(CompletedPart { part_number, etag });
+        }
+
+        // Uploading parts is intermediate state, so nothing is reported until completion.
+        assert!(producer.records().is_empty());
+
+        assert!(
+            backend
+                .complete_multipart(&id, &upload_id, completed, Timestamp::now())
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let file = tokio::fs::read(tempdir.path().join(id.as_storage_path().to_string()))
+            .await
+            .unwrap();
+
+        let records = producer.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].op_type, OpType::Write);
+        assert_eq!(
+            records[0].size,
+            Some(file.len() as u64),
+            "the assembled object counts its metadata header and every part payload"
+        );
+    }
+
+    #[cfg(feature = "storage-cogs")]
+    #[tokio::test]
+    async fn change_stream_reports_deletes_on_success() {
+        let (_tempdir, backend, producer) = make_backend_with_change_stream();
+        let id = make_id();
+
+        // Try to delete a non-existent object. Don't emit a message.
+        backend
+            .delete_object(&id, Timestamp::now())
+            .await
+            .expect("deleting a non-existent object returns Ok(())");
+        assert!(producer.records().is_empty());
+
+        backend
+            .put_object(
+                &id,
+                &Metadata::default(),
+                stream::single(b"hi".to_vec()),
+                Timestamp::now(),
+            )
+            .await
+            .unwrap();
+        producer.clear();
+
+        backend.delete_object(&id, Timestamp::now()).await.unwrap();
+
+        let records = producer.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].op_type, OpType::Delete);
     }
 }

@@ -14,6 +14,7 @@ use serde::Deserialize;
 use tokio::io::AsyncRead;
 use tokio_util::io::ReaderStream;
 
+use crate::response::ResponseExt as _;
 use crate::{ClientStream, ObjectKey, Session};
 
 pub use objectstore_types::multipart::CompletePart;
@@ -182,7 +183,13 @@ impl InitiateMultipartBuilder {
 
         builder = builder.headers(self.metadata.to_headers("")?);
 
-        let response: InitiateResponse = builder.send().await?.error_for_status()?.json().await?;
+        let response: InitiateResponse = builder
+            .send()
+            .await?
+            .error_for_status_and_drain()
+            .await?
+            .json()
+            .await?;
 
         Ok(MultipartUpload {
             session: self.session,
@@ -303,7 +310,13 @@ impl MultipartUpload {
             builder = builder.header("content-md5", encoded);
         }
 
-        let response: UploadPartResponse = builder.send().await?.error_for_status()?.json().await?;
+        let response: UploadPartResponse = builder
+            .send()
+            .await?
+            .error_for_status_and_drain()
+            .await?
+            .json()
+            .await?;
         Ok(CompletePart {
             part_number,
             etag: response.etag,
@@ -351,7 +364,13 @@ impl MultipartUpload {
             Some(params),
         )?;
 
-        let response: ListPartsResponse = builder.send().await?.error_for_status()?.json().await?;
+        let response: ListPartsResponse = builder
+            .send()
+            .await?
+            .error_for_status_and_drain()
+            .await?
+            .json()
+            .await?;
         Ok(response)
     }
 
@@ -363,7 +382,13 @@ impl MultipartUpload {
             Some(&self.key),
             Some(vec![("upload_id", self.upload_id.to_string())]),
         )?;
-        builder.send().await?.error_for_status()?;
+        builder
+            .send()
+            .await?
+            .error_for_status_and_drain()
+            .await?
+            .drain_body()
+            .await;
         Ok(())
     }
 
@@ -385,7 +410,7 @@ impl MultipartUpload {
             )?
             .json(&CompleteRequest { parts });
 
-        let response = builder.send().await?.error_for_status()?;
+        let response = builder.send().await?.error_for_status_and_drain().await?;
         match response.json::<CompleteResponse>().await? {
             CompleteResponse::Success(s) => Ok(s.key),
             CompleteResponse::Error { error } => Err(crate::Error::MultipartComplete {

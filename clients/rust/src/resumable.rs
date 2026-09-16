@@ -18,10 +18,28 @@ use objectstore_types::resumable::{
     UploadOffset,
 };
 use reqwest::{Method, Response, StatusCode};
+use serde::Serialize;
 
 pub use objectstore_types::resumable::{SessionToken, UploadProgress};
 
+use crate::response::ResponseExt as _;
 use crate::{Compression, Error, ExpirationPolicy, ObjectKey, Session};
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum UploadType {
+    Resumable,
+}
+
+#[derive(Serialize)]
+struct UploadTypeQuery {
+    upload_type: UploadType,
+}
+
+#[derive(Serialize)]
+struct SessionQuery<'a> {
+    session: &'a SessionToken,
+}
 
 /// A handle bound to one resumable upload session.
 ///
@@ -113,9 +131,12 @@ impl ResumableUpload {
     }
 
     fn request(&self, method: Method) -> crate::Result<reqwest::RequestBuilder> {
-        let token = self.token.to_base64url();
-        self.session
-            .resumable_request(method, &self.key, ("session", &token))
+        Ok(self
+            .session
+            .request(method, &self.key)?
+            .query(&SessionQuery {
+                session: &self.token,
+            }))
     }
 }
 
@@ -195,20 +216,23 @@ impl CreateResumableUploadBuilder {
         };
         let request = self
             .session
-            .resumable_request(
-                method,
-                self.key.as_deref().unwrap_or_default(),
-                ("upload_type", "resumable"),
-            )?
+            .request(method, self.key.as_deref().unwrap_or_default())?
+            .query(&UploadTypeQuery {
+                upload_type: UploadType::Resumable,
+            })
             .headers(self.metadata.to_headers("")?)
             .header(HEADER_UPLOAD_LENGTH, self.total_length.to_string());
         let response = request.send().await?;
 
         match response.status() {
             StatusCode::OK => {}
-            StatusCode::NOT_IMPLEMENTED => return Ok(None),
+            StatusCode::NOT_IMPLEMENTED => {
+                response.drain_body().await;
+                return Ok(None);
+            }
             status => {
-                response.error_for_status_ref()?;
+                let response = response.error_for_status_and_drain().await?;
+                response.drain_body().await;
                 return Err(Error::MalformedResponse(format!(
                     "unexpected HTTP status {status} while creating a resumable upload"
                 )));
@@ -312,10 +336,17 @@ impl CancelUploadBuilder {
     pub async fn send(self) -> crate::Result<()> {
         let response = self.upload.request(Method::DELETE)?.send().await?;
         match response.status() {
-            StatusCode::NO_CONTENT => Ok(()),
-            StatusCode::NOT_FOUND | StatusCode::GONE => Err(Error::ResumableUploadUnavailable),
+            StatusCode::NO_CONTENT => {
+                response.drain_body().await;
+                Ok(())
+            }
+            StatusCode::NOT_FOUND | StatusCode::GONE => {
+                response.drain_body().await;
+                Err(Error::ResumableUploadUnavailable)
+            }
             status => {
-                response.error_for_status_ref()?;
+                let response = response.error_for_status_and_drain().await?;
+                response.drain_body().await;
                 Err(Error::MalformedResponse(format!(
                     "unexpected HTTP status {status} while canceling a resumable upload"
                 )))
@@ -327,7 +358,9 @@ impl CancelUploadBuilder {
 async fn parse_progress_response(response: Response) -> crate::Result<UploadProgress> {
     match response.status() {
         StatusCode::NO_CONTENT | StatusCode::CONFLICT => {
-            let offset = parse_offset(&response).ok_or_else(|| {
+            let offset = parse_offset(&response);
+            response.drain_body().await;
+            let offset = offset.ok_or_else(|| {
                 crate::Error::MalformedResponse(
                     "resumable upload response has no valid Upload-Offset header".into(),
                 )
@@ -338,9 +371,13 @@ async fn parse_progress_response(response: Response) -> crate::Result<UploadProg
             let _: CompleteUploadResponse = response.json().await?;
             Ok(UploadProgress::Complete)
         }
-        StatusCode::NOT_FOUND | StatusCode::GONE => Err(Error::ResumableUploadUnavailable),
+        StatusCode::NOT_FOUND | StatusCode::GONE => {
+            response.drain_body().await;
+            Err(Error::ResumableUploadUnavailable)
+        }
         status => {
-            response.error_for_status_ref()?;
+            let response = response.error_for_status_and_drain().await?;
+            response.drain_body().await;
             Err(Error::MalformedResponse(format!(
                 "unexpected HTTP status {status} while continuing a resumable upload"
             )))

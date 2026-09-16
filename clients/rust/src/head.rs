@@ -1,6 +1,7 @@
 use objectstore_types::metadata::Metadata;
 use reqwest::StatusCode;
 
+use crate::response::ResponseExt as _;
 use crate::{ObjectKey, Session};
 
 /// The result from a successful [`head()`](Session::head) call.
@@ -37,10 +38,12 @@ impl HeadBuilder {
             .send()
             .await?;
         if response.status() == StatusCode::NOT_FOUND {
+            response.drain_body().await;
             return Ok(None);
         }
-        let response = response.error_for_status()?;
-        let metadata = Metadata::from_headers(response.headers(), "")?;
-        Ok(Some(metadata))
+        let response = response.error_for_status_and_drain().await?;
+        let metadata = Metadata::from_headers(response.headers(), "");
+        response.drain_body().await;
+        Ok(Some(metadata?))
     }
 }

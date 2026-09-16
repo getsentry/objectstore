@@ -813,6 +813,7 @@ impl Default for Config {
 
             storage: StorageConfig::FileSystem(FileSystemConfig {
                 path: PathBuf::from("data"),
+                cogs: None,
             }),
 
             storage_cogs: None,

@@ -5,7 +5,7 @@ the `objectstore-server`.
 
 # Cargo features
 
-- `storage_cogs`: support for publishing per-object change streams to Kafka for
+- `storage-cogs`: support for publishing per-object change streams to Kafka for
   storage cost attribution. Off by default; it adds a build step to compile
   `librdkafka` and requires toolchain components we don't otherwise need. Local
   and sandbox builds don't have a Kafka topic/consumer anyway.
@@ -144,17 +144,18 @@ rate-limiting failures at a higher layer) are not counted.
 
 ## Storage COGS
 
-This is gated behind the `storage_cogs` Cargo feature.
+This is gated behind the `storage-cogs` Cargo feature.
 
-Each backend reports every write/overwrite, applied expiry extension, and delete it performs on stored objects to a [`ChangeStream`](change_stream::ChangeStream).
-To turn this change stream into COGS data, a stream consumer has to merge each
-change event into an external table to update an inventory of objects. The
-inventory table can be queried to break down each backend's storage utilization
-by `app_feature`. Note that [`NoopStream`](change_stream::NoopStream) is used
-unless the backend's config includes a
-[`CostTrackerStreamConfig`](change_stream::CostTrackerStreamConfig) and the
-service has a usable transport for it, and unless the `storage-cogs` feature is
-compiled in at all.
+Each backend reports every write/overwrite, applied expiry extension, and delete
+it performs on stored objects to a [`ChangeStream`](change_stream::ChangeStream)
+(see [the change stream section](#change-streams)). To turn this change stream
+into COGS data, a stream consumer has to merge each change event into an
+external table to update an inventory of objects. The inventory table can be
+queried to break down each backend's storage utilization by `app_feature`. To
+enable storage COGS, enable the `storage-cogs` Cargo feature and provide a
+[`CostTrackerConfig`](change_stream::CostTrackerConfig) for service-wide sink
+connection details and a [`CostTrackerStreamConfig`](change_stream::CostTrackerStreamConfig)
+for per-backend information.
 
 Each row in the inventory table has an anonymized hash of an `ObjectId` as well
 as the row's size, expiry, Sentry org/project, `app_feature`, and relevant
@@ -163,11 +164,10 @@ long-term backend the inventory table will contain _two rows_ for an object: a
 row for the actual object and its size in long-term backend, and a separate row
 for the tombstone and the tombstone's size in the high-volume backend.
 
-`ChangeStream` is not aware of any automatic garbage collection that backends
-may perform. Expired objects must be filtered out when querying the inventory
-table.
+Because the change stream does not observe automatic garbage collection, expired
+objects must be filtered out when querying the inventory table.
 
-Under the hood, `CostTrackerStream` uses
+Under the hood, [`CostTrackerStream`](change_stream::CostTrackerStream) uses
 [`InventoryTracker`](objectstore_inventory_tracker::InventoryTracker) to publish
 change events; it is generic over the transport rather than tied to Kafka. Each
 backend has its own sampling rate to lessen the load put on the stream
@@ -177,6 +177,52 @@ effect at the time so that consumers can smooth over the effects of changing the
 sampling rate. When aggregating, divide each row's value by its `sample_rate`.
 
 See also: [`objectstore_inventory_tracker`] documentation.
+
+# Change Streams
+
+Every backend publishes the changes it makes to the objects it stores as a
+[`ChangeStream`](change_stream::ChangeStream). It is a fire-and-forget,
+per-backend feed of three operations:
+
+- `write(id, size, expires_at)`: `id` now occupies `size` bytes. Used for both
+  new objects and overwrites.
+- `update(id, expires_at)`: `id`'s expiration moved while its stored size is
+  unchanged. In practice this is a TTI bump.
+- `delete(id)`: `id` was deleted explicitly.
+
+The stream describes physical storage per backend. When using
+[`TieredStorage`](backend::tiered::TieredStorage), objects that are stored in
+long-term storage will emit a change record for the actual object in long-term
+storage as well as for the tombstone record in high-volume storage.
+
+`size` is a count of bytes that the backend actually stores for an object. This
+includes object payloads, metadata, and sometimes backend-specific overhead.
+
+Decorators such as [`CountingBackend`](backend::counting::CountingBackend) and
+[`TieredStorage`](backend::tiered::TieredStorage) don't publish change streams
+of their own; only leaf backends that actually own bytes do.
+
+Not every backend can tell whether a delete removed anything. Some backends may
+return a 204 whether the object existed or not. Those backends will report extra
+`delete` messages on their change stream.
+
+Automatic garbage collection is invisible to the change stream. Downstream
+consumers of the stream need to consider the `expires_at` field on messages.
+
+## `ChangeStream` implementation guidance
+
+While the [`ChangeStream`](change_stream::ChangeStream) trait is abstract, that
+abstraction is not surfaced in service configuration. For instance, the
+[storage COGS change stream](#storage-cogs) is configured with a service-wide
+[`CostTrackerConfig`](change_stream::CostTrackerConfig) and per-backend
+[`CostTrackerStreamConfig`](change_stream::CostTrackerStreamConfig)s. These
+configurations are connected in [`ChangeStreamFactory`](change_stream::ChangeStreamFactory)
+to build a [`CostTrackerStream`](change_stream::CostTrackerStream).
+
+New `ChangeStream` implementations may follow the same pattern:
+- per-backend configuration for per-backend IDs or configuration
+- service-wide configuration for a stream sink
+- glue code in and around `ChangeStreamFactory`
 
 # Metadata and Payload
 
