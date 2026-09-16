@@ -1,9 +1,4 @@
 //! Integration tests for the resumable upload endpoints.
-//!
-//! The test server uses its default filesystem backend, which does not implement resumable
-//! uploads. These tests cover request validation and ensure regular object requests remain
-//! unaffected. Backend behavior is covered in the service and backend test suites.
-//! TODO: Add end-to-end resumable upload coverage once the filesystem backend supports it.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -12,7 +7,9 @@ use std::net::TcpStream;
 use anyhow::Result;
 use objectstore_server::config::{AuthZ, Config, EncryptionConfig, Service};
 use objectstore_test::server::TestServer;
-use objectstore_types::resumable::{HEADER_UPLOAD_LENGTH, HEADER_UPLOAD_OFFSET};
+use objectstore_types::resumable::{
+    CreateSessionResponse, HEADER_UPLOAD_LENGTH, HEADER_UPLOAD_OFFSET,
+};
 use reqwest::StatusCode;
 
 /// Unpadded base64url for the opaque backend token `some-token`.
@@ -20,6 +17,8 @@ const SESSION: &str = "c29tZS10b2tlbg";
 
 /// Protected `some-token`, bound to `test/org.1/objects/my-key` with the test key below.
 const PROTECTED_SESSION: &str = "AAR0ZXN0XSsQ-Z1kEHOi7Np_EvIdRGcZVhFjaV20NWpuzZNyrxcbQD6sDvNFCqXBJF_z8DcrYZoGhzYxYnmX2KOEB4AjPDlkorw3DrUD4AwxlhqSmHMERGPtexVbxt_DS9b-jpDPwJA";
+
+const OBJECT_PATH: &str = "/v1/objects/test/org=1/my-key";
 
 async fn test_server() -> TestServer {
     TestServer::with_config(Config {
@@ -74,6 +73,24 @@ async fn raw_put(server: &TestServer, path: &str, headers: &str, body: &str) -> 
         Ok(response)
     })
     .await?
+}
+
+async fn create_session_path(
+    server: &TestServer,
+    client: &reqwest::Client,
+    total_length: u64,
+) -> Result<String> {
+    let response = client
+        .put(server.url(&format!("{OBJECT_PATH}?upload_type=resumable")))
+        .header(HEADER_UPLOAD_LENGTH, total_length)
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let created: CreateSessionResponse = response.json().await?;
+    Ok(format!(
+        "{OBJECT_PATH}?session={}",
+        created.session.to_base64url()
+    ))
 }
 
 // --- Session creation ---
@@ -143,16 +160,118 @@ async fn unknown_upload_type_is_rejected() -> Result<()> {
 }
 
 #[tokio::test]
-async fn declined_session_creation_returns_not_implemented() -> Result<()> {
+async fn test_resumable_upload() -> Result<()> {
     let server = test_server().await;
+    let client = reqwest::Client::new();
+    let object = "/v1/objects/test/org=1/my-key";
 
-    let response = reqwest::Client::new()
-        .put(server.url("/v1/objects/test/org=1/my-key?upload_type=resumable"))
-        .header(HEADER_UPLOAD_LENGTH, "1048576")
+    // Create a session.
+    let response = client
+        .put(server.url(&format!("{object}?upload_type=resumable")))
+        .header(HEADER_UPLOAD_LENGTH, "6")
+        .header(reqwest::header::CONTENT_TYPE, "text/plain")
         .send()
         .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let created: CreateSessionResponse = response.json().await?;
+    assert_eq!(created.key, "my-key");
+    let session_path = format!("{object}?session={}", created.session.to_base64url());
 
-    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    // The object doesn't exist yet.
+    let response = client.get(server.url(object)).send().await?;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    // Upload in chunks.
+    let response = client
+        .put(server.url(&session_path))
+        .header(HEADER_UPLOAD_OFFSET, "0")
+        .body("abc")
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(response.headers()[HEADER_UPLOAD_OFFSET], "3");
+
+    // Rejected: outdated offset.
+    let response = client
+        .put(server.url(&session_path))
+        .header(HEADER_UPLOAD_OFFSET, "0")
+        .body("x")
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+
+    // Rejected: would exceed the total length declared on creation.
+    assert_eq!(response.headers()[HEADER_UPLOAD_OFFSET], "3");
+    let response = client
+        .put(server.url(&session_path))
+        .header(HEADER_UPLOAD_OFFSET, "3")
+        .body("defg")
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // Query the offset and finish the upload.
+    let response = client
+        .put(server.url(&session_path))
+        .header(HEADER_UPLOAD_OFFSET, "*")
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(response.headers()[HEADER_UPLOAD_OFFSET], "3");
+    let response = client
+        .put(server.url(&session_path))
+        .header(HEADER_UPLOAD_OFFSET, "3")
+        .body("def")
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(response.json::<serde_json::Value>().await?["key"], "my-key");
+
+    // The object is available and the session is gone.
+    let response = client.get(server.url(object)).send().await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[reqwest::header::CONTENT_TYPE],
+        "text/plain"
+    );
+    assert_eq!(response.text().await?, "abcdef");
+    let response = client
+        .put(server.url(&session_path))
+        .header(HEADER_UPLOAD_OFFSET, "*")
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_resumable_upload_cancel() -> Result<()> {
+    let server = test_server().await;
+    let client = reqwest::Client::new();
+
+    // Create a session and upload a partial payload.
+    let session_path = create_session_path(&server, &client, 6).await?;
+    let response = client
+        .put(server.url(&session_path))
+        .header(HEADER_UPLOAD_OFFSET, "0")
+        .body("abc")
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let response = client.delete(server.url(&session_path)).send().await?;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    // The canceled session and unpublished object are unavailable.
+    let response = client
+        .put(server.url(&session_path))
+        .header(HEADER_UPLOAD_OFFSET, "*")
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        client.get(server.url(OBJECT_PATH)).send().await?.status(),
+        StatusCode::NOT_FOUND
+    );
     Ok(())
 }
 
@@ -160,17 +279,19 @@ async fn declined_session_creation_returns_not_implemented() -> Result<()> {
 
 #[tokio::test]
 async fn offset_query_does_not_require_content_length() -> Result<()> {
-    let server = test_server_with_protected_session().await?;
+    let server = test_server().await;
+    let client = reqwest::Client::new();
+    let session_path = create_session_path(&server, &client, 3).await?;
     let response = raw_put(
         &server,
-        &format!("/v1/objects/test/org=1/my-key?session={PROTECTED_SESSION}"),
+        &session_path,
         &format!("{HEADER_UPLOAD_OFFSET}: *\r\n"),
         "",
     )
     .await?;
 
     assert!(
-        response.starts_with("HTTP/1.1 501 Not Implemented\r\n"),
+        response.starts_with("HTTP/1.1 204 No Content\r\n"),
         "unexpected response: {response}"
     );
     Ok(())
@@ -179,9 +300,11 @@ async fn offset_query_does_not_require_content_length() -> Result<()> {
 #[tokio::test]
 async fn offset_query_rejects_chunked_body_without_content_length() -> Result<()> {
     let server = test_server().await;
+    let client = reqwest::Client::new();
+    let session_path = create_session_path(&server, &client, 7).await?;
     let response = raw_put(
         &server,
-        &format!("/v1/objects/test/org=1/my-key?session={SESSION}"),
+        &session_path,
         &format!("{HEADER_UPLOAD_OFFSET}: *\r\nTransfer-Encoding: chunked\r\n"),
         "7\r\npayload\r\n0\r\n\r\n",
     )
@@ -197,9 +320,11 @@ async fn offset_query_rejects_chunked_body_without_content_length() -> Result<()
 #[tokio::test]
 async fn chunk_requires_upload_offset() -> Result<()> {
     let server = test_server().await;
+    let client = reqwest::Client::new();
+    let session_path = create_session_path(&server, &client, 7).await?;
 
-    let response = reqwest::Client::new()
-        .put(server.url(&format!("/v1/objects/test/org=1/my-key?session={SESSION}")))
+    let response = client
+        .put(server.url(&session_path))
         .body("payload")
         .send()
         .await?;
@@ -212,10 +337,11 @@ async fn chunk_requires_upload_offset() -> Result<()> {
 async fn chunk_rejects_malformed_upload_offset() -> Result<()> {
     let server = test_server().await;
     let client = reqwest::Client::new();
+    let session_path = create_session_path(&server, &client, 7).await?;
 
     for invalid in ["", "-1", "1.5", "**", "here"] {
         let response = client
-            .put(server.url(&format!("/v1/objects/test/org=1/my-key?session={SESSION}")))
+            .put(server.url(&session_path))
             .header(HEADER_UPLOAD_OFFSET, invalid)
             .body("payload")
             .send()
@@ -234,9 +360,11 @@ async fn chunk_rejects_malformed_upload_offset() -> Result<()> {
 #[tokio::test]
 async fn offset_query_rejects_a_payload() -> Result<()> {
     let server = test_server().await;
+    let client = reqwest::Client::new();
+    let session_path = create_session_path(&server, &client, 7).await?;
 
-    let response = reqwest::Client::new()
-        .put(server.url(&format!("/v1/objects/test/org=1/my-key?session={SESSION}")))
+    let response = client
+        .put(server.url(&session_path))
         .header(HEADER_UPLOAD_OFFSET, "*")
         .body("payload")
         .send()
@@ -320,7 +448,7 @@ async fn session_takes_precedence_over_upload_type() -> Result<()> {
         .send()
         .await?;
 
-    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
     Ok(())
 }
 

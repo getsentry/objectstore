@@ -310,12 +310,13 @@ trips for objects large enough that re-sending the whole payload is expensive.
    upload.
 2. [`put_chunk`](backend::common::Backend::put_chunk) writes bytes at an offset and
    reports the offset now persisted.
-3. After a failure, [`upload_offset`](backend::common::Backend::upload_offset)
-   reports where the backend stands, so the caller resumes from there.
+3. After a failure while the session is still open,
+   [`upload_offset`](backend::common::Backend::upload_offset) reports where the backend stands,
+   so the caller resumes from there.
 4. The chunk carrying the last byte completes the upload. There is no separate completion call —
    the backend recognizes that chunk from the declared total size and makes the object available
    through its normal read path before reporting completion.
-5. At any time, an upload can be canceled, which discards what its session holds.
+5. While open, an upload can be canceled, which discards what its session holds.
 
 Backend session tokens remain private to the service. Before returning a token to a client,
 [`StorageService`] places the canonical object path and backend-defined token string in an

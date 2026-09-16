@@ -1,19 +1,19 @@
 //! Local filesystem backend for development and testing.
 //!
-//! Complete object files are published by atomically renaming same-directory drafts, so readers
-//! observe either the previous or next complete file. Unpublished drafts are removed automatically
-//! when dropped.
+//! Object writes publish by atomically renaming drafts, so readers observe either the previous
+//! or next complete file.
 //!
-//! To avoid races on metadata and expiry updates, this backend uses locks placed under `.locks/` to
-//! synchronize mutations across backend instances and cooperating processes. The first two bytes of
-//! the BLAKE3 hash of an object's storage path select one of 65,536 permanent lock slots under
-//! `.locks/<first byte>/<second byte>` (lowercase hexadecimal).
+//! To avoid races on metadata, expiry, and upload updates, this backend uses locks placed under
+//! `.locks/` to synchronize mutations across backend instances and cooperating processes. The first
+//! two bytes of the BLAKE3 hash of an object's storage path or upload key select one of 65,536
+//! permanent lock slots under `.locks/<first byte>/<second byte>` (lowercase hexadecimal).
 //!
 //! Shared filesystems are supported only when locks propagate across the cluster, pathname
 //! visibility is coherent, and rename is atomic.
 
 use std::fs::File;
 use std::io;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::sync::Arc;
@@ -22,11 +22,13 @@ use std::time::SystemTime;
 use futures_util::StreamExt;
 use objectstore_types::metadata::Metadata;
 use objectstore_types::range::ByteRange;
+use objectstore_types::resumable::UploadProgress;
 use objectstore_types::time::Timestamp;
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::sync::Semaphore;
 use tokio_util::io::{ReaderStream, StreamReader};
+use uuid::Uuid;
 
 use crate::backend::common::{
     Backend, DeleteResponse, GetResponse, MultipartUploadBackend, PutResponse,
@@ -40,6 +42,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, Part, PartNumber, UploadId, UploadPartResponse,
 };
+use crate::resumable::BackendToken;
 use crate::stream::{self, ClientStream};
 
 /// Configuration for [`LocalFsBackend`].
@@ -111,6 +114,14 @@ impl LocalFsBackend {
         self.path.join(id.as_storage_path().to_string())
     }
 
+    fn upload_path(&self, id: &ObjectId, upload_id: Uuid) -> PathBuf {
+        self.path
+            .join(id.context().usecase.as_str())
+            .join(id.context().scopes.as_storage_path().to_string())
+            .join("uploads")
+            .join(upload_id.to_string())
+    }
+
     /// Ensures that an object file can be created at the given path.
     async fn create_dir_all(path: &Path) -> Result<()> {
         tokio::fs::create_dir_all(path.parent().unwrap())
@@ -130,6 +141,194 @@ impl Backend for LocalFsBackend {
 
     fn as_multipart_upload_backend(&self) -> Result<&dyn MultipartUploadBackend> {
         Ok(self)
+    }
+
+    async fn create_upload_session(
+        &self,
+        id: &ObjectId,
+        metadata: &Metadata,
+        total_length: NonZeroU64,
+    ) -> Result<Option<BackendToken>> {
+        let upload_id = uuid::Uuid::now_v7();
+        let path = self.upload_path(id, upload_id);
+        Self::create_dir_all(&path).await?;
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+            .await
+            .context(
+                ErrorKind::BackendFailure,
+                "creating local-fs resumable upload",
+            )?;
+        let metadata_json = serde_json::to_string(metadata)
+            .context(ErrorKind::Internal, "encoding local-fs object metadata")?;
+        file.write_all(metadata_json.as_bytes()).await.context(
+            ErrorKind::BackendFailure,
+            "writing local-fs object metadata",
+        )?;
+        file.write_all(b"\n").await.context(
+            ErrorKind::BackendFailure,
+            "writing local-fs object metadata",
+        )?;
+        file.sync_data().await.context(
+            ErrorKind::BackendFailure,
+            "syncing local-fs resumable upload",
+        )?;
+        Ok(Some(format!("{total_length}.{upload_id}")))
+    }
+
+    async fn put_chunk(
+        &self,
+        id: &ObjectId,
+        token: &BackendToken,
+        offset: u64,
+        content_length: u64,
+        stream: ClientStream,
+    ) -> Result<UploadProgress> {
+        let session = UploadSession::from_token(token)?;
+        let declared_end = offset
+            .checked_add(content_length)
+            .filter(|end| *end <= session.total_length.get())
+            .ok_or(ErrorKind::ChunkExceedsUploadLength {
+                offset,
+                content_length,
+                upload_length: session.total_length.get(),
+            })?;
+        let upload_guard = self.locks.lock_upload(session.upload_id).await?;
+
+        let upload_path = self.upload_path(id, session.upload_id);
+        let mut upload = UploadFile::open(&upload_path).await?;
+        if upload.payload_size == session.total_length.get() {
+            return Err(ErrorKind::UploadSessionGone.into());
+        }
+        if content_length == 0 {
+            return Ok(UploadProgress::Incomplete {
+                offset: upload.payload_size,
+            });
+        }
+        if offset != upload.payload_size {
+            return Err(ErrorKind::UploadOffsetMismatch {
+                offset: upload.payload_size,
+            }
+            .into());
+        }
+
+        upload.file.seek(std::io::SeekFrom::End(0)).await.context(
+            ErrorKind::BackendFailure,
+            "seeking local-fs resumable upload",
+        )?;
+        let original_len = upload.preamble_len + upload.payload_size;
+        let mut reader = pin!(StreamReader::new(stream));
+        let copied = match tokio::io::copy(&mut reader, &mut upload.file).await {
+            Ok(copied) => copied,
+            Err(error) => {
+                upload.file.set_len(original_len).await.context(
+                    ErrorKind::BackendFailure,
+                    "rolling back failed local-fs resumable chunk",
+                )?;
+                upload.file.sync_data().await.context(
+                    ErrorKind::BackendFailure,
+                    "syncing rolled-back local-fs resumable chunk",
+                )?;
+                return Err(match stream::unpack_client_error(&error) {
+                    Some(client_error) => Error::from(client_error),
+                    None => Error::with_context(
+                        ErrorKind::BackendFailure,
+                        "writing local-fs resumable chunk",
+                        error,
+                    ),
+                });
+            }
+        };
+        let persisted_offset =
+            upload
+                .payload_size
+                .checked_add(copied)
+                .ok_or(ErrorKind::ChunkExceedsUploadLength {
+                    offset,
+                    content_length: copied,
+                    upload_length: session.total_length.get(),
+                })?;
+        if persisted_offset > session.total_length.get() {
+            upload.file.set_len(original_len).await.context(
+                ErrorKind::BackendFailure,
+                "rolling back oversized local-fs resumable chunk",
+            )?;
+            upload.file.sync_data().await.context(
+                ErrorKind::BackendFailure,
+                "syncing rolled-back local-fs resumable chunk",
+            )?;
+            return Err(ErrorKind::ChunkExceedsUploadLength {
+                offset,
+                content_length: copied,
+                upload_length: session.total_length.get(),
+            }
+            .into());
+        }
+        upload.file.sync_data().await.context(
+            ErrorKind::BackendFailure,
+            "syncing local-fs resumable chunk",
+        )?;
+        drop(upload);
+
+        if declared_end == session.total_length.get() && persisted_offset == declared_end {
+            let object_path = self.path(id);
+            Self::create_dir_all(&object_path).await?;
+            drop(upload_guard);
+            let _guard = self
+                .locks
+                .lock_upload_and_object(session.upload_id, id)
+                .await?;
+            let upload = UploadFile::open(&upload_path).await?;
+            if upload.payload_size != session.total_length.get() {
+                return Err(ErrorKind::UploadOffsetMismatch {
+                    offset: upload.payload_size,
+                }
+                .into());
+            }
+            drop(upload);
+            tokio::fs::rename(&upload_path, object_path).await.context(
+                ErrorKind::BackendFailure,
+                "publishing local-fs resumable upload",
+            )?;
+            Ok(UploadProgress::Complete)
+        } else if persisted_offset == session.total_length.get() {
+            Err(ErrorKind::UploadSessionGone.into())
+        } else {
+            Ok(UploadProgress::Incomplete {
+                offset: persisted_offset,
+            })
+        }
+    }
+
+    async fn upload_offset(&self, id: &ObjectId, token: &BackendToken) -> Result<UploadProgress> {
+        let session = UploadSession::from_token(token)?;
+        let _guard = self.locks.lock_upload(session.upload_id).await?;
+        let upload = UploadFile::open(&self.upload_path(id, session.upload_id)).await?;
+        if upload.payload_size == session.total_length.get() {
+            Err(ErrorKind::UploadSessionGone.into())
+        } else {
+            Ok(UploadProgress::Incomplete {
+                offset: upload.payload_size,
+            })
+        }
+    }
+
+    async fn cancel_upload(&self, id: &ObjectId, token: &BackendToken) -> Result<()> {
+        let session = UploadSession::from_token(token)?;
+        let _guard = self.locks.lock_upload(session.upload_id).await?;
+        let path = self.upload_path(id, session.upload_id);
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                Err(ErrorKind::UnknownUploadSession.into())
+            }
+            result => result.context(
+                ErrorKind::BackendFailure,
+                "canceling local-fs resumable upload",
+            ),
+        }
     }
 
     #[tracing::instrument(level = "debug", fields(?id), skip_all)]
@@ -160,7 +359,7 @@ impl Backend for LocalFsBackend {
         let stored_size = draft.preamble_len() + payload_size;
 
         draft.prepare().await?;
-        let _guard = self.locks.acquire(id).await?;
+        let _guard = self.locks.lock_object(id).await?;
         draft.publish().await?;
 
         self.change_stream
@@ -217,7 +416,7 @@ impl Backend for LocalFsBackend {
         expire_at: Timestamp,
         access_time: Timestamp,
     ) -> Result<bool> {
-        let _guard = self.locks.acquire(id).await?;
+        let _guard = self.locks.lock_object(id).await?;
 
         let path = self.path(id);
         let Some(object) = ObjectFile::try_open(&path, access_time).await? else {
@@ -257,7 +456,7 @@ impl Backend for LocalFsBackend {
         id: &ObjectId,
         _access_time: Timestamp,
     ) -> Result<DeleteResponse> {
-        let _guard = self.locks.acquire(id).await?;
+        let _guard = self.locks.lock_object(id).await?;
 
         objectstore_log::debug!("Deleting from local_fs backend");
         let path = self.path(id);
@@ -295,7 +494,7 @@ impl MultipartUploadBackend for LocalFsBackend {
         id: &ObjectId,
         metadata: &Metadata,
     ) -> Result<InitiateMultipartResponse> {
-        let upload_id = UploadId::new(uuid::Uuid::now_v7().to_string())?;
+        let upload_id = UploadId::new(Uuid::now_v7().to_string())?;
         let dir = self.multipart_dir(id, &upload_id);
         tokio::fs::create_dir_all(&dir).await.context(
             ErrorKind::BackendFailure,
@@ -588,7 +787,7 @@ impl MultipartUploadBackend for LocalFsBackend {
         let stored_size = draft.preamble_len() + payload_size;
 
         draft.prepare().await?;
-        let guard = self.locks.acquire(id).await?;
+        let guard = self.locks.lock_object(id).await?;
         draft.publish().await?;
         drop(guard);
 
@@ -614,6 +813,14 @@ struct ObjectLocks {
     blocking_waiters: Arc<Semaphore>,
 }
 
+#[allow(dead_code)]
+struct LockGuard {
+    /// Holds the first slot lock until the guard is dropped.
+    first: File,
+    /// Holds the second slot lock when the requested targets do not share a slot.
+    second: Option<File>,
+}
+
 impl ObjectLocks {
     pub fn new(storage_root: &Path) -> Self {
         Self {
@@ -622,23 +829,59 @@ impl ObjectLocks {
         }
     }
 
-    fn path(&self, id: &ObjectId) -> PathBuf {
-        let hash = blake3::hash(id.as_storage_path().to_string().as_bytes());
+    fn object_lock_path(&self, id: &ObjectId) -> PathBuf {
+        self.lock_path_for_key(&id.as_storage_path().to_string())
+    }
+
+    fn upload_lock_path(&self, upload_id: Uuid) -> PathBuf {
+        self.lock_path_for_key(&format!("uploads/{upload_id}"))
+    }
+
+    fn lock_path_for_key(&self, key: &str) -> PathBuf {
+        let hash = blake3::hash(key.as_bytes());
         let bytes = hash.as_bytes();
         self.root
             .join(format!("{:02x}", bytes[0]))
             .join(format!("{:02x}", bytes[1]))
     }
 
-    /// Acquires a slot lock, released when the returned file is dropped.
-    pub async fn acquire(&self, id: &ObjectId) -> Result<File> {
-        let path = self.path(id);
-        tokio::fs::create_dir_all(path.parent().unwrap())
+    /// Locks an object's slot until the returned guard is dropped.
+    async fn lock_object(&self, id: &ObjectId) -> Result<LockGuard> {
+        self.lock_paths(self.object_lock_path(id), None).await
+    }
+
+    /// Locks an in-progress upload's slot until the returned guard is dropped.
+    async fn lock_upload(&self, upload_id: Uuid) -> Result<LockGuard> {
+        self.lock_paths(self.upload_lock_path(upload_id), None)
             .await
-            .context(
-                ErrorKind::BackendFailure,
-                "creating local-fs object lock directory",
-            )?;
+    }
+
+    /// Locks an upload and its destination object until the returned guard is dropped.
+    async fn lock_upload_and_object(&self, upload_id: Uuid, id: &ObjectId) -> Result<LockGuard> {
+        self.lock_paths(
+            self.upload_lock_path(upload_id),
+            Some(self.object_lock_path(id)),
+        )
+        .await
+    }
+
+    async fn lock_paths(&self, first: PathBuf, second: Option<PathBuf>) -> Result<LockGuard> {
+        let (first, second) = match second {
+            Some(second) => match second.cmp(&first) {
+                std::cmp::Ordering::Less => (second, Some(first)),
+                std::cmp::Ordering::Equal => (first, None),
+                std::cmp::Ordering::Greater => (first, Some(second)),
+            },
+            None => (first, None),
+        };
+        for path in std::iter::once(&first).chain(second.as_ref()) {
+            tokio::fs::create_dir_all(path.parent().unwrap())
+                .await
+                .context(
+                    ErrorKind::BackendFailure,
+                    "creating local-fs object lock directory",
+                )?;
+        }
 
         // Leave blocking-pool capacity available for the current lock holder's filesystem work.
         let permit = Arc::clone(&self.blocking_waiters)
@@ -646,20 +889,100 @@ impl ObjectLocks {
             .await
             .expect("local-fs lock semaphore is never closed");
 
-        tokio::task::spawn_blocking(move || -> io::Result<File> {
+        tokio::task::spawn_blocking(move || -> io::Result<LockGuard> {
             let _permit = permit;
-            let file = std::fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .read(true)
-                .write(true)
-                .open(&path)?;
-            file.lock()?;
-            Ok(file)
+
+            let lock = |path| -> io::Result<File> {
+                let file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .truncate(false)
+                    .read(true)
+                    .write(true)
+                    .open(path)?;
+                file.lock()?;
+                Ok(file)
+            };
+            let first = lock(first)?;
+            let second = second.map(lock).transpose()?;
+            Ok(LockGuard { first, second })
         })
         .await
         .context(ErrorKind::Internal, "waiting for local-fs object lock")?
         .context(ErrorKind::BackendFailure, "acquiring local-fs object lock")
+    }
+}
+
+#[derive(Debug)]
+struct UploadSession {
+    total_length: NonZeroU64,
+    upload_id: Uuid,
+}
+
+impl UploadSession {
+    fn from_token(token: &BackendToken) -> Result<Self> {
+        let (length, upload_id) = token
+            .split_once('.')
+            .ok_or(ErrorKind::UnknownUploadSession)?;
+        let total_length = length
+            .parse::<NonZeroU64>()
+            .map_err(|_| ErrorKind::UnknownUploadSession)?;
+        let upload_id_str = upload_id;
+        let upload_id =
+            Uuid::parse_str(upload_id_str).map_err(|_| ErrorKind::UnknownUploadSession)?;
+        if upload_id.get_version_num() != 7 || upload_id.to_string() != upload_id_str {
+            return Err(ErrorKind::UnknownUploadSession.into());
+        }
+        Ok(Self {
+            total_length,
+            upload_id,
+        })
+    }
+}
+
+/// An open resumable upload containing a metadata preamble followed by payload bytes.
+struct UploadFile {
+    file: tokio::fs::File,
+    /// Number of bytes occupied by the metadata JSON and its newline delimiter.
+    preamble_len: u64,
+    /// Number of payload bytes stored after the metadata preamble.
+    payload_size: u64,
+}
+
+impl UploadFile {
+    async fn open(path: &Path) -> Result<Self> {
+        let file = match OpenOptions::new().read(true).write(true).open(path).await {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(ErrorKind::UnknownUploadSession.into());
+            }
+            result => result.context(
+                ErrorKind::BackendFailure,
+                "opening local-fs resumable upload",
+            )?,
+        };
+        let mut reader = BufReader::new(file);
+        let (_, preamble_len) = read_metadata_preamble(&mut reader).await?;
+        let file = reader.into_inner();
+        let file_len = file
+            .metadata()
+            .await
+            .context(
+                ErrorKind::BackendFailure,
+                "reading local-fs resumable upload size",
+            )?
+            .len();
+        let preamble_len = preamble_len as u64;
+        let payload_size = file_len.checked_sub(preamble_len).ok_or_else(|| {
+            Error::new(
+                ErrorKind::CorruptData,
+                "reading truncated local-fs resumable upload",
+            )
+        })?;
+        Ok(Self {
+            file,
+            preamble_len,
+            payload_size,
+        })
     }
 }
 
@@ -856,6 +1179,182 @@ mod tests {
     use crate::id::ObjectContext;
     use crate::stream;
 
+    async fn upload_token(backend: &LocalFsBackend, id: &ObjectId, length: u64) -> BackendToken {
+        backend
+            .create_upload_session(id, &Metadata::default(), NonZeroU64::new(length).unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn resumable_upload() {
+        let (_tempdir, backend) = make_backend();
+        let id = make_id();
+        let metadata = Metadata {
+            content_type: "text/resumable".into(),
+            ..Default::default()
+        };
+        let token = backend
+            .create_upload_session(&id, &metadata, NonZeroU64::new(6).unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        let session = UploadSession::from_token(&token).unwrap();
+        assert_eq!(session.total_length.get(), 6);
+        assert_eq!(session.upload_id.get_version_num(), 7);
+        let upload_path = backend.upload_path(&id, session.upload_id);
+        assert_eq!(
+            upload_path.parent().unwrap().file_name().unwrap(),
+            "uploads"
+        );
+        assert!(!backend.path(&id).exists());
+
+        assert_eq!(
+            backend.upload_offset(&id, &token).await.unwrap(),
+            UploadProgress::Incomplete { offset: 0 }
+        );
+        assert_eq!(
+            backend
+                .put_chunk(&id, &token, 2, 0, stream::single(""))
+                .await
+                .unwrap(),
+            UploadProgress::Incomplete { offset: 0 }
+        );
+        assert_eq!(
+            backend
+                .put_chunk(&id, &token, 0, 3, stream::single("abc"))
+                .await
+                .unwrap(),
+            UploadProgress::Incomplete { offset: 3 }
+        );
+        assert!(!backend.path(&id).exists());
+        assert_eq!(
+            backend.upload_offset(&id, &token).await.unwrap(),
+            UploadProgress::Incomplete { offset: 3 }
+        );
+        assert_eq!(
+            backend
+                .put_chunk(&id, &token, 0, 0, stream::single(""))
+                .await
+                .unwrap(),
+            UploadProgress::Incomplete { offset: 3 }
+        );
+        let error = backend
+            .put_chunk(&id, &token, 0, 3, stream::single("abc"))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::UploadOffsetMismatch { offset: 3 });
+        assert_eq!(
+            backend
+                .put_chunk(&id, &token, 3, 3, stream::single("def"))
+                .await
+                .unwrap(),
+            UploadProgress::Complete
+        );
+        assert!(!upload_path.exists());
+        let (stored_metadata, _, payload) = backend
+            .get_object(&id, Timestamp::now(), None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored_metadata.content_type, metadata.content_type);
+        assert_eq!(stream::read_to_vec(payload).await.unwrap(), b"abcdef");
+        assert_eq!(
+            backend.upload_offset(&id, &token).await.unwrap_err().kind(),
+            ErrorKind::UnknownUploadSession
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_resumable_chunk_rolls_back_to_previous_offset() {
+        let (_tempdir, backend) = make_backend();
+        let id = make_id();
+        let token = upload_token(&backend, &id, 4).await;
+        backend
+            .put_chunk(&id, &token, 0, 2, stream::single("ab"))
+            .await
+            .unwrap();
+        let broken = futures_stream::iter([
+            Ok(Bytes::from_static(b"c")),
+            Err(stream::ClientError::new(io::Error::other(
+                "client disconnected",
+            ))),
+        ])
+        .boxed();
+        let error = backend
+            .put_chunk(&id, &token, 2, 2, broken)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ClientStream);
+        assert_eq!(
+            backend.upload_offset(&id, &token).await.unwrap(),
+            UploadProgress::Incomplete { offset: 2 }
+        );
+        assert_eq!(
+            backend
+                .put_chunk(&id, &token, 2, 2, stream::single("cd"))
+                .await
+                .unwrap(),
+            UploadProgress::Complete
+        );
+        let (_, _, payload) = backend
+            .get_object(&id, Timestamp::now(), None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stream::read_to_vec(payload).await.unwrap(), b"abcd");
+    }
+
+    #[tokio::test]
+    async fn concurrent_final_chunks_and_colliding_lock_slots_do_not_deadlock() {
+        let (_tempdir, backend) = make_backend();
+        let id = make_id();
+        let first = upload_token(&backend, &id, 3).await;
+        let second = upload_token(&backend, &id, 3).await;
+        let mut slots = HashMap::new();
+        let (first_key, colliding_key) = (0..=65_536)
+            .find_map(|number| {
+                let key = format!("upload-{number}");
+                let slot = backend.locks.lock_path_for_key(&key);
+                slots
+                    .insert(slot, key.clone())
+                    .map(|previous| (previous, key))
+            })
+            .expect("65,537 keys must collide in 65,536 lock slots");
+        assert_ne!(first_key, colliding_key);
+        let pair = backend.locks.lock_paths(
+            backend.locks.lock_path_for_key(&first_key),
+            Some(backend.locks.lock_path_for_key(&colliding_key)),
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), pair)
+                .await
+                .unwrap()
+                .unwrap()
+                .second
+                .is_none()
+        );
+        let writes = async {
+            tokio::join!(
+                backend.put_chunk(&id, &first, 0, 3, stream::single("one")),
+                backend.put_chunk(&id, &second, 0, 3, stream::single("two")),
+            )
+        };
+        let (first_result, second_result) = tokio::time::timeout(Duration::from_secs(2), writes)
+            .await
+            .unwrap();
+        assert_eq!(first_result.unwrap(), UploadProgress::Complete);
+        assert_eq!(second_result.unwrap(), UploadProgress::Complete);
+        let (_, _, payload) = backend
+            .get_object(&id, Timestamp::now(), None)
+            .await
+            .unwrap()
+            .unwrap();
+        let payload = stream::read_to_vec(payload).await.unwrap();
+        assert!(payload == b"one" || payload == b"two");
+    }
+
     #[tokio::test]
     async fn stores_metadata() {
         let tempdir = tempfile::tempdir().unwrap();
@@ -904,7 +1403,7 @@ mod tests {
         );
         assert_eq!(file_contents.as_ref(), b"oh hai!");
 
-        let lock_path = backend.locks.path(&id);
+        let lock_path = backend.locks.object_lock_path(&id);
         assert!(lock_path.exists());
         backend.delete_object(&id, Timestamp::now()).await.unwrap();
         assert!(lock_path.exists());
@@ -919,20 +1418,20 @@ mod tests {
         let (first_id, colliding_id) = (0..=65_536)
             .find_map(|key| {
                 let id = ObjectId::from_parts("testing".into(), Scopes::empty(), key.to_string());
-                let path = first_locks.path(&id);
+                let path = first_locks.object_lock_path(&id);
                 slots.insert(path, id.clone()).map(|first| (first, id))
             })
             .expect("65,537 keys must collide in 65,536 slots");
-        let lock_path = first_locks.path(&first_id);
+        let lock_path = first_locks.object_lock_path(&first_id);
         let other_id = slots
             .values()
-            .find(|id| first_locks.path(id) != lock_path)
+            .find(|id| first_locks.object_lock_path(id) != lock_path)
             .unwrap();
-        assert_eq!(second_locks.path(&colliding_id), lock_path);
+        assert_eq!(second_locks.object_lock_path(&colliding_id), lock_path);
 
-        let first_guard = first_locks.acquire(&first_id).await.unwrap();
+        let first_guard = first_locks.lock_object(&first_id).await.unwrap();
         let mut waiter =
-            tokio::spawn(async move { second_locks.acquire(&colliding_id).await.unwrap() });
+            tokio::spawn(async move { second_locks.lock_object(&colliding_id).await.unwrap() });
         assert!(
             tokio::time::timeout(Duration::from_millis(50), &mut waiter)
                 .await
@@ -940,7 +1439,7 @@ mod tests {
         );
 
         let other_guard =
-            tokio::time::timeout(Duration::from_secs(1), first_locks.acquire(other_id))
+            tokio::time::timeout(Duration::from_secs(1), first_locks.lock_object(other_id))
                 .await
                 .unwrap()
                 .unwrap();

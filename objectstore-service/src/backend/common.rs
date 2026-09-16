@@ -133,6 +133,9 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
         Ok(None)
     }
 
+    // TODO: Wrap ClientStream in a newtype that validates the actual stream length against the
+    // declared content_length before a backend can acknowledge the chunk.
+
     /// Writes a chunk of `content_length` bytes at `offset` into an open session.
     ///
     /// A backend may acknowledge fewer bytes than the chunk supplied, for example by persisting
