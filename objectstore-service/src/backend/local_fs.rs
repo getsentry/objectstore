@@ -198,102 +198,94 @@ impl Backend for LocalFsBackend {
         if upload.payload_size == session.total_length.get() {
             return Err(ErrorKind::UploadSessionGone.into());
         }
-        if content_length == 0 {
-            return Ok(UploadProgress::Incomplete {
-                offset: upload.payload_size,
-            });
-        }
-        if offset != upload.payload_size {
+        if content_length != 0 && offset != upload.payload_size {
             return Err(ErrorKind::UploadOffsetMismatch {
                 offset: upload.payload_size,
             }
             .into());
         }
 
-        let parent = upload_path.parent().unwrap().to_path_buf();
-        let tempfile = tokio::task::spawn_blocking(move || create_tempfile(&parent))
-            .await
-            .context(
-                ErrorKind::Internal,
-                "waiting for local-fs resumable chunk draft creation",
-            )?
-            .context(
-                ErrorKind::BackendFailure,
-                "creating local-fs resumable chunk draft",
-            )?;
-        let (scratch_file, scratch_path) = tempfile.into_parts();
-        let mut scratch = tokio::fs::File::from_std(scratch_file);
-        let mut reader = pin!(StreamReader::new(stream).take(content_length.saturating_add(1)));
-        let copied = tokio::io::copy(&mut reader, &mut scratch)
-            .await
-            .map_err(|error| match stream::unpack_client_error(&error) {
-                Some(client_error) => Error::from(client_error),
-                None => Error::with_context(
-                    ErrorKind::BackendFailure,
-                    "staging local-fs resumable chunk",
-                    error,
-                ),
-            })?;
-        if copied != content_length {
-            return Err(Error::new(
-                ErrorKind::ClientStream,
-                format!(
-                    "resumable chunk length {copied} does not match content-length {content_length}"
-                ),
-            ));
-        }
-        scratch.seek(std::io::SeekFrom::Start(0)).await.context(
-            ErrorKind::BackendFailure,
-            "rewinding local-fs resumable chunk draft",
-        )?;
-
         let original_len = upload.preamble_len + upload.payload_size;
         upload.file.seek(std::io::SeekFrom::End(0)).await.context(
             ErrorKind::BackendFailure,
             "seeking local-fs resumable upload",
         )?;
-        let appended = match tokio::io::copy(&mut scratch, &mut upload.file).await {
-            Ok(appended) => appended,
-            Err(error) => {
-                upload.file.set_len(original_len).await.context(
-                    ErrorKind::BackendFailure,
-                    "rolling back failed local-fs resumable chunk",
-                )?;
-                upload.file.sync_data().await.context(
-                    ErrorKind::BackendFailure,
-                    "syncing rolled-back local-fs resumable chunk",
-                )?;
-                return Err(Error::with_context(
-                    ErrorKind::BackendFailure,
-                    "writing staged local-fs resumable chunk",
-                    error,
-                ));
+        let mut reader = pin!(StreamReader::new(stream));
+        let copied = {
+            let mut declared = reader.as_mut().take(content_length);
+            match tokio::io::copy(&mut declared, &mut upload.file).await {
+                Ok(copied) => copied,
+                Err(error) => {
+                    if let Some(client_error) = stream::unpack_client_error(&error) {
+                        upload.file.sync_data().await.context(
+                            ErrorKind::BackendFailure,
+                            "syncing partial local-fs resumable chunk",
+                        )?;
+                        return Err(Error::from(client_error));
+                    }
+                    upload.file.set_len(original_len).await.context(
+                        ErrorKind::BackendFailure,
+                        "rolling back failed local-fs resumable chunk",
+                    )?;
+                    upload.file.sync_data().await.context(
+                        ErrorKind::BackendFailure,
+                        "syncing rolled-back local-fs resumable chunk",
+                    )?;
+                    return Err(Error::with_context(
+                        ErrorKind::BackendFailure,
+                        "writing local-fs resumable chunk",
+                        error,
+                    ));
+                }
             }
         };
-        if appended != content_length {
-            upload.file.set_len(original_len).await.context(
-                ErrorKind::BackendFailure,
-                "rolling back truncated local-fs resumable chunk draft",
-            )?;
-            upload.file.sync_data().await.context(
-                ErrorKind::BackendFailure,
-                "syncing rolled-back local-fs resumable chunk",
-            )?;
-            return Err(Error::new(
-                ErrorKind::BackendFailure,
-                "staged local-fs resumable chunk changed while appending",
-            ));
-        }
-        drop(scratch);
-        drop(scratch_path);
 
-        let persisted_offset = upload.payload_size.checked_add(appended).ok_or(
-            ErrorKind::ChunkExceedsUploadLength {
-                offset,
-                content_length: appended,
-                upload_length: session.total_length.get(),
-            },
-        )?;
+        if copied == content_length {
+            let mut extra = [0];
+            match reader.read(&mut extra).await {
+                Ok(0) => {}
+                Ok(_) => {
+                    upload.file.set_len(original_len).await.context(
+                        ErrorKind::BackendFailure,
+                        "rolling back oversized local-fs resumable chunk",
+                    )?;
+                    upload.file.sync_data().await.context(
+                        ErrorKind::BackendFailure,
+                        "syncing rolled-back local-fs resumable chunk",
+                    )?;
+                    return Err(Error::new(
+                        ErrorKind::ClientStream,
+                        format!("resumable chunk exceeds content-length {content_length}"),
+                    ));
+                }
+                Err(error) if stream::unpack_client_error(&error).is_some() => {}
+                Err(error) => {
+                    upload.file.set_len(original_len).await.context(
+                        ErrorKind::BackendFailure,
+                        "rolling back failed local-fs resumable chunk",
+                    )?;
+                    upload.file.sync_data().await.context(
+                        ErrorKind::BackendFailure,
+                        "syncing rolled-back local-fs resumable chunk",
+                    )?;
+                    return Err(Error::with_context(
+                        ErrorKind::BackendFailure,
+                        "checking local-fs resumable chunk length",
+                        error,
+                    ));
+                }
+            }
+        }
+
+        let persisted_offset =
+            upload
+                .payload_size
+                .checked_add(copied)
+                .ok_or(ErrorKind::ChunkExceedsUploadLength {
+                    offset,
+                    content_length: copied,
+                    upload_length: session.total_length.get(),
+                })?;
         upload.file.sync_data().await.context(
             ErrorKind::BackendFailure,
             "syncing local-fs resumable chunk",
@@ -1295,7 +1287,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_resumable_chunk_rolls_back_to_previous_offset() {
+    async fn failed_resumable_chunk_preserves_partial_progress() {
         let (_tempdir, backend) = make_backend();
         let id = make_id();
         let token = upload_token(&backend, &id, 4).await;
@@ -1317,11 +1309,11 @@ mod tests {
         assert_eq!(error.kind(), ErrorKind::ClientStream);
         assert_eq!(
             backend.upload_offset(&id, &token).await.unwrap(),
-            UploadProgress::Incomplete { offset: 2 }
+            UploadProgress::Incomplete { offset: 3 }
         );
         assert_eq!(
             backend
-                .put_chunk(&id, &token, 2, 2, stream::single("cd"))
+                .put_chunk(&id, &token, 3, 1, stream::single("d"))
                 .await
                 .unwrap(),
             UploadProgress::Complete
