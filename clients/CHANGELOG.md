@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.6
+
+### New Features ✨
+
+- (rust-client) Add Resumable Uploads (low-level) API by @lcian in [#622](https://github.com/getsentry/objectstore/pull/622)
+
+### Bug Fixes 🐛
+
+- (rust-client) Drain discarded response bodies by @lcian in [#629](https://github.com/getsentry/objectstore/pull/629)
+
+### Internal Changes 🔧
+
+- (rust-client) Use typed queries for resumable API by @lcian in [#628](https://github.com/getsentry/objectstore/pull/628)
+
 ## 0.2.5
 
 ### New Features ✨
