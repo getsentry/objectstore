@@ -27,6 +27,7 @@ from objectstore_client.metadata import (
     ExpirationPolicy,
     Metadata,
     format_expiration,
+    format_timedelta,
 )
 from objectstore_client.metrics import (
     MetricsBackend,
@@ -670,6 +671,70 @@ class Session:
             raise_for_status(response)
             span.set_attribute("objectstore.found", True)
             return Metadata.from_headers(response.headers)
+
+    def extend_expiry(
+        self,
+        key: str,
+        at: datetime | None = None,
+        from_creation: timedelta | None = None,
+        from_now: timedelta | None = None,
+    ) -> None:
+        """Extend an object's expiration deadline, preserving its policy and payload.
+
+        Supply exactly one target: ``at`` is an aware absolute datetime;
+        ``from_creation`` is total lifetime since creation or replacement; and
+        ``from_now`` is lifetime from server request start. Relative targets are
+        resolved by the server, not added to the existing deadline. Fractional
+        duration seconds are truncated; absolute deadlines round upward to seconds.
+
+        An already-sufficient deadline succeeds without being shortened. Success
+        returns no value and does not indicate whether the deadline changed.
+        Requires object-write permission and a server supporting expiry updates.
+
+        Raises ``ValueError`` for missing or multiple targets, naive datetimes,
+        or negative durations. Zero durations are valid. Unsatisfied extensions
+        raise ``RequestError`` with status 409, including absent, expired,
+        non-expiring, or concurrently changed objects, or missing creation metadata.
+        Other HTTP errors propagate normally. Retrying ``from_now`` establishes
+        a new server-time anchor and can extend the deadline further.
+
+        Example::
+
+            session.extend_expiry(key, from_now=timedelta(days=30))
+        """
+        if sum(value is not None for value in (at, from_creation, from_now)) != 1:
+            raise ValueError("Supply exactly one of at, from_creation, or from_now")
+
+        extension: dict[str, str]
+        if at is not None:
+            if at.utcoffset() is None:
+                raise ValueError("at must be a timezone-aware datetime")
+            extension = {"at": at.astimezone(UTC).isoformat()}
+        else:
+            delta = from_creation if from_creation is not None else from_now
+            assert delta is not None
+            if delta < timedelta(0):
+                raise ValueError("Expiry extension duration must not be negative")
+            extension = {
+                "after": format_timedelta(delta),
+                "from": "creation" if from_creation is not None else "now",
+            }
+
+        headers = self._make_headers()
+        with (
+            storage_span("extend_expiry", self._usecase, self._scope, key=key),
+            measure_storage_operation(
+                self._metrics_backend, "extend_expiry", self._usecase.name
+            ),
+        ):
+            response = self._pool.request(
+                "PATCH",
+                self._make_url(key),
+                headers=headers,
+                json={"extend_expiry": extension},
+                preload_content=True,
+            )
+            raise_for_status(response)
 
     def delete(self, key: str) -> None:
         """

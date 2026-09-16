@@ -64,6 +64,22 @@ usecase = Usecase("attachments", expiration_policy=TimeToIdle(timedelta(days=30)
 session.put(b"payload", expiration_policy=TimeToLive(timedelta(hours=1)))
 ```
 
+Extend an existing object's deadline with `Session.extend_expiry`, preserving its
+TTL/TTI policy, payload, and other metadata. An already-sufficient deadline succeeds.
+This requires object-write permission and a server supporting expiry updates.
+
+```python
+session.extend_expiry(key, from_now=timedelta(days=30))
+session.extend_expiry(key, from_creation=timedelta(days=90))
+session.extend_expiry(key, at=deadline)  # timezone-aware datetime
+```
+
+Supply exactly one target. `from_creation` means total lifetime since creation or
+replacement; `from_now` uses server request time, so retrying can extend further.
+Fractional duration seconds are truncated; absolute deadlines round upward to seconds.
+Unsatisfied extensions raise `RequestError` with status 409. See the method's
+documentation for validation and failure details.
+
 ### Origin Tracking
 
 We encourage setting the `origin` on every upload to track where the payload was
