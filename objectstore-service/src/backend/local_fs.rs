@@ -183,7 +183,7 @@ impl Backend for LocalFsBackend {
         stream: ClientStream,
     ) -> Result<UploadProgress> {
         let session = UploadSession::from_token(token)?;
-        let declared_end = offset
+        offset
             .checked_add(content_length)
             .filter(|end| *end <= session.total_length.get())
             .ok_or(ErrorKind::ChunkExceedsUploadLength {
@@ -205,76 +205,35 @@ impl Backend for LocalFsBackend {
             .into());
         }
 
-        upload.file.seek(std::io::SeekFrom::End(0)).await.context(
-            ErrorKind::BackendFailure,
-            "seeking local-fs resumable upload",
-        )?;
-        let mut reader = pin!(StreamReader::new(stream));
-        let copied = {
-            let mut declared = reader.as_mut().take(content_length);
-            match tokio::io::copy(&mut declared, &mut upload.file).await {
-                Ok(copied) => copied,
-                Err(error) => {
-                    let client_error = stream::unpack_client_error(&error);
-                    upload.file.sync_data().await.context(
-                        ErrorKind::BackendFailure,
-                        "syncing partial local-fs resumable chunk",
-                    )?;
-                    return Err(match client_error {
-                        Some(client_error) => Error::from(client_error),
-                        None => Error::with_context(
-                            ErrorKind::BackendFailure,
-                            "writing local-fs resumable chunk",
-                            error,
-                        ),
-                    });
-                }
-            }
-        };
-
-        let persisted_offset =
-            upload
-                .payload_size
-                .checked_add(copied)
-                .ok_or(ErrorKind::ChunkExceedsUploadLength {
-                    offset,
-                    content_length: copied,
-                    upload_length: session.total_length.get(),
-                })?;
-        upload.file.sync_data().await.context(
-            ErrorKind::BackendFailure,
-            "syncing local-fs resumable chunk",
-        )?;
+        let persisted_offset = upload.append(stream, content_length).await?;
         drop(upload);
 
-        if declared_end == session.total_length.get() && persisted_offset == declared_end {
-            let object_path = self.path(id);
-            Self::create_dir_all(&object_path).await?;
-            drop(upload_guard);
-            let _guard = self
-                .locks
-                .lock_upload_and_object(session.upload_id, id)
-                .await?;
-            let upload = UploadFile::open(&upload_path).await?;
-            if upload.payload_size != session.total_length.get() {
-                return Err(ErrorKind::UploadOffsetMismatch {
-                    offset: upload.payload_size,
-                }
-                .into());
-            }
-            drop(upload);
-            tokio::fs::rename(&upload_path, object_path).await.context(
-                ErrorKind::BackendFailure,
-                "publishing local-fs resumable upload",
-            )?;
-            Ok(UploadProgress::Complete)
-        } else if persisted_offset == session.total_length.get() {
-            Err(ErrorKind::UploadSessionGone.into())
-        } else {
-            Ok(UploadProgress::Incomplete {
+        if persisted_offset != session.total_length.get() {
+            return Ok(UploadProgress::Incomplete {
                 offset: persisted_offset,
-            })
+            });
         }
+
+        let object_path = self.path(id);
+        Self::create_dir_all(&object_path).await?;
+        drop(upload_guard);
+        let _guard = self
+            .locks
+            .lock_upload_and_object(session.upload_id, id)
+            .await?;
+        let upload = UploadFile::open(&upload_path).await?;
+        if upload.payload_size != session.total_length.get() {
+            return Err(ErrorKind::UploadOffsetMismatch {
+                offset: upload.payload_size,
+            }
+            .into());
+        }
+        drop(upload);
+        tokio::fs::rename(&upload_path, object_path).await.context(
+            ErrorKind::BackendFailure,
+            "publishing local-fs resumable upload",
+        )?;
+        Ok(UploadProgress::Complete)
     }
 
     async fn upload_offset(&self, _id: &ObjectId, token: &BackendToken) -> Result<UploadProgress> {
@@ -952,6 +911,46 @@ impl UploadFile {
             )
         })?;
         Ok(Self { file, payload_size })
+    }
+
+    async fn append(&mut self, stream: ClientStream, content_length: u64) -> Result<u64> {
+        self.file.seek(std::io::SeekFrom::End(0)).await.context(
+            ErrorKind::BackendFailure,
+            "seeking local-fs resumable upload",
+        )?;
+
+        let mut reader = pin!(StreamReader::new(stream));
+        let mut contents = reader.as_mut().take(content_length);
+        let copied = match tokio::io::copy(&mut contents, &mut self.file).await {
+            Ok(copied) => copied,
+            Err(error) => {
+                let client_error = stream::unpack_client_error(&error);
+                self.file.sync_data().await.context(
+                    ErrorKind::BackendFailure,
+                    "syncing partial local-fs resumable chunk",
+                )?;
+                return Err(match client_error {
+                    Some(client_error) => Error::from(client_error),
+                    None => Error::with_context(
+                        ErrorKind::BackendFailure,
+                        "writing local-fs resumable chunk",
+                        error,
+                    ),
+                });
+            }
+        };
+
+        self.payload_size = self.payload_size.checked_add(copied).ok_or_else(|| {
+            Error::new(
+                ErrorKind::BackendFailure,
+                "local-fs resumable upload size overflow",
+            )
+        })?;
+        self.file.sync_data().await.context(
+            ErrorKind::BackendFailure,
+            "syncing local-fs resumable chunk",
+        )?;
+        Ok(self.payload_size)
     }
 }
 
