@@ -1,5 +1,6 @@
 //! Response body wrapper that emits request-duration metrics after the body finishes.
 
+use std::borrow::Cow;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -31,12 +32,18 @@ enum BodyState {
 pub struct EmitMetricsGuard {
     route: String,
     method: Method,
+    usecase: Option<String>,
     start: Instant,
     body_state: BodyState,
 }
 
 impl EmitMetricsGuard {
-    pub fn new(route: &str, method: &Method, service: DownstreamService) -> Self {
+    pub fn new(
+        route: &str,
+        method: &Method,
+        service: DownstreamService,
+        usecase: Option<String>,
+    ) -> Self {
         objectstore_metrics::count!(
             "server.requests",
             route = route.to_owned(),
@@ -47,6 +54,7 @@ impl EmitMetricsGuard {
         Self {
             route: route.to_owned(),
             method: method.clone(),
+            usecase,
             start: Instant::now(),
             body_state: BodyState::Pending,
         }
@@ -71,11 +79,15 @@ impl Drop for EmitMetricsGuard {
             BodyState::Completed(status) => status.as_u16(),
             BodyState::Errored => 500,
         };
-
+        let usecase = self
+            .usecase
+            .take()
+            .map_or(Cow::Borrowed("none"), Cow::Owned);
         objectstore_metrics::record!(
             "server.requests.duration" = self.start.elapsed(),
             route = self.route.clone(),
             method = self.method.as_str().to_owned(),
+            usecase = usecase,
             status = state.to_string(),
             // service omitted to limit cardinality
         );
@@ -238,6 +250,7 @@ mod tests {
         let (seconds, tags) = metric
             .split_once("|d|#")
             .expect("malformed duration metric");
+        assert!(tags.contains("usecase:none"), "{metric}");
         let (_, status) = tags.rsplit_once("status:").expect("status tag");
 
         let status = status.parse().expect("numeric status");
@@ -359,5 +372,25 @@ mod tests {
         let handler = || async { slow_stream(Duration::from_secs(5)) };
         let (_, duration) = track_request(handler, Client::ReadToEnd).await;
         assert_eq!(duration, Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn duration_includes_usecase() {
+        let app = Router::new()
+            .route("/{usecase}", get(|| async { Body::empty() }))
+            .layer(from_fn(emit_request_metrics));
+
+        let captured = objectstore_metrics::with_capturing_test_client_async(async move {
+            let request = Request::get("/attachments").body(Body::empty()).unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            Client::ReadToEnd.consume(response).await;
+        })
+        .await;
+
+        let metric = captured
+            .iter()
+            .find(|metric| metric.starts_with("server.requests.duration:"))
+            .expect("duration metric not captured");
+        assert!(metric.contains("usecase:attachments"), "{metric}");
     }
 }

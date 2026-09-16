@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 
 use axum::RequestExt;
 use axum::body::Body;
-use axum::extract::{ConnectInfo, MatchedPath, Request, State};
+use axum::extract::{ConnectInfo, MatchedPath, RawPathParams, Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -102,6 +102,19 @@ pub async fn bind_sentry_body(request: Request, next: Next) -> Response {
         .map(|body| Body::new(SentryBody::new(hub, body)))
 }
 
+async fn get_usecase(request: &mut Request) -> Option<String> {
+    request
+        .extract_parts::<RawPathParams>()
+        .await
+        .ok()
+        .and_then(|params| {
+            params
+                .iter()
+                .find(|(name, _)| *name == "usecase")
+                .map(|(_, value)| value.to_owned())
+        })
+}
+
 /// A middleware that logs web request timings as metrics.
 ///
 /// Use this with [`from_fn`](axum::middleware::from_fn).
@@ -115,9 +128,11 @@ pub async fn emit_request_metrics(mut request: Request, next: Next) -> Response 
     let matched_path = request.extract_parts::<MatchedPath>().await;
     let route = matched_path.as_ref().map_or("unknown", |m| m.as_str());
     let service = request.extract_parts::<DownstreamService>().await.unwrap();
+    let usecase = get_usecase(&mut request).await;
 
     let should_emit = !endpoints::is_internal_route(route);
-    let guard = should_emit.then(|| EmitMetricsGuard::new(route, request.method(), service));
+    let guard =
+        should_emit.then(|| EmitMetricsGuard::new(route, request.method(), service, usecase));
 
     let response = next.run(request).await;
 
