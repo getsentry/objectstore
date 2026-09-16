@@ -997,7 +997,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             backend.inner.get(&id).expect_object().0.time_expires,
-            Some(access_time + Duration::from_hours(1))
+            Some(access_time + Duration::from_mins(75))
         );
     }
 
