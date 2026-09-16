@@ -1,3 +1,4 @@
+from objectstore_client import many
 from objectstore_client.auth import Permission, SecretKey, TokenGenerator, TokenProvider
 from objectstore_client.client import (
     Client,
@@ -22,6 +23,7 @@ __all__ = [
     "Session",
     "GetResponse",
     "RequestError",
+    "many",
     "Compression",
     "ExpirationPolicy",
     "Metadata",
