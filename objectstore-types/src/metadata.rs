@@ -5,7 +5,8 @@
 //! server parses and validates it, the service passes it to backends, and
 //! backends persist it alongside the stored object.
 //!
-//! The module also defines further types used in metadata.
+//! [`MetadataUpdate`] is the separate JSON request contract for explicit
+//! metadata updates. It is not a persisted metadata representation.
 //!
 //! # Serialization
 //!
@@ -84,6 +85,48 @@ pub const DEFAULT_CONTENT_TYPE: &str = "application/octet-stream";
 /// constant); shorter TTI values get a proportionally smaller window so that
 /// bumps are not silently suppressed.
 const MAX_TTI_DEBOUNCE: Duration = Duration::from_hours(24);
+
+/// An application-specific JSON request for updating object metadata.
+///
+/// This is intentionally separate from [`Metadata`]: omitted fields are not merge-patch
+/// operations, and metadata headers are not interpreted as updates. Unknown fields are rejected.
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MetadataUpdate {
+    /// Extends the existing expiration deadline without changing its policy.
+    pub extend_expiry: ExpiryExtension,
+}
+
+/// A requested minimum expiration deadline.
+///
+/// The absolute form contains `at`. The relative form contains both `after` and `from`.
+/// Mixed, incomplete, and unknown fields are rejected during deserialization.
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum ExpiryExtension {
+    /// An RFC3339 deadline, parsed by the endpoint with [`Timestamp::from_rfc3339`].
+    At {
+        /// The requested absolute deadline.
+        at: String,
+    },
+    /// A duration relative to an explicit anchor.
+    After {
+        /// A duration in the format documented by [`crate::duration`].
+        after: String,
+        /// The timestamp against which the duration is resolved.
+        from: ExpiryAnchor,
+    },
+}
+
+/// The timestamp against which a relative expiry extension is resolved.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExpiryAnchor {
+    /// The object's observed creation time.
+    Creation,
+    /// The request-start time.
+    Now,
+}
 
 /// Errors that can happen dealing with metadata
 #[derive(Debug, thiserror::Error)]
@@ -304,9 +347,10 @@ pub struct Metadata {
 
     /// The resolved expiration timestamp (header: `x-sn-time-expires`).
     ///
-    /// Derived from the [`expiration_policy`](Self::expiration_policy). When using
-    /// a time-to-idle policy, this reflects the expiration timestamp present
-    /// *prior to* the current access to the object.
+    /// Initially derived from the [`expiration_policy`](Self::expiration_policy), but it may later
+    /// be extended explicitly without changing that policy or its duration. When using a
+    /// time-to-idle policy, this reflects the expiration timestamp present *prior to* the current
+    /// access to the object.
     ///
     /// Fractional deadlines round up to whole seconds; see [`Timestamp`].
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -583,6 +627,59 @@ impl Default for Metadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metadata_update_parses_supported_expiry_extensions() {
+        let cases = [
+            (
+                r#"{"extend_expiry":{"at":"2026-10-16T12:00:00Z"}}"#,
+                ExpiryExtension::At {
+                    at: "2026-10-16T12:00:00Z".into(),
+                },
+            ),
+            (
+                r#"{"extend_expiry":{"after":"30d","from":"creation"}}"#,
+                ExpiryExtension::After {
+                    after: "30d".into(),
+                    from: ExpiryAnchor::Creation,
+                },
+            ),
+            (
+                r#"{"extend_expiry":{"after":"0s","from":"now"}}"#,
+                ExpiryExtension::After {
+                    after: "0s".into(),
+                    from: ExpiryAnchor::Now,
+                },
+            ),
+        ];
+
+        for (json, expected) in cases {
+            let update: MetadataUpdate = serde_json::from_str(json).unwrap();
+            assert_eq!(update.extend_expiry, expected);
+        }
+    }
+
+    #[test]
+    fn metadata_update_rejects_invalid_structures() {
+        let cases = [
+            r#"{}"#,
+            r#"{"extend_expiry":null}"#,
+            r#"{"extend_expiry":{}}"#,
+            r#"{"extend_expiry":{"at":"2026-10-16T12:00:00Z","after":"30d","from":"now"}}"#,
+            r#"{"extend_expiry":{"after":"30d"}}"#,
+            r#"{"extend_expiry":{"after":"30d","from":"unsupported"}}"#,
+            r#"{"extend_expiry":{"at":"2026-10-16T12:00:00Z","unknown":true}}"#,
+            r#"{"extend_expiry":{"after":"30d","from":"now","unknown":true}}"#,
+            r#"{"extend_expiry":{"at":"2026-10-16T12:00:00Z"},"content_type":"text/plain"}"#,
+        ];
+
+        for json in cases {
+            assert!(
+                serde_json::from_str::<MetadataUpdate>(json).is_err(),
+                "unexpectedly accepted {json}"
+            );
+        }
+    }
 
     #[test]
     fn from_headers_with_origin() {
