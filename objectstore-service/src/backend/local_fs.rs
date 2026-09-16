@@ -292,29 +292,7 @@ impl Backend for LocalFsBackend {
         let upload_id = uuid::Uuid::now_v7();
         let path = self.upload_path(upload_id);
         Self::create_dir_all(&path).await?;
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&path)
-            .await
-            .context(
-                ErrorKind::BackendFailure,
-                "creating local-fs resumable upload",
-            )?;
-        let metadata_json = serde_json::to_string(metadata)
-            .context(ErrorKind::Internal, "encoding local-fs object metadata")?;
-        file.write_all(metadata_json.as_bytes()).await.context(
-            ErrorKind::BackendFailure,
-            "writing local-fs object metadata",
-        )?;
-        file.write_all(b"\n").await.context(
-            ErrorKind::BackendFailure,
-            "writing local-fs object metadata",
-        )?;
-        file.sync_data().await.context(
-            ErrorKind::BackendFailure,
-            "syncing local-fs resumable upload",
-        )?;
+        UploadFile::create(&path, metadata).await?;
         Ok(Some(format!("{total_length}.{upload_id}")))
     }
 
@@ -340,12 +318,12 @@ impl Backend for LocalFsBackend {
 
         let upload_path = self.upload_path(session.upload_id);
         let mut upload = UploadFile::open(&upload_path).await?;
-        if upload.payload_size == session.total_length.get() {
+        if upload.offset() == session.total_length.get() {
             return Err(ErrorKind::UploadSessionGone.into());
         }
-        if content_length != 0 && offset != upload.payload_size {
+        if content_length != 0 && offset != upload.offset() {
             return Err(ErrorKind::UploadOffsetMismatch {
-                offset: upload.payload_size,
+                offset: upload.offset(),
             }
             .into());
         }
@@ -367,17 +345,13 @@ impl Backend for LocalFsBackend {
             .lock_upload_and_object(session.upload_id, id)
             .await?;
         let upload = UploadFile::open(&upload_path).await?;
-        if upload.payload_size != session.total_length.get() {
+        if upload.offset() != session.total_length.get() {
             return Err(ErrorKind::UploadOffsetMismatch {
-                offset: upload.payload_size,
+                offset: upload.offset(),
             }
             .into());
         }
-        drop(upload);
-        tokio::fs::rename(&upload_path, object_path).await.context(
-            ErrorKind::BackendFailure,
-            "publishing local-fs resumable upload",
-        )?;
+        upload.publish(object_path).await?;
         Ok(UploadProgress::Complete)
     }
 
@@ -386,11 +360,11 @@ impl Backend for LocalFsBackend {
         let session = UploadSession::from_token(token)?;
         let _guard = self.locks.lock_upload(session.upload_id).await?;
         let upload = UploadFile::open(&self.upload_path(session.upload_id)).await?;
-        if upload.payload_size == session.total_length.get() {
+        if upload.offset() == session.total_length.get() {
             Err(ErrorKind::UploadSessionGone.into())
         } else {
             Ok(UploadProgress::Incomplete {
-                offset: upload.payload_size,
+                offset: upload.offset(),
             })
         }
     }
@@ -883,11 +857,29 @@ impl UploadSession {
 /// An open resumable upload containing a metadata preamble followed by payload bytes.
 struct UploadFile {
     file: tokio::fs::File,
+    path: PathBuf,
     /// Number of payload bytes stored after the metadata preamble.
     payload_size: u64,
 }
 
 impl UploadFile {
+    async fn create(path: &Path, metadata: &Metadata) -> Result<()> {
+        let mut options = OpenOptions::new();
+        options.create_new(true).read(true).write(true);
+        #[cfg(unix)]
+        options.mode(0o666);
+
+        let mut file = options.open(path).await.context(
+            ErrorKind::BackendFailure,
+            "creating local-fs resumable upload",
+        )?;
+        write_metadata_preamble(&mut file, metadata).await?;
+        file.sync_data().await.context(
+            ErrorKind::BackendFailure,
+            "syncing local-fs resumable upload",
+        )
+    }
+
     async fn open(path: &Path) -> Result<Self> {
         let file = match OpenOptions::new().read(true).write(true).open(path).await {
             Ok(file) => file,
@@ -917,7 +909,15 @@ impl UploadFile {
                 "reading truncated local-fs resumable upload",
             )
         })?;
-        Ok(Self { file, payload_size })
+        Ok(Self {
+            file,
+            path: path.to_path_buf(),
+            payload_size,
+        })
+    }
+
+    fn offset(&self) -> u64 {
+        self.payload_size
     }
 
     async fn append(&mut self, stream: ClientStream, content_length: u64) -> Result<u64> {
@@ -959,6 +959,15 @@ impl UploadFile {
         )?;
         Ok(self.payload_size)
     }
+
+    async fn publish(self, target: PathBuf) -> Result<()> {
+        let Self { file, path, .. } = self;
+        drop(file);
+        tokio::fs::rename(path, target).await.context(
+            ErrorKind::BackendFailure,
+            "publishing local-fs resumable upload",
+        )
+    }
 }
 
 struct ObjectFile {
@@ -966,6 +975,24 @@ struct ObjectFile {
     preamble_len: u64,
     payload_size: u64,
     reader: BufReader<tokio::fs::File>,
+}
+
+async fn write_metadata_preamble<W>(writer: &mut W, metadata: &Metadata) -> Result<u64>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let metadata_json = serde_json::to_string(metadata)
+        .context(ErrorKind::Internal, "encoding local-fs object metadata")?;
+    writer.write_all(metadata_json.as_bytes()).await.context(
+        ErrorKind::BackendFailure,
+        "writing local-fs object metadata",
+    )?;
+    writer.write_all(b"\n").await.context(
+        ErrorKind::BackendFailure,
+        "writing local-fs object metadata",
+    )?;
+
+    Ok(metadata_json.len() as u64 + 1)
 }
 
 async fn read_metadata_preamble<R>(reader: &mut R) -> Result<(Metadata, usize)>
@@ -1042,37 +1069,15 @@ impl Draft {
             .context(ErrorKind::BackendFailure, "creating local-fs object draft")?;
         let (file, path) = tempfile.into_parts();
 
-        let mut draft = Self {
-            writer: BufWriter::new(tokio::fs::File::from_std(file)),
+        let mut writer = BufWriter::new(tokio::fs::File::from_std(file));
+        let preamble_len = write_metadata_preamble(&mut writer, metadata).await?;
+
+        Ok(Self {
+            writer,
             path,
             target: target.to_path_buf(),
-            preamble_len: 0,
-        };
-
-        draft.write_preamble(metadata).await?;
-
-        Ok(draft)
-    }
-
-    async fn write_preamble(&mut self, metadata: &Metadata) -> Result<()> {
-        let metadata_json = serde_json::to_string(metadata)
-            .context(ErrorKind::Internal, "encoding local-fs object metadata")?;
-        self.writer
-            .write_all(metadata_json.as_bytes())
-            .await
-            .context(
-                ErrorKind::BackendFailure,
-                "writing local-fs object metadata",
-            )?;
-        self.writer.write_all(b"\n").await.context(
-            ErrorKind::BackendFailure,
-            "writing local-fs object metadata",
-        )?;
-
-        // The preamble is the encoded metadata plus the newline terminating it.
-        self.preamble_len = metadata_json.len() as u64 + 1;
-
-        Ok(())
+            preamble_len,
+        })
     }
 
     fn writer(&mut self) -> &mut BufWriter<tokio::fs::File> {
