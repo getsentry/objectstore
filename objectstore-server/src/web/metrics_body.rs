@@ -82,8 +82,7 @@ impl Drop for EmitMetricsGuard {
         let usecase = self
             .usecase
             .take()
-            .map(Into::into)
-            .unwrap_or(Cow::Borrowed("none"));
+            .map_or(Cow::Borrowed("none"), Cow::Owned);
         objectstore_metrics::record!(
             "server.requests.duration" = self.start.elapsed(),
             route = self.route.clone(),
