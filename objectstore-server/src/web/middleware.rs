@@ -120,7 +120,6 @@ async fn get_usecase(request: &mut Request) -> Option<String> {
 pub async fn emit_request_metrics(mut request: Request, next: Next) -> Response {
     let matched_path = request.extract_parts::<MatchedPath>().await;
     let route = matched_path.as_ref().map_or("unknown", |m| m.as_str());
-
     let service = request.extract_parts::<DownstreamService>().await.unwrap();
     let usecase = get_usecase(&mut request).await;
 
