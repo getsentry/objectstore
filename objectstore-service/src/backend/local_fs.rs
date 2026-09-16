@@ -240,43 +240,6 @@ impl Backend for LocalFsBackend {
             }
         };
 
-        if copied == content_length {
-            let mut extra = [0];
-            match reader.read(&mut extra).await {
-                Ok(0) => {}
-                Ok(_) => {
-                    upload.file.set_len(original_len).await.context(
-                        ErrorKind::BackendFailure,
-                        "rolling back oversized local-fs resumable chunk",
-                    )?;
-                    upload.file.sync_data().await.context(
-                        ErrorKind::BackendFailure,
-                        "syncing rolled-back local-fs resumable chunk",
-                    )?;
-                    return Err(Error::new(
-                        ErrorKind::ClientStream,
-                        format!("resumable chunk exceeds content-length {content_length}"),
-                    ));
-                }
-                Err(error) if stream::unpack_client_error(&error).is_some() => {}
-                Err(error) => {
-                    upload.file.set_len(original_len).await.context(
-                        ErrorKind::BackendFailure,
-                        "rolling back failed local-fs resumable chunk",
-                    )?;
-                    upload.file.sync_data().await.context(
-                        ErrorKind::BackendFailure,
-                        "syncing rolled-back local-fs resumable chunk",
-                    )?;
-                    return Err(Error::with_context(
-                        ErrorKind::BackendFailure,
-                        "checking local-fs resumable chunk length",
-                        error,
-                    ));
-                }
-            }
-        }
-
         let persisted_offset =
             upload
                 .payload_size
