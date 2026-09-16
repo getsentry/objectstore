@@ -114,12 +114,8 @@ impl LocalFsBackend {
         self.path.join(id.as_storage_path().to_string())
     }
 
-    fn upload_path(&self, id: &ObjectId, upload_id: Uuid) -> PathBuf {
-        self.path
-            .join(id.context().usecase.as_str())
-            .join(id.context().scopes.as_storage_path().to_string())
-            .join("uploads")
-            .join(upload_id.to_string())
+    fn upload_path(&self, upload_id: Uuid) -> PathBuf {
+        self.path.join("uploads").join(upload_id.to_string())
     }
 
     /// Ensures that an object file can be created at the given path.
@@ -145,12 +141,12 @@ impl Backend for LocalFsBackend {
 
     async fn create_upload_session(
         &self,
-        id: &ObjectId,
+        _id: &ObjectId,
         metadata: &Metadata,
         total_length: NonZeroU64,
     ) -> Result<Option<BackendToken>> {
         let upload_id = uuid::Uuid::now_v7();
-        let path = self.upload_path(id, upload_id);
+        let path = self.upload_path(upload_id);
         Self::create_dir_all(&path).await?;
         let mut file = OpenOptions::new()
             .create_new(true)
@@ -197,7 +193,7 @@ impl Backend for LocalFsBackend {
             })?;
         let upload_guard = self.locks.lock_upload(session.upload_id).await?;
 
-        let upload_path = self.upload_path(id, session.upload_id);
+        let upload_path = self.upload_path(session.upload_id);
         let mut upload = UploadFile::open(&upload_path).await?;
         if upload.payload_size == session.total_length.get() {
             return Err(ErrorKind::UploadSessionGone.into());
@@ -334,10 +330,10 @@ impl Backend for LocalFsBackend {
         }
     }
 
-    async fn upload_offset(&self, id: &ObjectId, token: &BackendToken) -> Result<UploadProgress> {
+    async fn upload_offset(&self, _id: &ObjectId, token: &BackendToken) -> Result<UploadProgress> {
         let session = UploadSession::from_token(token)?;
         let _guard = self.locks.lock_upload(session.upload_id).await?;
-        let upload = UploadFile::open(&self.upload_path(id, session.upload_id)).await?;
+        let upload = UploadFile::open(&self.upload_path(session.upload_id)).await?;
         if upload.payload_size == session.total_length.get() {
             Err(ErrorKind::UploadSessionGone.into())
         } else {
@@ -347,10 +343,10 @@ impl Backend for LocalFsBackend {
         }
     }
 
-    async fn cancel_upload(&self, id: &ObjectId, token: &BackendToken) -> Result<()> {
+    async fn cancel_upload(&self, _id: &ObjectId, token: &BackendToken) -> Result<()> {
         let session = UploadSession::from_token(token)?;
         let _guard = self.locks.lock_upload(session.upload_id).await?;
-        let path = self.upload_path(id, session.upload_id);
+        let path = self.upload_path(session.upload_id);
         match tokio::fs::remove_file(&path).await {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -1235,7 +1231,7 @@ mod tests {
         let session = UploadSession::from_token(&token).unwrap();
         assert_eq!(session.total_length.get(), 6);
         assert_eq!(session.upload_id.get_version_num(), 7);
-        let upload_path = backend.upload_path(&id, session.upload_id);
+        let upload_path = backend.upload_path(session.upload_id);
         assert_eq!(
             upload_path.parent().unwrap().file_name().unwrap(),
             "uploads"
