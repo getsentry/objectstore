@@ -351,7 +351,8 @@ impl Backend for LocalFsBackend {
             }
             .into());
         }
-        upload.publish(object_path).await?;
+        let (stored_size, expires_at) = upload.publish(object_path).await?;
+        self.change_stream.write(id, stored_size, expires_at);
         Ok(UploadProgress::Complete)
     }
 
@@ -858,6 +859,8 @@ impl UploadSession {
 struct UploadFile {
     file: tokio::fs::File,
     path: PathBuf,
+    stored_size: u64,
+    expires_at: Option<Timestamp>,
     /// Number of payload bytes stored after the metadata preamble.
     payload_size: u64,
 }
@@ -892,9 +895,9 @@ impl UploadFile {
             )?,
         };
         let mut reader = BufReader::new(file);
-        let (_, preamble_len) = read_metadata_preamble(&mut reader).await?;
+        let (metadata, preamble_len) = read_metadata_preamble(&mut reader).await?;
         let file = reader.into_inner();
-        let file_len = file
+        let stored_size = file
             .metadata()
             .await
             .context(
@@ -903,7 +906,7 @@ impl UploadFile {
             )?
             .len();
         let preamble_len = preamble_len as u64;
-        let payload_size = file_len.checked_sub(preamble_len).ok_or_else(|| {
+        let payload_size = stored_size.checked_sub(preamble_len).ok_or_else(|| {
             Error::new(
                 ErrorKind::CorruptData,
                 "reading truncated local-fs resumable upload",
@@ -912,6 +915,8 @@ impl UploadFile {
         Ok(Self {
             file,
             path: path.to_path_buf(),
+            stored_size,
+            expires_at: metadata.time_expires,
             payload_size,
         })
     }
@@ -947,7 +952,13 @@ impl UploadFile {
             }
         };
 
-        self.payload_size = self.payload_size.checked_add(copied).ok_or_else(|| {
+        let payload_size = self.payload_size.checked_add(copied).ok_or_else(|| {
+            Error::new(
+                ErrorKind::BackendFailure,
+                "local-fs resumable upload size overflow",
+            )
+        })?;
+        let stored_size = self.stored_size.checked_add(copied).ok_or_else(|| {
             Error::new(
                 ErrorKind::BackendFailure,
                 "local-fs resumable upload size overflow",
@@ -957,16 +968,25 @@ impl UploadFile {
             ErrorKind::BackendFailure,
             "syncing local-fs resumable chunk",
         )?;
-        Ok(self.payload_size)
+        self.payload_size = payload_size;
+        self.stored_size = stored_size;
+        Ok(payload_size)
     }
 
-    async fn publish(self, target: PathBuf) -> Result<()> {
-        let Self { file, path, .. } = self;
+    async fn publish(self, target: PathBuf) -> Result<(u64, Option<Timestamp>)> {
+        let Self {
+            file,
+            path,
+            stored_size,
+            expires_at,
+            ..
+        } = self;
         drop(file);
         tokio::fs::rename(path, target).await.context(
             ErrorKind::BackendFailure,
             "publishing local-fs resumable upload",
-        )
+        )?;
+        Ok((stored_size, expires_at))
     }
 }
 
@@ -2223,6 +2243,52 @@ mod tests {
             Some(file.len() as u64),
             "the metadata header line counts towards the reported size"
         );
+        assert!(records[0].expiration_time.is_some());
+    }
+
+    #[cfg(feature = "storage-cogs")]
+    #[tokio::test]
+    async fn change_stream_reports_resumable_upload_size() {
+        let (tempdir, backend, producer) = make_backend_with_change_stream();
+        let id = make_id();
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
+            time_expires: Some(Timestamp::now() + Duration::from_hours(1)),
+            ..Default::default()
+        };
+        let payload = b"oh hai!";
+        let token = backend
+            .create_upload_session(
+                &id,
+                &metadata,
+                NonZeroU64::new(payload.len() as u64).unwrap(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(producer.records().is_empty());
+        assert_eq!(
+            backend
+                .put_chunk(
+                    &id,
+                    &token,
+                    0,
+                    payload.len() as u64,
+                    stream::single(payload.to_vec()),
+                )
+                .await
+                .unwrap(),
+            UploadProgress::Complete
+        );
+
+        let file = tokio::fs::read(tempdir.path().join(id.as_storage_path().to_string()))
+            .await
+            .unwrap();
+        let records = producer.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].op_type, OpType::Write);
+        assert_eq!(records[0].size, Some(file.len() as u64));
         assert!(records[0].expiration_time.is_some());
     }
 
