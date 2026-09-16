@@ -752,12 +752,11 @@ struct ObjectLocks {
     blocking_waiters: Arc<Semaphore>,
 }
 
-#[allow(dead_code)]
 struct LockGuard {
     /// Holds the first slot lock until the guard is dropped.
-    first: File,
+    _first: File,
     /// Holds the second slot lock when the requested targets do not share a slot.
-    second: Option<File>,
+    _second: Option<File>,
 }
 
 impl ObjectLocks {
@@ -843,7 +842,10 @@ impl ObjectLocks {
             };
             let first = lock(first)?;
             let second = second.map(lock).transpose()?;
-            Ok(LockGuard { first, second })
+            Ok(LockGuard {
+                _first: first,
+                _second: second,
+            })
         })
         .await
         .context(ErrorKind::Internal, "waiting for local-fs object lock")?
@@ -1305,7 +1307,7 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap()
-                .second
+                ._second
                 .is_none()
         );
         let writes = async {
