@@ -19,8 +19,8 @@ use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode, Url, header, mu
 use serde::{Deserialize, Serialize};
 
 use crate::backend::common::{
-    self, Backend, DeleteResponse, GetResponse, MetadataResponse, MultipartUploadBackend,
-    PutResponse,
+    self, Backend, DeleteResponse, ExpiryTarget, GetResponse, MetadataResponse,
+    MultipartUploadBackend, PutResponse,
 };
 use crate::backend::extensions::{ReqwestResultExt, ResponseExt, SendTraced};
 use crate::change_stream::{
@@ -1072,18 +1072,22 @@ impl Backend for GcsBackend {
     async fn set_expiry(
         &self,
         id: &ObjectId,
-        expire_at: Timestamp,
+        target: ExpiryTarget,
         access_time: Timestamp,
-    ) -> Result<bool> {
+    ) -> Result<Option<Timestamp>> {
         let object_url = self.object_url(id)?;
         let Some(object) = self.get_gcs_metadata(&object_url, access_time).await? else {
-            return Ok(false);
+            return Ok(None);
         };
         let Some(current_expiry) = object.custom_time else {
-            return Ok(false);
+            return Ok(None);
+        };
+        let Some(expire_at) = target.resolve(object.time_created.map(Rfc3339Timestamp::into_inner))
+        else {
+            return Ok(None);
         };
         if current_expiry.into_inner() >= expire_at {
-            return Ok(true); // already satisfied
+            return Ok(Some(expire_at)); // already satisfied
         }
 
         let applied = self
@@ -1093,7 +1097,7 @@ impl Backend for GcsBackend {
             self.change_stream.update(id, Some(expire_at));
         }
 
-        Ok(applied)
+        Ok(applied.then_some(expire_at))
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
@@ -2591,6 +2595,7 @@ mod tests {
         // Backend reads return the stored deadline without modifying it.
         let pre_meta = backend.get_metadata(&id, Timestamp::now()).await?.unwrap();
         let pre_expiry = pre_meta.time_expires.unwrap();
+        let created = pre_meta.time_created.unwrap();
         assert_eq!(
             backend
                 .get_metadata(&id, Timestamp::now())
@@ -2600,8 +2605,13 @@ mod tests {
             Some(pre_expiry)
         );
 
-        let requested = Timestamp::now() + tti;
-        assert!(backend.set_expiry(&id, requested, Timestamp::now()).await?);
+        let requested = created + tti;
+        for target in [ExpiryTarget::At(requested), ExpiryTarget::FromCreation(tti)] {
+            assert_eq!(
+                backend.set_expiry(&id, target, Timestamp::now()).await?,
+                Some(requested)
+            );
+        }
         assert_eq!(
             backend
                 .get_metadata(&id, Timestamp::now())
@@ -3359,7 +3369,7 @@ mod tests {
         backend
             .set_expiry(
                 &id,
-                Timestamp::now() + Duration::from_secs(3600),
+                ExpiryTarget::At(Timestamp::now() + Duration::from_secs(3600)),
                 Timestamp::now(),
             )
             .await?;

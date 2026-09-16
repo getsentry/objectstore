@@ -47,7 +47,7 @@ use objectstore_types::range::ByteRange;
 use objectstore_types::resumable::UploadProgress;
 
 use crate::backend::common::{
-    Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse,
+    Backend, DeleteResponse, ExpiryTarget, GetResponse, HighVolumeBackend, MetadataResponse,
     MultipartUploadBackend, PutResponse, TieredGet, TieredMetadata, TieredUpdate, TieredWrite,
     Tombstone,
 };
@@ -116,10 +116,10 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         &self,
         inner: &InMemoryBackend,
         id: &ObjectId,
-        expire_at: Timestamp,
+        target: ExpiryTarget,
         access_time: Timestamp,
-    ) -> Result<bool> {
-        inner.set_expiry(id, expire_at, access_time).await
+    ) -> Result<Option<Timestamp>> {
+        inner.set_expiry(id, target, access_time).await
     }
 
     /// Intercepts [`Backend::delete_object`]. Default delegates to `inner`.
@@ -206,7 +206,7 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         current: Option<&ObjectId>,
         update: TieredUpdate,
         access_time: Timestamp,
-    ) -> Result<bool> {
+    ) -> Result<Option<Timestamp>> {
         inner
             .compare_and_update(id, current, update, access_time)
             .await
@@ -417,11 +417,11 @@ impl<H: Hooks> Backend for TestBackend<H> {
     async fn set_expiry(
         &self,
         id: &ObjectId,
-        expire_at: Timestamp,
+        target: ExpiryTarget,
         access_time: Timestamp,
-    ) -> Result<bool> {
+    ) -> Result<Option<Timestamp>> {
         self.hooks
-            .set_expiry(&self.inner, id, expire_at, access_time)
+            .set_expiry(&self.inner, id, target, access_time)
             .await
     }
 
@@ -529,7 +529,7 @@ impl<H: Hooks> HighVolumeBackend for TestBackend<H> {
         current: Option<&ObjectId>,
         update: TieredUpdate,
         access_time: Timestamp,
-    ) -> Result<bool> {
+    ) -> Result<Option<Timestamp>> {
         self.hooks
             .compare_and_update(&self.inner, id, current, update, access_time)
             .await
