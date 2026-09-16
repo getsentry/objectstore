@@ -1,5 +1,6 @@
 //! Response body wrapper that emits request-duration metrics after the body finishes.
 
+use std::borrow::Cow;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -78,24 +79,19 @@ impl Drop for EmitMetricsGuard {
             BodyState::Completed(status) => status.as_u16(),
             BodyState::Errored => 500,
         };
-        match &self.usecase {
-            Some(usecase) => objectstore_metrics::record!(
-                "server.requests.duration" = self.start.elapsed(),
-                route = self.route.clone(),
-                method = self.method.as_str().to_owned(),
-                usecase = usecase.clone(),
-                status = state.to_string(),
-                // service omitted to limit cardinality
-            ),
-            None => objectstore_metrics::record!(
-                "server.requests.duration" = self.start.elapsed(),
-                route = self.route.clone(),
-                method = self.method.as_str().to_owned(),
-                usecase = "none",
-                status = state.to_string(),
-                // service omitted to limit cardinality
-            ),
-        }
+        let usecase = self
+            .usecase
+            .take()
+            .map(Into::into)
+            .unwrap_or(Cow::Borrowed("none"));
+        objectstore_metrics::record!(
+            "server.requests.duration" = self.start.elapsed(),
+            route = self.route.clone(),
+            method = self.method.as_str().to_owned(),
+            usecase = usecase,
+            status = state.to_string(),
+            // service omitted to limit cardinality
+        );
     }
 }
 
