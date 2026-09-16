@@ -273,6 +273,10 @@ placed into a bounded queue without making the read wait. A background worker
 drains the queue using the service's bulk concurrency budget. The queue capacity
 defaults to 1,000 and is configurable by the server through
 `service.background_queue`. Graceful shutdown drains all accepted extensions.
+TTI deadlines include the same debounce window in addition to the requested
+idle duration. For example, a requested TTI of 7 days is persisted as an
+8-day backend retention, ensuring the object remains available for at least
+7 days after its latest access even when a deadline extension is debounced.
 
 Apart from the expiration policy, metadata during object creation must carry a
 `time_expires` field with the correct expiration timestamp. This is ensured

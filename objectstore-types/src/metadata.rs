@@ -85,6 +85,10 @@ pub const DEFAULT_CONTENT_TYPE: &str = "application/octet-stream";
 /// bumps are not silently suppressed.
 const MAX_TTI_DEBOUNCE: Duration = Duration::from_hours(24);
 
+fn tti_debounce(tti: Duration) -> Duration {
+    (tti / 4).min(MAX_TTI_DEBOUNCE)
+}
+
 /// Errors that can happen dealing with metadata
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -162,12 +166,18 @@ pub enum ExpirationPolicy {
     TimeToIdle(Duration),
 }
 impl ExpirationPolicy {
-    /// Returns the duration after which the object expires.
+    /// Returns the backend retention duration for this policy.
+    ///
+    /// Time-to-idle retention includes the debounce window in addition to the
+    /// requested TTI. This ensures that debouncing a deadline update cannot
+    /// make the object expire before the requested idle duration has elapsed.
     pub fn expires_in(&self) -> Option<Duration> {
         match self {
             ExpirationPolicy::Manual => None,
             ExpirationPolicy::TimeToLive(duration) => Some(*duration),
-            ExpirationPolicy::TimeToIdle(duration) => Some(*duration),
+            ExpirationPolicy::TimeToIdle(duration) => {
+                Some(duration.saturating_add(tti_debounce(*duration)))
+            }
         }
     }
 
@@ -202,8 +212,8 @@ impl ExpirationPolicy {
         };
 
         let time_expires = time_expires?;
-        let new_expire_at = access_time.checked_add(tti)?;
-        let debounce = (tti / 4).min(MAX_TTI_DEBOUNCE);
+        let new_expire_at = access_time.checked_add(self.expires_in()?)?;
+        let debounce = tti_debounce(tti);
         (new_expire_at.checked_duration_since(time_expires)? > debounce).then_some(new_expire_at)
     }
 }
@@ -839,7 +849,25 @@ mod tests {
         let created = metadata.time_created.unwrap();
         assert_eq!(created, access_time);
         let expires = metadata.time_expires.unwrap();
-        assert_eq!(expires, created + Duration::from_hours(1));
+        assert_eq!(expires, created + Duration::from_mins(75));
+    }
+
+    #[test]
+    fn from_insert_headers_adds_capped_debounce_to_tti_retention() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_EXPIRATION, "tti:7d".parse().unwrap());
+
+        let access_time = Timestamp::UNIX_EPOCH;
+        let metadata = Metadata::from_insert_headers(&headers, "", access_time).unwrap();
+
+        assert_eq!(
+            metadata.time_expires,
+            Some(access_time + Duration::from_hours(8 * 24))
+        );
+        assert_eq!(
+            metadata.expiration_policy,
+            ExpirationPolicy::TimeToIdle(Duration::from_hours(7 * 24))
+        );
     }
 
     #[test]
@@ -1137,7 +1165,7 @@ mod tests {
         assert!(!ttl.is_manual());
 
         let tti = ExpirationPolicy::TimeToIdle(Duration::from_mins(2));
-        assert_eq!(tti.expires_in(), Some(Duration::from_mins(2)));
+        assert_eq!(tti.expires_in(), Some(Duration::from_secs(2 * 60 + 30)));
         assert!(tti.is_timeout());
         assert!(!tti.is_manual());
     }
@@ -1190,14 +1218,14 @@ mod tests {
         let now = Timestamp::now();
         let tti = Duration::from_hours(2 * 24);
         let debounce = tti / 4;
-        let stale_deadline = now + tti - debounce - Duration::from_mins(1);
+        let new_deadline = now + tti + debounce;
+        let stale_deadline = new_deadline - debounce - Duration::from_mins(1);
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToIdle(tti),
             time_expires: Some(stale_deadline),
             ..Default::default()
         };
-        let new_deadline = metadata.check_tti_bump(now).unwrap();
-        assert_eq!(new_deadline, now + tti);
+        assert_eq!(metadata.check_tti_bump(now), Some(new_deadline));
     }
 
     #[test]
@@ -1209,7 +1237,7 @@ mod tests {
             Duration::from_secs(4),
         ] {
             let debounce = tti / 4;
-            let new_deadline = now + tti;
+            let new_deadline = now + tti + debounce;
             let mut metadata = Metadata {
                 expiration_policy: ExpirationPolicy::TimeToIdle(tti),
                 time_expires: Some(new_deadline - Duration::from_secs(debounce.as_secs() + 1)),
@@ -1226,7 +1254,8 @@ mod tests {
         let now = Timestamp::now();
         let tti = Duration::from_hours(30 * 24);
         let capped_debounce = Duration::from_hours(24);
-        let stale_deadline = now + tti - capped_debounce - Duration::from_mins(1);
+        let new_deadline = now + tti + capped_debounce;
+        let stale_deadline = new_deadline - capped_debounce - Duration::from_mins(1);
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToIdle(tti),
             time_expires: Some(stale_deadline),
@@ -1234,7 +1263,7 @@ mod tests {
         };
         assert!(metadata.check_tti_bump(now).is_some());
 
-        let fresh_deadline = now + tti - capped_debounce + Duration::from_mins(1);
+        let fresh_deadline = new_deadline - capped_debounce + Duration::from_mins(1);
         let metadata = Metadata {
             time_expires: Some(fresh_deadline),
             ..metadata
