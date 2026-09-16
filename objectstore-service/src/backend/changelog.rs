@@ -24,6 +24,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
+use objectstore_types::time::Timestamp;
 use sentry::{Hub, SentryFutureExt};
 use tokio_util::task::TaskTracker;
 use tokio_util::task::task_tracker::TaskTrackerToken;
@@ -397,7 +398,7 @@ impl ChangeState {
             match self
                 .manager
                 .high_volume
-                .get_tiered_metadata(&self.change.id)
+                .get_tiered_metadata(&self.change.id, Timestamp::now())
                 .await
             {
                 Ok(TieredMetadata::Tombstone(t)) => return Some(t.target),
@@ -414,7 +415,13 @@ impl ChangeState {
     /// Deletes `target` from `lt`, retrying with exponential backoff until success.
     async fn cleanup_lt(&self, target: &ObjectId) {
         let mut delay = INITIAL_BACKOFF;
-        while self.manager.long_term.delete_object(target).await.is_err() {
+        while self
+            .manager
+            .long_term
+            .delete_object(target, Timestamp::now())
+            .await
+            .is_err()
+        {
             tokio::time::sleep(delay).await;
             delay = (delay.mul_f32(1.5)).min(MAX_BACKOFF);
         }

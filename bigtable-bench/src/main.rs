@@ -26,6 +26,7 @@ use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_service::stream;
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use objectstore_types::scope::{Scope, Scopes};
+use objectstore_types::time::Timestamp;
 
 /// Benchmark tool for the Bigtable storage backend.
 #[derive(Debug, FromArgs)]
@@ -228,7 +229,9 @@ async fn main() -> anyhow::Result<()> {
                 let stream = stream::single(buf);
 
                 let start = Instant::now();
-                let result = backend.put_object(&id, &metadata, stream).await;
+                let result = backend
+                    .put_object(&id, &metadata, stream, Timestamp::now())
+                    .await;
                 let elapsed = start.elapsed();
 
                 if result.is_err() {

@@ -670,7 +670,11 @@ impl GcsBackend {
 
     /// Fetches GCS object metadata without modifying the object.
     #[tracing::instrument(level = "debug", fields(%object_url), skip(self))]
-    async fn get_gcs_metadata(&self, object_url: &Url) -> Result<Option<GcsObject>> {
+    async fn get_gcs_metadata(
+        &self,
+        object_url: &Url,
+        access_time: Timestamp,
+    ) -> Result<Option<GcsObject>> {
         let metadata_opt = self
             .with_retry("get_metadata", || async {
                 let resp = self
@@ -702,7 +706,6 @@ impl GcsBackend {
         };
 
         // Filter already expired objects but leave them to garbage collection
-        let access_time = Timestamp::now();
         if gcs_metadata.is_expired(access_time) {
             objectstore_log::debug!("Object found but past expiry");
             return Ok(None);
@@ -900,6 +903,7 @@ impl Backend for GcsBackend {
         id: &ObjectId,
         metadata: &Metadata,
         stream: ClientStream,
+        _access_time: Timestamp,
     ) -> Result<PutResponse> {
         objectstore_log::debug!("Writing to GCS backend");
         let gcs_metadata = GcsObject::from_metadata(metadata);
@@ -950,13 +954,18 @@ impl Backend for GcsBackend {
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
-    async fn get_object(&self, id: &ObjectId, range: Option<ByteRange>) -> Result<GetResponse> {
+    async fn get_object(
+        &self,
+        id: &ObjectId,
+        access_time: Timestamp,
+        range: Option<ByteRange>,
+    ) -> Result<GetResponse> {
         objectstore_log::debug!("Reading from GCS backend");
         let object_url = self.object_url(id)?;
         let mut generation_retry_count = 0usize;
 
         loop {
-            let Some(gcs_metadata) = self.get_gcs_metadata(&object_url).await? else {
+            let Some(gcs_metadata) = self.get_gcs_metadata(&object_url, access_time).await? else {
                 return Ok(None);
             };
 
@@ -1046,19 +1055,28 @@ impl Backend for GcsBackend {
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
-    async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
+    async fn get_metadata(
+        &self,
+        id: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<MetadataResponse> {
         objectstore_log::debug!("Reading metadata from GCS backend");
         let object_url = self.object_url(id)?;
-        match self.get_gcs_metadata(&object_url).await? {
+        match self.get_gcs_metadata(&object_url, access_time).await? {
             Some(gcs_metadata) => Ok(Some(gcs_metadata.into_metadata()?)),
             None => Ok(None),
         }
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
-    async fn set_expiry(&self, id: &ObjectId, expire_at: Timestamp) -> Result<bool> {
+    async fn set_expiry(
+        &self,
+        id: &ObjectId,
+        expire_at: Timestamp,
+        access_time: Timestamp,
+    ) -> Result<bool> {
         let object_url = self.object_url(id)?;
-        let Some(object) = self.get_gcs_metadata(&object_url).await? else {
+        let Some(object) = self.get_gcs_metadata(&object_url, access_time).await? else {
             return Ok(false);
         };
         let Some(current_expiry) = object.custom_time else {
@@ -1079,7 +1097,11 @@ impl Backend for GcsBackend {
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
-    async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
+    async fn delete_object(
+        &self,
+        id: &ObjectId,
+        _access_time: Timestamp,
+    ) -> Result<DeleteResponse> {
         objectstore_log::debug!("Deleting from GCS backend");
         let object_url = self.object_url(id)?;
 
@@ -1604,6 +1626,7 @@ impl MultipartUploadBackend for GcsBackend {
         id: &ObjectId,
         upload_id: &UploadId,
         parts: Vec<CompletedPart>,
+        _access_time: Timestamp,
     ) -> Result<CompleteMultipartResponse> {
         objectstore_log::debug!("Completing multipart upload on GCS backend");
         let mut url = self.xml_object_url(id)?;
@@ -1847,7 +1870,10 @@ mod tests {
         )
         .await?;
 
-        let (metadata, _, stream) = backend.get_object(&make_id(), None).await?.unwrap();
+        let (metadata, _, stream) = backend
+            .get_object(&make_id(), Timestamp::now(), None)
+            .await?
+            .unwrap();
         assert_eq!(metadata.content_type, "text/new");
         assert_eq!(stream::read_to_vec(stream).await?, b"new");
 
@@ -1958,7 +1984,10 @@ mod tests {
                 .await?,
             UploadProgress::Complete
         );
-        let (_, _, payload) = backend.get_object(&single_id, None).await?.unwrap();
+        let (_, _, payload) = backend
+            .get_object(&single_id, Timestamp::now(), None)
+            .await?
+            .unwrap();
         assert_eq!(stream::read_to_vec(payload).await?, single);
 
         let multi_id = make_id_with_key("resumable-multi");
@@ -2007,7 +2036,10 @@ mod tests {
                 .await?,
             UploadProgress::Complete
         );
-        let (_, _, payload) = backend.get_object(&multi_id, None).await?.unwrap();
+        let (_, _, payload) = backend
+            .get_object(&multi_id, Timestamp::now(), None)
+            .await?
+            .unwrap();
         assert_eq!(stream::read_to_vec(payload).await?, expected);
         Ok(())
     }
@@ -2046,7 +2078,10 @@ mod tests {
             UploadProgress::Complete
         );
 
-        let (_, _, payload) = backend.get_object(&id, None).await?.unwrap();
+        let (_, _, payload) = backend
+            .get_object(&id, Timestamp::now(), None)
+            .await?
+            .unwrap();
         let payload = stream::read_to_vec(payload).await?;
         assert_eq!(&payload[RESUMABLE_CHUNK_SIZE - 3..], b"aaaxyz");
         Ok(())
@@ -2250,10 +2285,18 @@ mod tests {
         };
 
         backend
-            .put_object(&id, &metadata, stream::single("hello, world"))
+            .put_object(
+                &id,
+                &metadata,
+                stream::single("hello, world"),
+                Timestamp::now(),
+            )
             .await?;
 
-        let (meta, _, stream) = backend.get_object(&id, None).await?.unwrap();
+        let (meta, _, stream) = backend
+            .get_object(&id, Timestamp::now(), None)
+            .await?
+            .unwrap();
 
         let payload = stream::read_to_vec(stream).await?;
         let str_payload = str::from_utf8(&payload).unwrap();
@@ -2286,10 +2329,15 @@ mod tests {
         let metadata = unicode_metadata();
 
         backend
-            .put_object(&id, &metadata, stream::single("hello, world"))
+            .put_object(
+                &id,
+                &metadata,
+                stream::single("hello, world"),
+                Timestamp::now(),
+            )
             .await?;
 
-        let meta = backend.get_metadata(&id).await?.unwrap();
+        let meta = backend.get_metadata(&id, Timestamp::now()).await?.unwrap();
         assert_eq!(meta.filename, metadata.filename);
         assert_eq!(meta.custom, metadata.custom);
 
@@ -2304,7 +2352,7 @@ mod tests {
 
         multipart_put(&backend, &id, &metadata, "hello, world").await?;
 
-        let meta = backend.get_metadata(&id).await?.unwrap();
+        let meta = backend.get_metadata(&id, Timestamp::now()).await?.unwrap();
         assert_eq!(meta.filename, metadata.filename);
         assert_eq!(meta.custom, metadata.custom);
 
@@ -2336,7 +2384,7 @@ mod tests {
         let backend = create_test_backend().await?;
 
         let id = make_id();
-        let result = backend.get_object(&id, None).await?;
+        let result = backend.get_object(&id, Timestamp::now(), None).await?;
         assert!(result.is_none());
 
         Ok(())
@@ -2347,7 +2395,7 @@ mod tests {
         let backend = create_test_backend().await?;
 
         let id = make_id();
-        backend.delete_object(&id).await?;
+        backend.delete_object(&id, Timestamp::now()).await?;
 
         Ok(())
     }
@@ -2363,7 +2411,7 @@ mod tests {
         };
 
         backend
-            .put_object(&id, &metadata, stream::single("hello"))
+            .put_object(&id, &metadata, stream::single("hello"), Timestamp::now())
             .await?;
 
         let metadata = Metadata {
@@ -2372,10 +2420,13 @@ mod tests {
         };
 
         backend
-            .put_object(&id, &metadata, stream::single("world"))
+            .put_object(&id, &metadata, stream::single("world"), Timestamp::now())
             .await?;
 
-        let (meta, _, stream) = backend.get_object(&id, None).await?.unwrap();
+        let (meta, _, stream) = backend
+            .get_object(&id, Timestamp::now(), None)
+            .await?
+            .unwrap();
 
         let payload = stream::read_to_vec(stream).await?;
         let str_payload = str::from_utf8(&payload).unwrap();
@@ -2393,12 +2444,17 @@ mod tests {
         let metadata = Metadata::default();
 
         backend
-            .put_object(&id, &metadata, stream::single("hello, world"))
+            .put_object(
+                &id,
+                &metadata,
+                stream::single("hello, world"),
+                Timestamp::now(),
+            )
             .await?;
 
-        backend.delete_object(&id).await?;
+        backend.delete_object(&id, Timestamp::now()).await?;
 
-        let result = backend.get_object(&id, None).await?;
+        let result = backend.get_object(&id, Timestamp::now(), None).await?;
         assert!(result.is_none());
 
         Ok(())
@@ -2419,10 +2475,15 @@ mod tests {
         };
 
         backend
-            .put_object(&id, &metadata, stream::single("hello, world"))
+            .put_object(
+                &id,
+                &metadata,
+                stream::single("hello, world"),
+                Timestamp::now(),
+            )
             .await?;
 
-        let result = backend.get_object(&id, None).await?;
+        let result = backend.get_object(&id, Timestamp::now(), None).await?;
         assert!(result.is_none());
 
         Ok(())
@@ -2443,10 +2504,15 @@ mod tests {
         };
 
         backend
-            .put_object(&id, &metadata, stream::single("hello, world"))
+            .put_object(
+                &id,
+                &metadata,
+                stream::single("hello, world"),
+                Timestamp::now(),
+            )
             .await?;
 
-        let result = backend.get_object(&id, None).await?;
+        let result = backend.get_object(&id, Timestamp::now(), None).await?;
         assert!(result.is_none());
 
         Ok(())
@@ -2465,10 +2531,15 @@ mod tests {
         };
 
         backend
-            .put_object(&id, &metadata, stream::single("hello, world"))
+            .put_object(
+                &id,
+                &metadata,
+                stream::single("hello, world"),
+                Timestamp::now(),
+            )
             .await?;
 
-        let meta = backend.get_metadata(&id).await?.unwrap();
+        let meta = backend.get_metadata(&id, Timestamp::now()).await?.unwrap();
         assert_eq!(meta.content_type, metadata.content_type);
         assert_eq!(meta.origin, metadata.origin);
         assert_eq!(meta.custom, metadata.custom);
@@ -2481,7 +2552,7 @@ mod tests {
         let backend = create_test_backend().await?;
 
         let id = make_id();
-        let result = backend.get_metadata(&id).await?;
+        let result = backend.get_metadata(&id, Timestamp::now()).await?;
         assert!(result.is_none());
 
         Ok(())
@@ -2501,7 +2572,12 @@ mod tests {
         };
 
         backend
-            .put_object(&id, &metadata, stream::single("hello, world"))
+            .put_object(
+                &id,
+                &metadata,
+                stream::single("hello, world"),
+                Timestamp::now(),
+            )
             .await?;
 
         // Backdate custom_time while keeping the object live.
@@ -2513,22 +2589,33 @@ mod tests {
             .await?;
 
         // Backend reads return the stored deadline without modifying it.
-        let pre_meta = backend.get_metadata(&id).await?.unwrap();
+        let pre_meta = backend.get_metadata(&id, Timestamp::now()).await?.unwrap();
         let pre_expiry = pre_meta.time_expires.unwrap();
         assert_eq!(
-            backend.get_metadata(&id).await?.unwrap().time_expires,
+            backend
+                .get_metadata(&id, Timestamp::now())
+                .await?
+                .unwrap()
+                .time_expires,
             Some(pre_expiry)
         );
 
         let requested = Timestamp::now() + tti;
-        assert!(backend.set_expiry(&id, requested).await?);
+        assert!(backend.set_expiry(&id, requested, Timestamp::now()).await?);
         assert_eq!(
-            backend.get_metadata(&id).await?.unwrap().time_expires,
+            backend
+                .get_metadata(&id, Timestamp::now())
+                .await?
+                .unwrap()
+                .time_expires,
             Some(requested)
         );
 
         // Verify the payload is still intact after extension.
-        let (_, _, stream) = backend.get_object(&id, None).await?.unwrap();
+        let (_, _, stream) = backend
+            .get_object(&id, Timestamp::now(), None)
+            .await?
+            .unwrap();
         let payload = stream::read_to_vec(stream).await?;
         assert_eq!(&payload, b"hello, world");
 
@@ -2545,7 +2632,7 @@ mod tests {
             ..Default::default()
         };
         backend
-            .put_object(&id, &metadata, stream::single("payload"))
+            .put_object(&id, &metadata, stream::single("payload"), Timestamp::now())
             .await?;
         let object_url = backend.object_url(&id)?;
         let generations = get_gcs_generations(&backend, object_url.clone()).await?;
@@ -2569,7 +2656,7 @@ mod tests {
                 .await?
         );
 
-        backend.delete_object(&id).await?;
+        backend.delete_object(&id, Timestamp::now()).await?;
         assert!(
             !backend
                 .update_custom_time(
@@ -2599,10 +2686,18 @@ mod tests {
         };
 
         backend
-            .put_object(&id, &metadata, stream::single(compressed.clone()))
+            .put_object(
+                &id,
+                &metadata,
+                stream::single(compressed.clone()),
+                Timestamp::now(),
+            )
             .await?;
 
-        let (meta, _, stream) = backend.get_object(&id, None).await?.unwrap();
+        let (meta, _, stream) = backend
+            .get_object(&id, Timestamp::now(), None)
+            .await?
+            .unwrap();
         let payload = stream::read_to_vec(stream).await?;
 
         assert_eq!(meta.compression, Some(Compression::Zstd));
@@ -2648,11 +2743,15 @@ mod tests {
                     part_number: NonZeroU32::new(1).unwrap(),
                     etag,
                 }],
+                Timestamp::now(),
             )
             .await?;
         assert!(result.is_none(), "expected no error on complete");
 
-        let (meta, _, stream) = backend.get_object(&id, None).await?.unwrap();
+        let (meta, _, stream) = backend
+            .get_object(&id, Timestamp::now(), None)
+            .await?
+            .unwrap();
         let payload = stream::read_to_vec(stream).await?;
         assert_eq!(payload, data);
         assert_eq!(meta.content_type, "text/plain".to_string());
@@ -2732,12 +2831,16 @@ mod tests {
                         etag: etag3,
                     },
                 ],
+                Timestamp::now(),
             )
             .await?;
         assert!(result.is_none(), "expected no error on complete");
 
         // Object exists after complete
-        let (_meta, _, stream) = backend.get_object(&id, None).await?.unwrap();
+        let (_meta, _, stream) = backend
+            .get_object(&id, Timestamp::now(), None)
+            .await?
+            .unwrap();
         let payload = stream::read_to_vec(stream).await?;
         let mut expected = Vec::new();
         expected.extend_from_slice(&part1);
@@ -2813,12 +2916,16 @@ mod tests {
                         etag: etag3,
                     },
                 ],
+                Timestamp::now(),
             )
             .await?;
         assert!(result.is_none(), "expected no error on complete");
 
         // Verify reassembly order matches part numbers, not upload order.
-        let (_meta, _, stream) = backend.get_object(&id, None).await?.unwrap();
+        let (_meta, _, stream) = backend
+            .get_object(&id, Timestamp::now(), None)
+            .await?
+            .unwrap();
         let payload = stream::read_to_vec(stream).await?;
         let mut expected = Vec::new();
         expected.extend_from_slice(&part1);
@@ -2909,7 +3016,7 @@ mod tests {
         backend.abort_multipart(&id, &upload_id).await?;
 
         // Object should not exist after abort.
-        let result = backend.get_object(&id, None).await?;
+        let result = backend.get_object(&id, Timestamp::now(), None).await?;
         assert!(result.is_none(), "object should not exist after abort");
 
         // A second abort should still succeed (idempotent 404 handling).
@@ -2944,6 +3051,7 @@ mod tests {
                     part_number: NonZeroU32::new(1).unwrap(),
                     etag,
                 }],
+                Timestamp::now(),
             )
             .await?;
         assert!(
@@ -2965,7 +3073,7 @@ mod tests {
 
         multipart_put(&backend, &id, &metadata, "hello, world").await?;
 
-        let result = backend.get_object(&id, None).await?;
+        let result = backend.get_object(&id, Timestamp::now(), None).await?;
         assert!(result.is_none());
 
         Ok(())
@@ -2983,7 +3091,7 @@ mod tests {
 
         multipart_put(&backend, &id, &metadata, "hello, world").await?;
 
-        let result = backend.get_object(&id, None).await?;
+        let result = backend.get_object(&id, Timestamp::now(), None).await?;
         assert!(result.is_none());
 
         Ok(())
@@ -3007,7 +3115,10 @@ mod tests {
 
         multipart_put(&backend, &id, &metadata, compressed.clone()).await?;
 
-        let (meta, _, stream) = backend.get_object(&id, None).await?.unwrap();
+        let (meta, _, stream) = backend
+            .get_object(&id, Timestamp::now(), None)
+            .await?
+            .unwrap();
         let payload = stream::read_to_vec(stream).await?;
 
         assert_eq!(meta.compression, Some(Compression::Zstd));
@@ -3036,6 +3147,7 @@ mod tests {
                 &id,
                 &metadata,
                 stream::single::<ClientError>(payload.clone()),
+                Timestamp::now(),
             )
             .await?;
 
@@ -3147,6 +3259,7 @@ mod tests {
                 &make_id(),
                 &bare,
                 stream::single::<ClientError>(payload.clone()),
+                Timestamp::now(),
             )
             .await?;
 
@@ -3159,6 +3272,7 @@ mod tests {
                 &make_id(),
                 &annotated,
                 stream::single::<ClientError>(payload.clone()),
+                Timestamp::now(),
             )
             .await?;
 
@@ -3185,7 +3299,7 @@ mod tests {
     async fn change_stream_reports_nothing_when_the_object_was_already_gone() -> Result<()> {
         let (backend, producer) = create_test_backend_with_change_stream().await?;
 
-        backend.delete_object(&make_id()).await?;
+        backend.delete_object(&make_id(), Timestamp::now()).await?;
 
         assert!(producer.records().is_empty());
 
@@ -3203,11 +3317,12 @@ mod tests {
                 &id,
                 &Metadata::default(),
                 stream::single::<ClientError>(b"hi".to_vec()),
+                Timestamp::now(),
             )
             .await?;
         producer.clear();
 
-        backend.delete_object(&id).await?;
+        backend.delete_object(&id, Timestamp::now()).await?;
 
         let records = producer.records();
         assert_eq!(records.len(), 1, "a retried delete must report only once");
@@ -3233,15 +3348,20 @@ mod tests {
                 &id,
                 &metadata,
                 stream::single::<ClientError>(b"hi".to_vec()),
+                Timestamp::now(),
             )
             .await?;
         producer.clear();
 
-        backend.get_metadata(&id).await?;
+        backend.get_metadata(&id, Timestamp::now()).await?;
         assert!(producer.records().is_empty());
 
         backend
-            .set_expiry(&id, Timestamp::now() + Duration::from_secs(3600))
+            .set_expiry(
+                &id,
+                Timestamp::now() + Duration::from_secs(3600),
+                Timestamp::now(),
+            )
             .await?;
 
         let records = producer.records();

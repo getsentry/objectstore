@@ -135,7 +135,9 @@ impl RenewalWorker {
         // extend a replacement TTL/TTI object. Process exit can also lose
         // this opportunistic renewal; a later read may retry it.
         crate::concurrency::spawn_metered("set_expiry", (pending, permit), async move {
-            match backend.set_expiry(&id, expire_at).await {
+            // Queueing must not let a stale read time authorize an expired object.
+            let access_time = Timestamp::now();
+            match backend.set_expiry(&id, expire_at, access_time).await {
                 Ok(true) => {
                     objectstore_metrics::count!("service.expiry_renewal", outcome = "applied");
                     Ok(())

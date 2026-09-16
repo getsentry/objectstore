@@ -291,11 +291,12 @@ impl TieredStorage {
         id: &ObjectId,
         metadata: &Metadata,
         payload: Bytes,
+        access_time: Timestamp,
     ) -> Result<()> {
         let tombstone_opt = self
             .inner
             .high_volume
-            .put_non_tombstone(id, metadata, payload.clone())
+            .put_non_tombstone(id, metadata, payload.clone(), access_time)
             .await?;
 
         let Some(Tombstone { target, .. }) = tombstone_opt else {
@@ -319,7 +320,7 @@ impl TieredStorage {
         let written = self
             .inner
             .high_volume
-            .compare_and_write(id, Some(&target), write)
+            .compare_and_write(id, Some(&target), write, access_time)
             .await?;
 
         // Update guard and let it schedule cleanup in the background.
@@ -338,9 +339,15 @@ impl TieredStorage {
         id: &ObjectId,
         metadata: &Metadata,
         stream: ClientStream,
+        access_time: Timestamp,
     ) -> Result<()> {
         // 1. Read current HV revision to establish the write precondition
-        let current = match self.inner.high_volume.get_tiered_metadata(id).await? {
+        let current = match self
+            .inner
+            .high_volume
+            .get_tiered_metadata(id, access_time)
+            .await?
+        {
             TieredMetadata::Tombstone(t) => Some(t.target),
             _ => None,
         };
@@ -358,7 +365,7 @@ impl TieredStorage {
 
         self.inner
             .long_term
-            .put_object(&new, metadata, stream)
+            .put_object(&new, metadata, stream, access_time)
             .await?;
         guard.advance(ChangePhase::Written);
 
@@ -370,7 +377,12 @@ impl TieredStorage {
         let written = self
             .inner
             .high_volume
-            .compare_and_write(id, current.as_ref(), TieredWrite::Tombstone(tombstone))
+            .compare_and_write(
+                id,
+                current.as_ref(),
+                TieredWrite::Tombstone(tombstone),
+                access_time,
+            )
             .await?;
 
         // Update guard and let it schedule cleanup in the background.
@@ -396,6 +408,7 @@ impl Backend for TieredStorage {
         id: &ObjectId,
         metadata: &Metadata,
         stream: ClientStream,
+        access_time: Timestamp,
     ) -> Result<PutResponse> {
         let timer = objectstore_metrics::timer!("put.latency", usecase = id.usecase().to_owned());
         if metadata.origin.is_none() {
@@ -412,11 +425,13 @@ impl Backend for TieredStorage {
         let (backend_choice, stored_size) = if peeked.is_exhausted() {
             let payload = peeked.into_bytes().await?;
             let payload_len = payload.len() as u64;
-            self.put_high_volume(id, metadata, payload).await?;
+            self.put_high_volume(id, metadata, payload, access_time)
+                .await?;
             (BackendChoice::HighVolume, payload_len)
         } else {
             let (stored_size, stream) = counting_stream(peeked.into_stream());
-            self.put_long_term(id, metadata, stream.boxed()).await?;
+            self.put_long_term(id, metadata, stream.boxed(), access_time)
+                .await?;
             (BackendChoice::LongTerm, stored_size.load(Ordering::Acquire))
         };
 
@@ -437,13 +452,22 @@ impl Backend for TieredStorage {
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
-    async fn get_object(&self, id: &ObjectId, range: Option<ByteRange>) -> Result<GetResponse> {
+    async fn get_object(
+        &self,
+        id: &ObjectId,
+        access_time: Timestamp,
+        range: Option<ByteRange>,
+    ) -> Result<GetResponse> {
         let timer = objectstore_metrics::timer!(
             "get.latency.pre-response",
             usecase = id.usecase().to_owned(),
         );
 
-        let hv_result = self.inner.high_volume.get_tiered_object(id, range).await?;
+        let hv_result = self
+            .inner
+            .high_volume
+            .get_tiered_object(id, access_time, range)
+            .await?;
         let (result, backend_choice) = match hv_result {
             TieredGet::NotFound => (None, BackendChoice::HighVolume),
             TieredGet::Object(metadata, content_range, stream) => (
@@ -453,7 +477,7 @@ impl Backend for TieredStorage {
             TieredGet::Tombstone(tombstone) => (
                 self.inner
                     .long_term
-                    .get_object(&tombstone.target, range)
+                    .get_object(&tombstone.target, access_time, range)
                     .await?
                     .map(|(meta, range, stream)| (align_expiry(meta, &tombstone), range, stream)),
                 BackendChoice::LongTerm,
@@ -482,17 +506,25 @@ impl Backend for TieredStorage {
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
-    async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
+    async fn get_metadata(
+        &self,
+        id: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<MetadataResponse> {
         let timer = objectstore_metrics::timer!("head.latency", usecase = id.usecase().to_owned());
 
-        let hv_result = self.inner.high_volume.get_tiered_metadata(id).await?;
+        let hv_result = self
+            .inner
+            .high_volume
+            .get_tiered_metadata(id, access_time)
+            .await?;
         let (result, backend_choice) = match hv_result {
             TieredMetadata::NotFound => (None, BackendChoice::HighVolume),
             TieredMetadata::Object(metadata) => (Some(metadata), BackendChoice::HighVolume),
             TieredMetadata::Tombstone(tombstone) => (
                 self.inner
                     .long_term
-                    .get_metadata(&tombstone.target)
+                    .get_metadata(&tombstone.target, access_time)
                     .await?
                     .map(|metadata| align_expiry(metadata, &tombstone)),
                 BackendChoice::LongTerm,
@@ -507,13 +539,23 @@ impl Backend for TieredStorage {
         Ok(result)
     }
 
-    async fn set_expiry(&self, id: &ObjectId, expire_at: Timestamp) -> Result<bool> {
-        match self.inner.high_volume.get_tiered_metadata(id).await? {
+    async fn set_expiry(
+        &self,
+        id: &ObjectId,
+        expire_at: Timestamp,
+        access_time: Timestamp,
+    ) -> Result<bool> {
+        match self
+            .inner
+            .high_volume
+            .get_tiered_metadata(id, access_time)
+            .await?
+        {
             TieredMetadata::NotFound => Ok(false),
             TieredMetadata::Object(_) => {
                 self.inner
                     .high_volume
-                    .compare_and_update(id, None, TieredUpdate::SetExpiry(expire_at))
+                    .compare_and_update(id, None, TieredUpdate::SetExpiry(expire_at), access_time)
                     .await
             }
             TieredMetadata::Tombstone(tombstone) => {
@@ -522,7 +564,7 @@ impl Backend for TieredStorage {
                 if !self
                     .inner
                     .long_term
-                    .set_expiry(&tombstone.target, expire_at)
+                    .set_expiry(&tombstone.target, expire_at, access_time)
                     .await?
                 {
                     return Ok(false);
@@ -537,6 +579,7 @@ impl Backend for TieredStorage {
                         id,
                         Some(&tombstone.target),
                         TieredUpdate::SetExpiry(expire_at),
+                        access_time,
                     )
                     .await
             }
@@ -544,13 +587,18 @@ impl Backend for TieredStorage {
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
-    async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
+    async fn delete_object(&self, id: &ObjectId, access_time: Timestamp) -> Result<DeleteResponse> {
         let timer =
             objectstore_metrics::timer!("delete.latency", usecase = id.usecase().to_owned());
 
         let mut backend_choice = BackendChoice::HighVolume;
 
-        if let Some(tombstone) = self.inner.high_volume.delete_non_tombstone(id).await? {
+        if let Some(tombstone) = self
+            .inner
+            .high_volume
+            .delete_non_tombstone(id, access_time)
+            .await?
+        {
             backend_choice = BackendChoice::LongTerm;
 
             let mut guard = self
@@ -567,7 +615,12 @@ impl Backend for TieredStorage {
             let deleted = self
                 .inner
                 .high_volume
-                .compare_and_write(id, Some(&tombstone.target), TieredWrite::Delete)
+                .compare_and_write(
+                    id,
+                    Some(&tombstone.target),
+                    TieredWrite::Delete,
+                    access_time,
+                )
                 .await?;
 
             // Update guard and let it schedule cleanup in the background.
@@ -801,6 +854,7 @@ impl MultipartUploadBackend for TieredStorage {
         id: &ObjectId,
         upload_id: &UploadId,
         parts: Vec<CompletedPart>,
+        access_time: Timestamp,
     ) -> Result<CompleteMultipartResponse> {
         let timer = objectstore_metrics::timer!(
             "multipart.complete.latency",
@@ -815,7 +869,12 @@ impl MultipartUploadBackend for TieredStorage {
         };
 
         // 1. Read current HV revision to establish the write precondition.
-        let current = match self.inner.high_volume.get_tiered_metadata(id).await? {
+        let current = match self
+            .inner
+            .high_volume
+            .get_tiered_metadata(id, access_time)
+            .await?
+        {
             // Optimization: a previous attempt already finalized this revision and tombstone -- report success.
             TieredMetadata::Tombstone(t) if t.target == physical => {
                 timer.record();
@@ -840,7 +899,7 @@ impl MultipartUploadBackend for TieredStorage {
         let maybe_complete_multipart_err = match self
             .inner
             .long_term
-            .complete_multipart(&physical, &tiered.upload_id, parts)
+            .complete_multipart(&physical, &tiered.upload_id, parts, access_time)
             .await
         {
             // The request went through but we got an error in the response body.
@@ -865,7 +924,11 @@ impl MultipartUploadBackend for TieredStorage {
         //    This also serves as an existence check to understand if the LT revision was actually
         //    created successfully in this or a previous attempt, in which case we just need to
         //    finalize the tombstone.
-        let metadata = self.inner.long_term.get_metadata(&physical).await;
+        let metadata = self
+            .inner
+            .long_term
+            .get_metadata(&physical, access_time)
+            .await;
 
         let metadata = match (metadata, maybe_complete_multipart_err) {
             // The LT revision already exists, so we can continue to finalize the tombstone.
@@ -903,7 +966,12 @@ impl MultipartUploadBackend for TieredStorage {
         let written = self
             .inner
             .high_volume
-            .compare_and_write(id, current.as_ref(), TieredWrite::Tombstone(tombstone))
+            .compare_and_write(
+                id,
+                current.as_ref(),
+                TieredWrite::Tombstone(tombstone),
+                access_time,
+            )
             .await?;
 
         // Update guard and let it schedule cleanup in the background.
@@ -995,12 +1063,13 @@ mod tests {
             inner: &InMemoryBackend,
             id: &ObjectId,
             expire_at: Timestamp,
+            access_time: Timestamp,
         ) -> Result<bool> {
             self.events.lock().unwrap().push(self.label);
             if self.reject {
                 Ok(false)
             } else {
-                inner.set_expiry(id, expire_at).await
+                inner.set_expiry(id, expire_at, access_time).await
             }
         }
 
@@ -1010,12 +1079,15 @@ mod tests {
             id: &ObjectId,
             current: Option<&ObjectId>,
             update: TieredUpdate,
+            access_time: Timestamp,
         ) -> Result<bool> {
             self.events.lock().unwrap().push(self.label);
             if self.reject {
                 Ok(false)
             } else {
-                inner.compare_and_update(id, current, update).await
+                inner
+                    .compare_and_update(id, current, update, access_time)
+                    .await
             }
         }
     }
@@ -1052,9 +1124,14 @@ mod tests {
             time_expires: Some(expiry),
             ..Default::default()
         };
-        lt.put_object(target, &metadata, stream::single("payload"))
-            .await
-            .unwrap();
+        lt.put_object(
+            target,
+            &metadata,
+            stream::single("payload"),
+            Timestamp::now(),
+        )
+        .await
+        .unwrap();
         hv.compare_and_write(
             id,
             None,
@@ -1062,6 +1139,7 @@ mod tests {
                 target: target.clone(),
                 time_expires: metadata.time_expires,
             }),
+            Timestamp::now(),
         )
         .await
         .unwrap();
@@ -1076,7 +1154,12 @@ mod tests {
         seed_redirect(&hv.inner, &lt.inner, &id, &target, old_expiry).await;
 
         let requested = Timestamp::now() + Duration::from_hours(1);
-        assert!(storage.set_expiry(&id, requested).await.unwrap());
+        assert!(
+            storage
+                .set_expiry(&id, requested, Timestamp::now())
+                .await
+                .unwrap()
+        );
         assert_eq!(events.lock().unwrap().as_slice(), &["lt", "hv"]);
         assert_eq!(
             lt.inner.get(&target).expect_object().0.time_expires,
@@ -1097,7 +1180,12 @@ mod tests {
         seed_redirect(&hv.inner, &lt.inner, &id, &target, old_expiry).await;
 
         let requested = Timestamp::now() + Duration::from_hours(1);
-        assert!(!storage.set_expiry(&id, requested).await.unwrap());
+        assert!(
+            !storage
+                .set_expiry(&id, requested, Timestamp::now())
+                .await
+                .unwrap()
+        );
         assert_eq!(events.lock().unwrap().as_slice(), &["lt", "hv"]);
         assert_eq!(
             hv.inner.get(&id).expect_tombstone().time_expires,
@@ -1106,7 +1194,7 @@ mod tests {
         assert!(lt.inner.get(&target).expect_object().0.time_expires > Some(old_expiry));
         assert_eq!(
             storage
-                .get_metadata(&id)
+                .get_metadata(&id, Timestamp::now())
                 .await
                 .unwrap()
                 .unwrap()
@@ -1131,7 +1219,11 @@ mod tests {
 
         assert!(
             !storage
-                .set_expiry(&id, Timestamp::now() + Duration::from_hours(1))
+                .set_expiry(
+                    &id,
+                    Timestamp::now() + Duration::from_hours(1),
+                    Timestamp::now()
+                )
                 .await
                 .unwrap()
         );
@@ -1177,8 +1269,20 @@ mod tests {
         let (storage, _hv, _lt, _) = make_tiered_storage();
         let id = make_id("does-not-exist");
 
-        assert!(storage.get_object(&id, None).await.unwrap().is_none());
-        assert!(storage.get_metadata(&id).await.unwrap().is_none());
+        assert!(
+            storage
+                .get_object(&id, Timestamp::now(), None)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            storage
+                .get_metadata(&id, Timestamp::now())
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -1186,7 +1290,7 @@ mod tests {
         let (storage, _hv, _lt, _) = make_tiered_storage();
         let id = make_id("does-not-exist");
 
-        storage.delete_object(&id).await.unwrap();
+        storage.delete_object(&id, Timestamp::now()).await.unwrap();
     }
 
     // --- Put routing ---
@@ -1198,19 +1302,32 @@ mod tests {
         let payload = b"small payload".to_vec();
 
         storage
-            .put_object(&id, &Metadata::default(), stream::single(payload.clone()))
+            .put_object(
+                &id,
+                &Metadata::default(),
+                stream::single(payload.clone()),
+                Timestamp::now(),
+            )
             .await
             .unwrap();
 
         assert!(hv.contains(&id), "expected in high-volume");
         assert!(!lt.contains(&id), "leaked to long-term");
 
-        let (_, _, s) = storage.get_object(&id, None).await.unwrap().unwrap();
+        let (_, _, s) = storage
+            .get_object(&id, Timestamp::now(), None)
+            .await
+            .unwrap()
+            .unwrap();
         let body = stream::read_to_vec(s).await.unwrap();
         assert_eq!(body, payload);
 
         assert!(
-            storage.get_metadata(&id).await.unwrap().is_some(),
+            storage
+                .get_metadata(&id, Timestamp::now())
+                .await
+                .unwrap()
+                .is_some(),
             "get_metadata should return metadata for inline objects"
         );
     }
@@ -1229,7 +1346,12 @@ mod tests {
         };
 
         storage
-            .put_object(&id, &metadata_in, stream::single(payload.clone()))
+            .put_object(
+                &id,
+                &metadata_in,
+                stream::single(payload.clone()),
+                Timestamp::now(),
+            )
             .await
             .unwrap();
 
@@ -1250,12 +1372,20 @@ mod tests {
         assert_eq!(lt_meta.time_expires, tombstone.time_expires);
 
         // get_object follows the tombstone and returns the correct payload.
-        let (_, _, s) = storage.get_object(&id, None).await.unwrap().unwrap();
+        let (_, _, s) = storage
+            .get_object(&id, Timestamp::now(), None)
+            .await
+            .unwrap()
+            .unwrap();
         let body = stream::read_to_vec(s).await.unwrap();
         assert_eq!(body, payload);
 
         // get_metadata follows the tombstone and returns the correct content_type.
-        let metadata = storage.get_metadata(&id).await.unwrap().unwrap();
+        let metadata = storage
+            .get_metadata(&id, Timestamp::now())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(metadata.content_type, "image/png");
     }
 
@@ -1269,7 +1399,12 @@ mod tests {
         // First: insert a large object → creates tombstone in hv, payload in lt at lt_id
         let large_payload = vec![0xABu8; 2 * 1024 * 1024];
         storage
-            .put_object(&id, &Metadata::default(), stream::single(large_payload))
+            .put_object(
+                &id,
+                &Metadata::default(),
+                stream::single(large_payload),
+                Timestamp::now(),
+            )
             .await
             .unwrap();
 
@@ -1279,7 +1414,12 @@ mod tests {
         // The CAS-swap puts the small object inline in HV and schedules background cleanup.
         let small_payload = vec![0xCDu8; 100]; // well under 1 MiB threshold
         storage
-            .put_object(&id, &Metadata::default(), stream::single(small_payload))
+            .put_object(
+                &id,
+                &Metadata::default(),
+                stream::single(small_payload),
+                Timestamp::now(),
+            )
             .await
             .unwrap();
 
@@ -1300,14 +1440,24 @@ mod tests {
 
         let payload1 = vec![0xAAu8; 2 * 1024 * 1024];
         storage
-            .put_object(&id, &Metadata::default(), stream::single(payload1))
+            .put_object(
+                &id,
+                &Metadata::default(),
+                stream::single(payload1),
+                Timestamp::now(),
+            )
             .await
             .unwrap();
         let lt_id_1 = hv.get(&id).expect_tombstone().target;
 
         let payload2 = vec![0xBBu8; 2 * 1024 * 1024];
         storage
-            .put_object(&id, &Metadata::default(), stream::single(payload2.clone()))
+            .put_object(
+                &id,
+                &Metadata::default(),
+                stream::single(payload2.clone()),
+                Timestamp::now(),
+            )
             .await
             .unwrap();
         let lt_id_2 = hv.get(&id).expect_tombstone().target;
@@ -1323,7 +1473,11 @@ mod tests {
         lt.get(&lt_id_1).expect_not_found();
         lt.get(&lt_id_2).expect_object();
 
-        let (_, _, s) = storage.get_object(&id, None).await.unwrap().unwrap();
+        let (_, _, s) = storage
+            .get_object(&id, Timestamp::now(), None)
+            .await
+            .unwrap()
+            .unwrap();
         let body = stream::read_to_vec(s).await.unwrap();
         assert_eq!(body, payload2);
     }
@@ -1336,14 +1490,25 @@ mod tests {
         let id = make_id("delete-small");
 
         storage
-            .put_object(&id, &Metadata::default(), stream::single("tiny"))
+            .put_object(
+                &id,
+                &Metadata::default(),
+                stream::single("tiny"),
+                Timestamp::now(),
+            )
             .await
             .unwrap();
 
-        storage.delete_object(&id).await.unwrap();
+        storage.delete_object(&id, Timestamp::now()).await.unwrap();
 
         hv.get(&id).expect_not_found();
-        assert!(storage.get_object(&id, None).await.unwrap().is_none());
+        assert!(
+            storage
+                .get_object(&id, Timestamp::now(), None)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -1353,14 +1518,19 @@ mod tests {
         let payload = vec![0u8; 2 * 1024 * 1024]; // 2 MiB
 
         storage
-            .put_object(&id, &Metadata::default(), stream::single(payload))
+            .put_object(
+                &id,
+                &Metadata::default(),
+                stream::single(payload),
+                Timestamp::now(),
+            )
             .await
             .unwrap();
 
         // Capture lt_id before deleting (it lives at the revision key, not at id).
         let lt_id = hv.get(&id).expect_tombstone().target;
 
-        storage.delete_object(&id).await.unwrap();
+        storage.delete_object(&id, Timestamp::now()).await.unwrap();
 
         // Drain background cleanup tasks before asserting LT state.
         storage.join().await;
@@ -1378,6 +1548,7 @@ mod tests {
             &self,
             _inner: &InMemoryBackend,
             _id: &ObjectId,
+            _access_time: Timestamp,
         ) -> Result<DeleteResponse> {
             Err(Error::with_source(
                 ErrorKind::BackendFailure,
@@ -1402,12 +1573,17 @@ mod tests {
         let id = make_id("fail-delete");
         let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB -> goes to long-term
         storage
-            .put_object(&id, &Metadata::default(), stream::single(payload))
+            .put_object(
+                &id,
+                &Metadata::default(),
+                stream::single(payload),
+                Timestamp::now(),
+            )
             .await
             .unwrap();
 
         // Delete succeeds even though GCS cleanup fails (it is best-effort).
-        let result = storage.delete_object(&id).await;
+        let result = storage.delete_object(&id, Timestamp::now()).await;
         assert!(
             result.is_ok(),
             "delete should succeed despite GCS cleanup failure"
@@ -1418,7 +1594,11 @@ mod tests {
 
         // The orphaned GCS blob remains but the object is unreachable through the service.
         assert!(
-            storage.get_object(&id, None).await.unwrap().is_none(),
+            storage
+                .get_object(&id, Timestamp::now(), None)
+                .await
+                .unwrap()
+                .is_none(),
             "object should be unreachable after tombstone is deleted"
         );
     }
@@ -1436,6 +1616,7 @@ mod tests {
             _id: &ObjectId,
             _current: Option<&ObjectId>,
             _write: TieredWrite,
+            _access_time: Timestamp,
         ) -> Result<bool> {
             Ok(false) // always conflict
         }
@@ -1455,7 +1636,12 @@ mod tests {
         let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB -> long-term path
 
         storage
-            .put_object(&id, &Metadata::default(), stream::single(payload))
+            .put_object(
+                &id,
+                &Metadata::default(),
+                stream::single(payload),
+                Timestamp::now(),
+            )
             .await
             .unwrap();
 
@@ -1483,7 +1669,12 @@ mod tests {
             time_expires: None,
         };
         inner
-            .compare_and_write(&id, None, TieredWrite::Tombstone(tombstone))
+            .compare_and_write(
+                &id,
+                None,
+                TieredWrite::Tombstone(tombstone),
+                Timestamp::now(),
+            )
             .await
             .unwrap();
 
@@ -1495,7 +1686,12 @@ mod tests {
         // Writing a small object over a tombstone should succeed even when CAS
         // conflicts — the other writer's write is accepted.
         storage
-            .put_object(&id, &Metadata::default(), stream::single("tiny"))
+            .put_object(
+                &id,
+                &Metadata::default(),
+                stream::single("tiny"),
+                Timestamp::now(),
+            )
             .await
             .unwrap();
     }
@@ -1514,10 +1710,13 @@ mod tests {
             id: &ObjectId,
             current: Option<&ObjectId>,
             write: TieredWrite,
+            access_time: Timestamp,
         ) -> Result<bool> {
             if self.0 {
                 // simulate a network error _after_ commit went through
-                inner.compare_and_write(id, current, write).await?;
+                inner
+                    .compare_and_write(id, current, write, access_time)
+                    .await?;
             }
             Err(Error::with_source(
                 ErrorKind::BackendFailure,
@@ -1542,7 +1741,12 @@ mod tests {
         let id = make_id("orphan-test");
         let payload = vec![0xABu8; 2 * 1024 * 1024]; // 2 MiB -> long-term path
         let result = storage
-            .put_object(&id, &Metadata::default(), stream::single(payload))
+            .put_object(
+                &id,
+                &Metadata::default(),
+                stream::single(payload),
+                Timestamp::now(),
+            )
             .await;
 
         assert!(result.is_err());
@@ -1563,7 +1767,12 @@ mod tests {
         let payload = vec![0xCDu8; 2 * 1024 * 1024]; // 2 MiB
 
         storage
-            .put_object(&id, &Metadata::default(), stream::single(payload))
+            .put_object(
+                &id,
+                &Metadata::default(),
+                stream::single(payload),
+                Timestamp::now(),
+            )
             .await
             .unwrap();
 
@@ -1574,11 +1783,19 @@ mod tests {
         lt.remove(&lt_id);
 
         assert!(
-            storage.get_object(&id, None).await.unwrap().is_none(),
+            storage
+                .get_object(&id, Timestamp::now(), None)
+                .await
+                .unwrap()
+                .is_none(),
             "orphan tombstone should resolve to None on get_object"
         );
         assert!(
-            storage.get_metadata(&id).await.unwrap().is_none(),
+            storage
+                .get_metadata(&id, Timestamp::now())
+                .await
+                .unwrap()
+                .is_none(),
             "orphan tombstone should resolve to None on get_metadata"
         );
     }
@@ -1603,6 +1820,7 @@ mod tests {
             &lt_id,
             &Metadata::default(),
             stream::single(payload.clone()),
+            Timestamp::now(),
         )
         .await
         .unwrap();
@@ -1610,17 +1828,29 @@ mod tests {
             target: lt_id.clone(),
             time_expires: None,
         };
-        hv.compare_and_write(&hv_id, None, TieredWrite::Tombstone(tombstone))
-            .await
-            .unwrap();
+        hv.compare_and_write(
+            &hv_id,
+            None,
+            TieredWrite::Tombstone(tombstone),
+            Timestamp::now(),
+        )
+        .await
+        .unwrap();
 
         // get_object must follow the tombstone and find the object via the lt_id target.
-        let (_, _, s) = storage.get_object(&hv_id, None).await.unwrap().unwrap();
+        let (_, _, s) = storage
+            .get_object(&hv_id, Timestamp::now(), None)
+            .await
+            .unwrap()
+            .unwrap();
         let body = stream::read_to_vec(s).await.unwrap();
         assert_eq!(body, payload);
 
         // delete_object must clean up both backends using the target.
-        storage.delete_object(&hv_id).await.unwrap();
+        storage
+            .delete_object(&hv_id, Timestamp::now())
+            .await
+            .unwrap();
         storage.join().await;
         assert!(!hv.contains(&hv_id), "tombstone should be removed");
         assert!(!lt.contains(&lt_id), "lt object should be removed");
@@ -1643,7 +1873,7 @@ mod tests {
         .boxed();
 
         storage
-            .put_object(&id, &Metadata::default(), stream)
+            .put_object(&id, &Metadata::default(), stream, Timestamp::now())
             .await
             .unwrap();
 
@@ -1677,7 +1907,12 @@ mod tests {
         // First put: establishes tombstone
         let payload = vec![0xAAu8; 2 * 1024 * 1024];
         storage
-            .put_object(&id, &Metadata::default(), stream::single(payload.clone()))
+            .put_object(
+                &id,
+                &Metadata::default(),
+                stream::single(payload.clone()),
+                Timestamp::now(),
+            )
             .await
             .unwrap();
         let tombstone1 = hv.get(&id).expect_tombstone().target;
@@ -1689,7 +1924,12 @@ mod tests {
             Box::new(log.clone()),
         );
         broken_storage
-            .put_object(&id, &Metadata::default(), stream::single(payload.clone()))
+            .put_object(
+                &id,
+                &Metadata::default(),
+                stream::single(payload.clone()),
+                Timestamp::now(),
+            )
             .await
             .unwrap_err(); // must fail
         let tombstone2 = hv.get(&id).expect_tombstone().target;
@@ -1701,7 +1941,10 @@ mod tests {
         lt.get(&tombstone2).expect_object();
 
         // Now delete the new object with the same tombstone failure
-        broken_storage.delete_object(&id).await.unwrap_err();
+        broken_storage
+            .delete_object(&id, Timestamp::now())
+            .await
+            .unwrap_err();
         hv.get(&id).expect_not_found();
         broken_storage.join().await;
         lt.get(&tombstone2).expect_not_found();
@@ -1709,14 +1952,24 @@ mod tests {
         // Create a fresh large object
         let id = make_id("obj2");
         storage
-            .put_object(&id, &Metadata::default(), stream::single(payload.clone()))
+            .put_object(
+                &id,
+                &Metadata::default(),
+                stream::single(payload.clone()),
+                Timestamp::now(),
+            )
             .await
             .unwrap();
         let tombstone3 = hv.get(&id).expect_tombstone().target;
 
         // Overwrite it with a small object and check again for cleanup
         broken_storage
-            .put_object(&id, &Metadata::default(), stream::single(&b"small"[..]))
+            .put_object(
+                &id,
+                &Metadata::default(),
+                stream::single(&b"small"[..]),
+                Timestamp::now(),
+            )
             .await
             .unwrap_err(); // must fail
         hv.get(&id).expect_object();
@@ -1802,8 +2055,9 @@ mod tests {
             id: &ObjectId,
             metadata: &Metadata,
             stream: ClientStream,
+            access_time: Timestamp,
         ) -> Result<PutResponse> {
-            inner.put_object(id, metadata, stream).await?;
+            inner.put_object(id, metadata, stream, access_time).await?;
             self.paused.notify_one();
             self.resume.notified().await;
             Ok(())
@@ -1834,7 +2088,7 @@ mod tests {
 
         // Drive the put until the LT write commits, then cancel before the HV tombstone is set.
         tokio::select! {
-            result = storage.put_object(&id, &metadata, stream::single(payload)) => {
+            result = storage.put_object(&id, &metadata, stream::single(payload), Timestamp::now()) => {
                 panic!("expected put to pause before completing, got: {result:?}");
             }
             _ = paused.notified() => {
@@ -1914,6 +2168,7 @@ mod tests {
                     part_number: NonZeroU32::new(1).unwrap(),
                     etag,
                 }],
+                Timestamp::now(),
             )
             .await
             .unwrap();
@@ -1923,7 +2178,11 @@ mod tests {
         );
 
         // get_object should follow the tombstone and return the payload.
-        let (got_meta, _, s) = storage.get_object(&id, None).await.unwrap().unwrap();
+        let (got_meta, _, s) = storage
+            .get_object(&id, Timestamp::now(), None)
+            .await
+            .unwrap()
+            .unwrap();
         let body = stream::read_to_vec(s).await.unwrap();
         assert_eq!(body, payload);
         assert_eq!(got_meta.content_type, "application/octet-stream");
@@ -2007,12 +2266,17 @@ mod tests {
                         etag: etag3,
                     },
                 ],
+                Timestamp::now(),
             )
             .await
             .unwrap();
         assert!(error.is_none());
 
-        let (_, _, s) = storage.get_object(&id, None).await.unwrap().unwrap();
+        let (_, _, s) = storage
+            .get_object(&id, Timestamp::now(), None)
+            .await
+            .unwrap()
+            .unwrap();
         let body = stream::read_to_vec(s).await.unwrap();
 
         let mut expected = Vec::new();
@@ -2052,7 +2316,13 @@ mod tests {
         hv.get(&id).expect_not_found();
 
         // The object should not be reachable.
-        assert!(storage.get_object(&id, None).await.unwrap().is_none());
+        assert!(
+            storage
+                .get_object(&id, Timestamp::now(), None)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -2109,7 +2379,12 @@ mod tests {
         // Put a large object via the normal path.
         let payload1 = vec![0xAAu8; 2 * 1024 * 1024];
         storage
-            .put_object(&id, &Metadata::default(), stream::single(payload1))
+            .put_object(
+                &id,
+                &Metadata::default(),
+                stream::single(payload1),
+                Timestamp::now(),
+            )
             .await
             .unwrap();
         let old_lt_id = hv.get(&id).expect_tombstone().target;
@@ -2146,6 +2421,7 @@ mod tests {
                     part_number: NonZeroU32::new(1).unwrap(),
                     etag,
                 }],
+                Timestamp::now(),
             )
             .await
             .unwrap();
@@ -2163,7 +2439,11 @@ mod tests {
         lt.get(&new_lt_id).expect_object();
 
         // Assert the contents of the new revision.
-        let (_, _, s) = storage.get_object(&id, None).await.unwrap().unwrap();
+        let (_, _, s) = storage
+            .get_object(&id, Timestamp::now(), None)
+            .await
+            .unwrap()
+            .unwrap();
         let body = stream::read_to_vec(s).await.unwrap();
         assert_eq!(body, payload2);
     }
@@ -2184,9 +2464,10 @@ mod tests {
             id: &ObjectId,
             upload_id: &UploadId,
             parts: Vec<CompletedPart>,
+            access_time: Timestamp,
         ) -> Result<CompleteMultipartResponse> {
             inner
-                .complete_multipart(id, upload_id, parts)
+                .complete_multipart(id, upload_id, parts, access_time)
                 .await
                 .unwrap();
             Err(Error::with_source(
@@ -2202,6 +2483,7 @@ mod tests {
             &self,
             _inner: &InMemoryBackend,
             _id: &ObjectId,
+            _access_time: Timestamp,
         ) -> Result<MetadataResponse> {
             Err(Error::with_source(
                 ErrorKind::BackendFailure,
@@ -2263,6 +2545,7 @@ mod tests {
                     part_number: NonZeroU32::new(1).unwrap(),
                     etag,
                 }],
+                Timestamp::now(),
             )
             .await;
         assert!(result.is_err());
@@ -2310,6 +2593,7 @@ mod tests {
             id: &ObjectId,
             upload_id: &UploadId,
             parts: Vec<CompletedPart>,
+            access_time: Timestamp,
         ) -> Result<CompleteMultipartResponse> {
             let mut attempt = self.attempt.lock().await;
             *attempt += 1;
@@ -2320,7 +2604,7 @@ mod tests {
                 ))
             } else {
                 Ok(inner
-                    .complete_multipart(id, upload_id, parts)
+                    .complete_multipart(id, upload_id, parts, access_time)
                     .await
                     .unwrap())
             }
@@ -2379,6 +2663,7 @@ mod tests {
                     part_number: NonZeroU32::new(1).unwrap(),
                     etag: etag.clone(),
                 }],
+                Timestamp::now(),
             )
             .await;
         assert!(result.is_err());
@@ -2393,13 +2678,18 @@ mod tests {
                     part_number: NonZeroU32::new(1).unwrap(),
                     etag,
                 }],
+                Timestamp::now(),
             )
             .await;
         assert!(result.is_ok());
         storage.join().await;
 
         // The object is there.
-        let (_, _, s) = storage.get_object(&id, None).await.unwrap().unwrap();
+        let (_, _, s) = storage
+            .get_object(&id, Timestamp::now(), None)
+            .await
+            .unwrap()
+            .unwrap();
         let body = stream::read_to_vec(s).await.unwrap();
         assert_eq!(body, payload);
 
@@ -2422,7 +2712,11 @@ mod tests {
         assert!(remaining.is_empty());
 
         // The object is still there after recovery.
-        let (_, _, s) = storage.get_object(&id, None).await.unwrap().unwrap();
+        let (_, _, s) = storage
+            .get_object(&id, Timestamp::now(), None)
+            .await
+            .unwrap()
+            .unwrap();
         let body = stream::read_to_vec(s).await.unwrap();
         assert_eq!(body, payload);
     }
@@ -2446,6 +2740,7 @@ mod tests {
             &self,
             inner: &InMemoryBackend,
             id: &ObjectId,
+            access_time: Timestamp,
         ) -> Result<MetadataResponse> {
             let mut attempt = self.attempt.lock().await;
             *attempt += 1;
@@ -2455,7 +2750,7 @@ mod tests {
                     std::io::Error::new(std::io::ErrorKind::TimedOut, "simulated network error"),
                 ))
             } else {
-                inner.get_metadata(id).await
+                inner.get_metadata(id, access_time).await
             }
         }
     }
@@ -2516,6 +2811,7 @@ mod tests {
                     part_number: NonZeroU32::new(1).unwrap(),
                     etag: etag.clone(),
                 }],
+                Timestamp::now(),
             )
             .await;
         assert!(result.is_err());
@@ -2530,13 +2826,18 @@ mod tests {
                     part_number: NonZeroU32::new(1).unwrap(),
                     etag,
                 }],
+                Timestamp::now(),
             )
             .await;
         assert!(result.is_ok());
         storage.join().await;
 
         // The object is there.
-        let (_, _, s) = storage.get_object(&id, None).await.unwrap().unwrap();
+        let (_, _, s) = storage
+            .get_object(&id, Timestamp::now(), None)
+            .await
+            .unwrap()
+            .unwrap();
         let body = stream::read_to_vec(s).await.unwrap();
         assert_eq!(body, payload);
 
@@ -2559,7 +2860,11 @@ mod tests {
         assert!(remaining.is_empty());
 
         // The object is there after recovery.
-        let (_, _, s) = storage.get_object(&id, None).await.unwrap().unwrap();
+        let (_, _, s) = storage
+            .get_object(&id, Timestamp::now(), None)
+            .await
+            .unwrap()
+            .unwrap();
         let body = stream::read_to_vec(s).await.unwrap();
         assert_eq!(body, payload);
     }

@@ -75,29 +75,46 @@ impl Backend for CountingBackend {
         id: &ObjectId,
         metadata: &Metadata,
         stream: ClientStream,
+        access_time: Timestamp,
     ) -> Result<PutResponse> {
         count(&id.context.usecase);
-        self.inner.put_object(id, metadata, stream).await
+        self.inner
+            .put_object(id, metadata, stream, access_time)
+            .await
     }
 
-    async fn get_object(&self, id: &ObjectId, range: Option<ByteRange>) -> Result<GetResponse> {
+    async fn get_object(
+        &self,
+        id: &ObjectId,
+        access_time: Timestamp,
+        range: Option<ByteRange>,
+    ) -> Result<GetResponse> {
         count(&id.context.usecase);
-        self.inner.get_object(id, range).await
+        self.inner.get_object(id, access_time, range).await
     }
 
-    async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
+    async fn get_metadata(
+        &self,
+        id: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<MetadataResponse> {
         count(&id.context.usecase);
-        self.inner.get_metadata(id).await
+        self.inner.get_metadata(id, access_time).await
     }
 
-    async fn set_expiry(&self, id: &ObjectId, expire_at: Timestamp) -> Result<bool> {
+    async fn set_expiry(
+        &self,
+        id: &ObjectId,
+        expire_at: Timestamp,
+        access_time: Timestamp,
+    ) -> Result<bool> {
         count(&id.context.usecase);
-        self.inner.set_expiry(id, expire_at).await
+        self.inner.set_expiry(id, expire_at, access_time).await
     }
 
-    async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
+    async fn delete_object(&self, id: &ObjectId, access_time: Timestamp) -> Result<DeleteResponse> {
         count(&id.context.usecase);
-        self.inner.delete_object(id).await
+        self.inner.delete_object(id, access_time).await
     }
 
     async fn join(&self) {
@@ -214,11 +231,12 @@ impl MultipartUploadBackend for CountingBackend {
         id: &ObjectId,
         upload_id: &UploadId,
         parts: Vec<CompletedPart>,
+        access_time: Timestamp,
     ) -> Result<CompleteMultipartResponse> {
         count(&id.context.usecase);
         self.inner
             .as_multipart_upload_backend()?
-            .complete_multipart(id, upload_id, parts)
+            .complete_multipart(id, upload_id, parts, access_time)
             .await
     }
 }
@@ -263,12 +281,20 @@ mod tests {
             let id = object_id("attachments");
 
             backend
-                .put_object(&id, &Metadata::default(), stream::single("hi"))
+                .put_object(
+                    &id,
+                    &Metadata::default(),
+                    stream::single("hi"),
+                    Timestamp::now(),
+                )
                 .await
                 .unwrap();
-            backend.get_object(&id, None).await.unwrap();
-            backend.get_metadata(&id).await.unwrap();
-            backend.delete_object(&id).await.unwrap();
+            backend
+                .get_object(&id, Timestamp::now(), None)
+                .await
+                .unwrap();
+            backend.get_metadata(&id, Timestamp::now()).await.unwrap();
+            backend.delete_object(&id, Timestamp::now()).await.unwrap();
         });
 
         let cogs = captured
@@ -294,7 +320,7 @@ mod tests {
             let backend = CountingBackend::new(Box::new(InMemoryBackend::new("in-memory")));
             // Nothing stored: the read returns `None` but is still billed.
             let result = backend
-                .get_object(&object_id("attachments"), None)
+                .get_object(&object_id("attachments"), Timestamp::now(), None)
                 .await
                 .unwrap();
             assert!(result.is_none());
@@ -315,7 +341,7 @@ mod tests {
         let captured = capture(async {
             let backend = CountingBackend::new(Box::new(InMemoryBackend::new("in-memory")));
             backend
-                .get_object(&object_id("new_usecase"), None)
+                .get_object(&object_id("new_usecase"), Timestamp::now(), None)
                 .await
                 .unwrap();
         });
@@ -357,7 +383,7 @@ mod tests {
                 .await
                 .unwrap();
             multipart
-                .complete_multipart(&id, &upload_id, vec![])
+                .complete_multipart(&id, &upload_id, vec![], Timestamp::now())
                 .await
                 .unwrap();
             // The upload was completed above, so aborting it is a no-op; counting

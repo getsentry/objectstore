@@ -13,6 +13,7 @@
 //! use crate::backend::common::DeleteResponse;
 //! use crate::error::Result;
 //! use crate::id::ObjectId;
+//! use objectstore_types::time::Timestamp;
 //!
 //! #[derive(Debug)]
 //! struct FailDelete;
@@ -23,6 +24,7 @@
 //!         &self,
 //!         _inner: &InMemoryBackend,
 //!         _id: &ObjectId,
+//!         _access_time: Timestamp,
 //!     ) -> Result<DeleteResponse> {
 //!         Err(crate::error::Error::with_source(crate::error::ErrorKind::BackendFailure, std::io::Error::new(
 //!             std::io::ErrorKind::ConnectionRefused,
@@ -83,8 +85,9 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         id: &ObjectId,
         metadata: &Metadata,
         stream: ClientStream,
+        access_time: Timestamp,
     ) -> Result<PutResponse> {
-        inner.put_object(id, metadata, stream).await
+        inner.put_object(id, metadata, stream, access_time).await
     }
 
     /// Intercepts [`Backend::get_object`]. Default delegates to `inner`.
@@ -92,9 +95,10 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         &self,
         inner: &InMemoryBackend,
         id: &ObjectId,
+        access_time: Timestamp,
         range: Option<ByteRange>,
     ) -> Result<GetResponse> {
-        inner.get_object(id, range).await
+        inner.get_object(id, access_time, range).await
     }
 
     /// Intercepts [`Backend::get_metadata`]. Default delegates to `inner`.
@@ -102,8 +106,9 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         &self,
         inner: &InMemoryBackend,
         id: &ObjectId,
+        access_time: Timestamp,
     ) -> Result<MetadataResponse> {
-        inner.get_metadata(id).await
+        inner.get_metadata(id, access_time).await
     }
 
     /// Intercepts [`Backend::set_expiry`]. Default delegates to `inner`.
@@ -112,8 +117,9 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         inner: &InMemoryBackend,
         id: &ObjectId,
         expire_at: Timestamp,
+        access_time: Timestamp,
     ) -> Result<bool> {
-        inner.set_expiry(id, expire_at).await
+        inner.set_expiry(id, expire_at, access_time).await
     }
 
     /// Intercepts [`Backend::delete_object`]. Default delegates to `inner`.
@@ -121,8 +127,9 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         &self,
         inner: &InMemoryBackend,
         id: &ObjectId,
+        access_time: Timestamp,
     ) -> Result<DeleteResponse> {
-        inner.delete_object(id).await
+        inner.delete_object(id, access_time).await
     }
 
     /// Intercepts [`Backend::join`]. Default delegates to `inner`.
@@ -139,8 +146,11 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         id: &ObjectId,
         metadata: &Metadata,
         payload: Bytes,
+        access_time: Timestamp,
     ) -> Result<Option<Tombstone>> {
-        inner.put_non_tombstone(id, metadata, payload).await
+        inner
+            .put_non_tombstone(id, metadata, payload, access_time)
+            .await
     }
 
     /// Intercepts [`HighVolumeBackend::get_tiered_object`]. Default delegates to `inner`.
@@ -148,9 +158,10 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         &self,
         inner: &InMemoryBackend,
         id: &ObjectId,
+        access_time: Timestamp,
         range: Option<ByteRange>,
     ) -> Result<TieredGet> {
-        inner.get_tiered_object(id, range).await
+        inner.get_tiered_object(id, access_time, range).await
     }
 
     /// Intercepts [`HighVolumeBackend::get_tiered_metadata`]. Default delegates to `inner`.
@@ -158,8 +169,9 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         &self,
         inner: &InMemoryBackend,
         id: &ObjectId,
+        access_time: Timestamp,
     ) -> Result<TieredMetadata> {
-        inner.get_tiered_metadata(id).await
+        inner.get_tiered_metadata(id, access_time).await
     }
 
     /// Intercepts [`HighVolumeBackend::delete_non_tombstone`]. Default delegates to `inner`.
@@ -167,8 +179,9 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         &self,
         inner: &InMemoryBackend,
         id: &ObjectId,
+        access_time: Timestamp,
     ) -> Result<Option<Tombstone>> {
-        inner.delete_non_tombstone(id).await
+        inner.delete_non_tombstone(id, access_time).await
     }
 
     /// Intercepts [`HighVolumeBackend::compare_and_write`]. Default delegates to `inner`.
@@ -178,8 +191,11 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         id: &ObjectId,
         current: Option<&ObjectId>,
         write: TieredWrite,
+        access_time: Timestamp,
     ) -> Result<bool> {
-        inner.compare_and_write(id, current, write).await
+        inner
+            .compare_and_write(id, current, write, access_time)
+            .await
     }
 
     /// Intercepts [`HighVolumeBackend::compare_and_update`]. Default delegates to `inner`.
@@ -189,8 +205,11 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         id: &ObjectId,
         current: Option<&ObjectId>,
         update: TieredUpdate,
+        access_time: Timestamp,
     ) -> Result<bool> {
-        inner.compare_and_update(id, current, update).await
+        inner
+            .compare_and_update(id, current, update, access_time)
+            .await
     }
 
     // --- MultipartUploadBackend methods ---
@@ -260,8 +279,11 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         id: &ObjectId,
         upload_id: &UploadId,
         parts: Vec<CompletedPart>,
+        access_time: Timestamp,
     ) -> Result<CompleteMultipartResponse> {
-        inner.complete_multipart(id, upload_id, parts).await
+        inner
+            .complete_multipart(id, upload_id, parts, access_time)
+            .await
     }
 
     // --- Resumable upload methods ---
@@ -366,26 +388,45 @@ impl<H: Hooks> Backend for TestBackend<H> {
         id: &ObjectId,
         metadata: &Metadata,
         stream: ClientStream,
+        access_time: Timestamp,
     ) -> Result<PutResponse> {
         self.hooks
-            .put_object(&self.inner, id, metadata, stream)
+            .put_object(&self.inner, id, metadata, stream, access_time)
             .await
     }
 
-    async fn get_object(&self, id: &ObjectId, range: Option<ByteRange>) -> Result<GetResponse> {
-        self.hooks.get_object(&self.inner, id, range).await
+    async fn get_object(
+        &self,
+        id: &ObjectId,
+        access_time: Timestamp,
+        range: Option<ByteRange>,
+    ) -> Result<GetResponse> {
+        self.hooks
+            .get_object(&self.inner, id, access_time, range)
+            .await
     }
 
-    async fn get_metadata(&self, id: &ObjectId) -> Result<MetadataResponse> {
-        self.hooks.get_metadata(&self.inner, id).await
+    async fn get_metadata(
+        &self,
+        id: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<MetadataResponse> {
+        self.hooks.get_metadata(&self.inner, id, access_time).await
     }
 
-    async fn set_expiry(&self, id: &ObjectId, expire_at: Timestamp) -> Result<bool> {
-        self.hooks.set_expiry(&self.inner, id, expire_at).await
+    async fn set_expiry(
+        &self,
+        id: &ObjectId,
+        expire_at: Timestamp,
+        access_time: Timestamp,
+    ) -> Result<bool> {
+        self.hooks
+            .set_expiry(&self.inner, id, expire_at, access_time)
+            .await
     }
 
-    async fn delete_object(&self, id: &ObjectId) -> Result<DeleteResponse> {
-        self.hooks.delete_object(&self.inner, id).await
+    async fn delete_object(&self, id: &ObjectId, access_time: Timestamp) -> Result<DeleteResponse> {
+        self.hooks.delete_object(&self.inner, id, access_time).await
     }
 
     async fn join(&self) {
@@ -432,26 +473,42 @@ impl<H: Hooks> HighVolumeBackend for TestBackend<H> {
         id: &ObjectId,
         metadata: &Metadata,
         payload: Bytes,
+        access_time: Timestamp,
     ) -> Result<Option<Tombstone>> {
         self.hooks
-            .put_non_tombstone(&self.inner, id, metadata, payload)
+            .put_non_tombstone(&self.inner, id, metadata, payload, access_time)
             .await
     }
 
     async fn get_tiered_object(
         &self,
         id: &ObjectId,
+        access_time: Timestamp,
         range: Option<ByteRange>,
     ) -> Result<TieredGet> {
-        self.hooks.get_tiered_object(&self.inner, id, range).await
+        self.hooks
+            .get_tiered_object(&self.inner, id, access_time, range)
+            .await
     }
 
-    async fn get_tiered_metadata(&self, id: &ObjectId) -> Result<TieredMetadata> {
-        self.hooks.get_tiered_metadata(&self.inner, id).await
+    async fn get_tiered_metadata(
+        &self,
+        id: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<TieredMetadata> {
+        self.hooks
+            .get_tiered_metadata(&self.inner, id, access_time)
+            .await
     }
 
-    async fn delete_non_tombstone(&self, id: &ObjectId) -> Result<Option<Tombstone>> {
-        self.hooks.delete_non_tombstone(&self.inner, id).await
+    async fn delete_non_tombstone(
+        &self,
+        id: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<Option<Tombstone>> {
+        self.hooks
+            .delete_non_tombstone(&self.inner, id, access_time)
+            .await
     }
 
     async fn compare_and_write(
@@ -459,9 +516,10 @@ impl<H: Hooks> HighVolumeBackend for TestBackend<H> {
         id: &ObjectId,
         current: Option<&ObjectId>,
         write: TieredWrite,
+        access_time: Timestamp,
     ) -> Result<bool> {
         self.hooks
-            .compare_and_write(&self.inner, id, current, write)
+            .compare_and_write(&self.inner, id, current, write, access_time)
             .await
     }
 
@@ -470,9 +528,10 @@ impl<H: Hooks> HighVolumeBackend for TestBackend<H> {
         id: &ObjectId,
         current: Option<&ObjectId>,
         update: TieredUpdate,
+        access_time: Timestamp,
     ) -> Result<bool> {
         self.hooks
-            .compare_and_update(&self.inner, id, current, update)
+            .compare_and_update(&self.inner, id, current, update, access_time)
             .await
     }
 }
@@ -536,9 +595,10 @@ impl<H: Hooks> MultipartUploadBackend for TestBackend<H> {
         id: &ObjectId,
         upload_id: &UploadId,
         parts: Vec<CompletedPart>,
+        access_time: Timestamp,
     ) -> Result<CompleteMultipartResponse> {
         self.hooks
-            .complete_multipart(&self.inner, id, upload_id, parts)
+            .complete_multipart(&self.inner, id, upload_id, parts, access_time)
             .await
     }
 }

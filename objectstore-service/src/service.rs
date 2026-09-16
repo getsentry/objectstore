@@ -3,6 +3,11 @@
 //! [`StorageService`] is the main entry point for storing and retrieving
 //! objects. Each operation runs in a separate tokio task for panic isolation.
 //!
+//! Callers supply an access timestamp, normally the HTTP request start time.
+//! It stays fixed across admission, backend calls, and TTI calculations. Initial
+//! creation and expiry are already resolved in the supplied metadata. Background
+//! renewals retain the read-derived deadline but check liveness at worker start.
+//!
 //! See the [crate-level documentation](crate) for full architecture details.
 
 use std::future::Future;
@@ -242,24 +247,30 @@ impl StorageService {
         key: Option<String>,
         metadata: Metadata,
         stream: ClientStream,
+        access_time: Timestamp,
     ) -> Result<InsertResponse> {
         metadata.validate().kind(ErrorKind::InvalidMetadata)?;
         let id = ObjectId::optional(context, key);
         let inner = Arc::clone(&self.inner);
         self.spawn("insert", async move {
-            inner.put_object(&id, &metadata, stream).await?;
+            inner
+                .put_object(&id, &metadata, stream, access_time)
+                .await?;
             Ok(id)
         })
         .await
     }
 
     /// Retrieves only the metadata for an object, without the payload.
-    pub async fn get_metadata(&self, id: ObjectId) -> Result<MetadataResponse> {
-        let access_time = Timestamp::now();
+    pub async fn get_metadata(
+        &self,
+        id: ObjectId,
+        access_time: Timestamp,
+    ) -> Result<MetadataResponse> {
         let inner = Arc::clone(&self.inner);
         let renewals = self.renewals.clone();
         self.spawn("get_metadata", async move {
-            let response = inner.get_metadata(&id).await?;
+            let response = inner.get_metadata(&id, access_time).await?;
             if let Some(ref metadata) = response
                 && let Some(expire_at) = metadata.check_tti_bump(access_time)
             {
@@ -271,12 +282,16 @@ impl StorageService {
     }
 
     /// Streams (part of) the contents of an object.
-    pub async fn get_object(&self, id: ObjectId, range: Option<ByteRange>) -> Result<GetResponse> {
-        let access_time = Timestamp::now();
+    pub async fn get_object(
+        &self,
+        id: ObjectId,
+        access_time: Timestamp,
+        range: Option<ByteRange>,
+    ) -> Result<GetResponse> {
         let inner = Arc::clone(&self.inner);
         let renewals = self.renewals.clone();
         self.spawn("get", async move {
-            let response = inner.get_object(&id, range).await?;
+            let response = inner.get_object(&id, access_time, range).await?;
             if let Some((ref metadata, _, _)) = response
                 && let Some(expire_at) = metadata.check_tti_bump(access_time)
             {
@@ -288,10 +303,15 @@ impl StorageService {
     }
 
     /// Extends an existing TTL or TTI object's deadline.
-    pub async fn set_expiry(&self, id: ObjectId, expire_at: Timestamp) -> Result<bool> {
+    pub async fn set_expiry(
+        &self,
+        id: ObjectId,
+        expire_at: Timestamp,
+        access_time: Timestamp,
+    ) -> Result<bool> {
         let inner = Arc::clone(&self.inner);
         self.spawn("set_expiry", async move {
-            inner.set_expiry(&id, expire_at).await
+            inner.set_expiry(&id, expire_at, access_time).await
         })
         .await
     }
@@ -303,10 +323,16 @@ impl StorageService {
     /// Once called, the operation runs to completion even if the returned future
     /// is dropped. This guarantees that multi-step delete sequences in the backend
     /// are never left partially applied.
-    pub async fn delete_object(&self, id: ObjectId) -> Result<DeleteResponse> {
+    pub async fn delete_object(
+        &self,
+        id: ObjectId,
+        access_time: Timestamp,
+    ) -> Result<DeleteResponse> {
         let inner = Arc::clone(&self.inner);
-        self.spawn("delete", async move { inner.delete_object(&id).await })
-            .await
+        self.spawn("delete", async move {
+            inner.delete_object(&id, access_time).await
+        })
+        .await
     }
 
     /// Waits for all outstanding background operations to complete.
@@ -416,13 +442,14 @@ impl StorageService {
         id: ObjectId,
         upload_id: UploadId,
         parts: Vec<CompletedPart>,
+        access_time: Timestamp,
     ) -> Result<CompleteMultipartResponse> {
         self.inner.as_multipart_upload_backend()?; // Fail before clone/spawn if unsupported
         let inner = self.inner.clone();
         self.spawn("complete_multipart", async move {
             inner
                 .as_multipart_upload_backend()?
-                .complete_multipart(&id, &upload_id, parts)
+                .complete_multipart(&id, &upload_id, parts, access_time)
                 .await
         })
         .await
@@ -610,6 +637,7 @@ mod tests {
                 None,
                 Metadata::default(),
                 stream::single("auto-keyed"),
+                Timestamp::now(),
             )
             .await
             .unwrap();
@@ -627,11 +655,16 @@ mod tests {
                 Some("testing".into()),
                 Metadata::default(),
                 stream::single("oh hai!"),
+                Timestamp::now(),
             )
             .await
             .unwrap();
 
-        let (_metadata, _, stream) = service.get_object(key, None).await.unwrap().unwrap();
+        let (_metadata, _, stream) = service
+            .get_object(key, Timestamp::now(), None)
+            .await
+            .unwrap()
+            .unwrap();
         let file_contents: BytesMut = stream.try_collect().await.unwrap();
 
         assert_eq!(file_contents.as_ref(), b"oh hai!");
@@ -656,11 +689,16 @@ mod tests {
                 Some("testing".into()),
                 Metadata::default(),
                 stream::single("oh hai!"),
+                Timestamp::now(),
             )
             .await
             .unwrap();
 
-        let (_metadata, _, stream) = service.get_object(key, None).await.unwrap().unwrap();
+        let (_metadata, _, stream) = service
+            .get_object(key, Timestamp::now(), None)
+            .await
+            .unwrap()
+            .unwrap();
         let file_contents: BytesMut = stream.try_collect().await.unwrap();
 
         assert_eq!(file_contents.as_ref(), b"oh hai!");
@@ -711,24 +749,38 @@ mod tests {
                 Some("delete-cleanup-test".into()),
                 Metadata::default(),
                 stream::single(payload),
+                Timestamp::now(),
             )
             .await
             .unwrap();
 
         // Sanity: the object is readable through the service (follows the tombstone).
-        let (_, _, stream) = service.get_object(id.clone(), None).await.unwrap().unwrap();
+        let (_, _, stream) = service
+            .get_object(id.clone(), Timestamp::now(), None)
+            .await
+            .unwrap()
+            .unwrap();
         let body: BytesMut = stream.try_collect().await.unwrap();
         assert_eq!(body.len(), payload_len);
 
         // Delete through the service layer.
-        service.delete_object(id.clone()).await.unwrap();
+        service
+            .delete_object(id.clone(), Timestamp::now())
+            .await
+            .unwrap();
 
         // The tombstone in BigTable should be gone, so the service returns None.
-        let after_delete = service.get_object(id.clone(), None).await.unwrap();
+        let after_delete = service
+            .get_object(id.clone(), Timestamp::now(), None)
+            .await
+            .unwrap();
         assert!(after_delete.is_none(), "tombstone not deleted");
 
         // The real object in GCS must also be gone — no orphan.
-        let orphan = gcs_backend.get_object(&id, None).await.unwrap();
+        let orphan = gcs_backend
+            .get_object(&id, Timestamp::now(), None)
+            .await
+            .unwrap();
         assert!(orphan.is_none(), "object leaked");
     }
 
@@ -744,11 +796,16 @@ mod tests {
                 Some("test-key".into()),
                 Metadata::default(),
                 stream::single("hello world"),
+                Timestamp::now(),
             )
             .await
             .unwrap();
 
-        let (_, _, stream) = service.get_object(id, None).await.unwrap().unwrap();
+        let (_, _, stream) = service
+            .get_object(id, Timestamp::now(), None)
+            .await
+            .unwrap()
+            .unwrap();
         let body: BytesMut = stream.try_collect().await.unwrap();
         assert_eq!(body.as_ref(), b"hello world");
     }
@@ -763,16 +820,26 @@ mod tests {
                 Some("meta-key".into()),
                 Metadata::default(),
                 stream::single("data"),
+                Timestamp::now(),
             )
             .await
             .unwrap();
 
-        let metadata = service.get_metadata(id.clone()).await.unwrap();
+        let metadata = service
+            .get_metadata(id.clone(), Timestamp::now())
+            .await
+            .unwrap();
         assert!(metadata.is_some());
 
-        service.delete_object(id.clone()).await.unwrap();
+        service
+            .delete_object(id.clone(), Timestamp::now())
+            .await
+            .unwrap();
 
-        let after = service.get_object(id, None).await.unwrap();
+        let after = service
+            .get_object(id, Timestamp::now(), None)
+            .await
+            .unwrap();
         assert!(after.is_none());
     }
 
@@ -791,15 +858,21 @@ mod tests {
                 Some("explicit-expiry".into()),
                 metadata,
                 stream::single("payload"),
+                Timestamp::now(),
             )
             .await
             .unwrap();
         let requested = old_expiry + Duration::from_hours(1);
 
-        assert!(service.set_expiry(id.clone(), requested).await.unwrap());
+        assert!(
+            service
+                .set_expiry(id.clone(), requested, Timestamp::now())
+                .await
+                .unwrap()
+        );
         assert_eq!(
             service
-                .get_metadata(id)
+                .get_metadata(id, Timestamp::now())
                 .await
                 .unwrap()
                 .unwrap()
@@ -817,6 +890,7 @@ mod tests {
             &self,
             _inner: &InMemoryBackend,
             _id: &ObjectId,
+            _access_time: Timestamp,
             _range: Option<ByteRange>,
         ) -> Result<GetResponse> {
             panic!("intentional panic in get_object");
@@ -831,7 +905,7 @@ mod tests {
         );
 
         let id = ObjectId::new(make_context(), "panic-test".into());
-        let result = service.get_object(id, None).await;
+        let result = service.get_object(id, Timestamp::now(), None).await;
 
         let Err(error) = result else {
             panic!("expected Panic error");
@@ -847,6 +921,7 @@ mod tests {
     #[derive(Clone, Debug, Default)]
     struct GateOnExpiry {
         calls: Arc<AtomicUsize>,
+        access_time: Arc<Mutex<Option<Timestamp>>>,
         started: Arc<tokio::sync::Notify>,
         resume: Arc<tokio::sync::Notify>,
     }
@@ -858,11 +933,13 @@ mod tests {
             inner: &InMemoryBackend,
             id: &ObjectId,
             expire_at: Timestamp,
+            access_time: Timestamp,
         ) -> Result<bool> {
+            *self.access_time.lock().unwrap() = Some(access_time);
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.started.notify_one();
             self.resume.notified().await;
-            inner.set_expiry(id, expire_at).await
+            inner.set_expiry(id, expire_at, access_time).await
         }
     }
 
@@ -876,12 +953,14 @@ mod tests {
 
     #[tokio::test]
     async fn background_renewal() {
+        let now = Timestamp::now();
+        let access_time = now - Duration::from_secs(10);
         let backend = TestBackend::new(GateOnExpiry::default());
         let id = ObjectId::new(make_context(), "background-renewal".into());
         let metadata = stale_tti_metadata();
         backend
             .inner
-            .put_object(&id, &metadata, stream::single("payload"))
+            .put_object(&id, &metadata, stream::single("payload"), Timestamp::now())
             .await
             .unwrap();
         let mut service =
@@ -890,7 +969,7 @@ mod tests {
 
         let response = tokio::time::timeout(
             Duration::from_secs(1),
-            service.get_object(id.clone(), Some(ByteRange::Bounded(0, 2))),
+            service.get_object(id.clone(), access_time, Some(ByteRange::Bounded(0, 2))),
         )
         .await
         .expect("GET waited for its background renewal")
@@ -898,6 +977,7 @@ mod tests {
         .unwrap();
         assert_eq!(response.0.time_expires, metadata.time_expires);
         backend.hooks.started.notified().await;
+        assert!(backend.hooks.access_time.lock().unwrap().unwrap() >= now);
 
         let join = tokio::spawn({
             let service = service.clone();
@@ -915,7 +995,10 @@ mod tests {
             .await
             .expect("shutdown did not drain renewal")
             .unwrap();
-        assert!(backend.inner.get(&id).expect_object().0.time_expires > response.0.time_expires);
+        assert_eq!(
+            backend.inner.get(&id).expect_object().0.time_expires,
+            Some(access_time + Duration::from_hours(1))
+        );
     }
 
     #[tokio::test]
@@ -924,16 +1007,24 @@ mod tests {
         let id = ObjectId::new(make_context(), "deduplicated-renewal".into());
         backend
             .inner
-            .put_object(&id, &stale_tti_metadata(), stream::single("payload"))
+            .put_object(
+                &id,
+                &stale_tti_metadata(),
+                stream::single("payload"),
+                Timestamp::now(),
+            )
             .await
             .unwrap();
         let mut service =
             StorageService::new(Box::new(backend.clone()), Cipher::ephemeral().unwrap());
         service.start();
 
-        service.get_metadata(id.clone()).await.unwrap();
+        service
+            .get_metadata(id.clone(), Timestamp::now())
+            .await
+            .unwrap();
         backend.hooks.started.notified().await;
-        service.get_metadata(id).await.unwrap();
+        service.get_metadata(id, Timestamp::now()).await.unwrap();
         tokio::task::yield_now().await;
         assert_eq!(backend.hooks.calls.load(Ordering::SeqCst), 1);
 
@@ -952,14 +1043,14 @@ mod tests {
         };
         backend
             .inner
-            .put_object(&id, &metadata, stream::single("payload"))
+            .put_object(&id, &metadata, stream::single("payload"), Timestamp::now())
             .await
             .unwrap();
         let mut service =
             StorageService::new(Box::new(backend.clone()), Cipher::ephemeral().unwrap());
         service.start();
 
-        service.get_metadata(id).await.unwrap();
+        service.get_metadata(id, Timestamp::now()).await.unwrap();
         tokio::task::yield_now().await;
         assert_eq!(backend.hooks.calls.load(Ordering::SeqCst), 0);
         service.join().await;
@@ -974,7 +1065,7 @@ mod tests {
         for id in [&first, &second] {
             backend
                 .inner
-                .put_object(id, &metadata, stream::single("payload"))
+                .put_object(id, &metadata, stream::single("payload"), Timestamp::now())
                 .await
                 .unwrap();
         }
@@ -1024,12 +1115,13 @@ mod tests {
             inner: &InMemoryBackend,
             id: &ObjectId,
             expire_at: Timestamp,
+            access_time: Timestamp,
         ) -> Result<bool> {
             if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 assert!(!self.panic, "intentional renewal panic");
                 return Err(ErrorKind::BackendFailure.into());
             }
-            inner.set_expiry(id, expire_at).await
+            inner.set_expiry(id, expire_at, access_time).await
         }
     }
 
@@ -1044,7 +1136,7 @@ mod tests {
             let metadata = stale_tti_metadata();
             backend
                 .inner
-                .put_object(&id, &metadata, stream::single("payload"))
+                .put_object(&id, &metadata, stream::single("payload"), Timestamp::now())
                 .await
                 .unwrap();
             let concurrency = ConcurrencyLimiter::new(1);
@@ -1095,12 +1187,13 @@ mod tests {
             id: &ObjectId,
             metadata: &Metadata,
             stream: ClientStream,
+            access_time: Timestamp,
         ) -> Result<PutResponse> {
             if self.pause {
                 self.paused.notify_one();
                 self.resume.notified().await;
             }
-            inner.put_object(id, metadata, stream).await?;
+            inner.put_object(id, metadata, stream, access_time).await?;
             self.on_put.notify_one();
             Ok(())
         }
@@ -1111,9 +1204,12 @@ mod tests {
             id: &ObjectId,
             current: Option<&ObjectId>,
             write: TieredWrite,
+            access_time: Timestamp,
         ) -> Result<bool> {
             let notify = matches!(write, TieredWrite::Tombstone(_) | TieredWrite::Object(_, _));
-            let result = inner.compare_and_write(id, current, write).await?;
+            let result = inner
+                .compare_and_write(id, current, write, access_time)
+                .await?;
             if notify {
                 self.on_put.notify_one();
             }
@@ -1134,6 +1230,7 @@ mod tests {
             Some("completion-test".into()),
             Metadata::default(),
             stream::single(payload),
+            Timestamp::now(),
         );
 
         // Start insert through the public API. select! drops the future once the
@@ -1185,6 +1282,7 @@ mod tests {
                 Some("first".into()),
                 Metadata::default(),
                 stream::single("data"),
+                Timestamp::now(),
             )
             .await
         });
@@ -1199,6 +1297,7 @@ mod tests {
                 Some("second".into()),
                 Metadata::default(),
                 stream::single("data"),
+                Timestamp::now(),
             )
             .await;
 
@@ -1215,7 +1314,10 @@ mod tests {
 
         // Now that the permit is released, a new operation should succeed.
         service
-            .get_metadata(ObjectId::new(make_context(), "first".into()))
+            .get_metadata(
+                ObjectId::new(make_context(), "first".into()),
+                Timestamp::now(),
+            )
             .await
             .unwrap();
     }
@@ -1242,6 +1344,7 @@ mod tests {
                 Some("in-use-test".into()),
                 Metadata::default(),
                 stream::single("data"),
+                Timestamp::now(),
             )
             .await
         });
@@ -1262,11 +1365,11 @@ mod tests {
 
         // First operation panics — the permit must still be released.
         let id = ObjectId::new(make_context(), "panic-permit".into());
-        let result = service.get_object(id.clone(), None).await;
+        let result = service.get_object(id.clone(), Timestamp::now(), None).await;
         assert!(result.is_err_and(|error| error.kind() == ErrorKind::Panic));
 
         // Second operation should succeed in acquiring the permit (not AtCapacity).
-        let result = service.get_object(id, None).await;
+        let result = service.get_object(id, Timestamp::now(), None).await;
         assert!(
             !result.is_err_and(|error| error.kind() == ErrorKind::AtCapacity),
             "permit was not released after panic"

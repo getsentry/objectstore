@@ -18,6 +18,7 @@ use crate::auth::AuthAwareService;
 use crate::endpoints::common::{ApiError, ApiResult, insert_accept_ranges};
 use crate::endpoints::resumable;
 use crate::extractors::byte_range::OptionalByteRange;
+use crate::extractors::request_time::RequestTime;
 use crate::extractors::{Xt, body::MeteredBody};
 use crate::resumable::ResumableTarget;
 use crate::state::ServiceState;
@@ -87,16 +88,19 @@ async fn create_object(
     State(state): State<ServiceState>,
     Xt(context): Xt<ObjectContext>,
     headers: HeaderMap,
+    RequestTime(access_time): RequestTime,
     MeteredBody(body): MeteredBody,
 ) -> ApiResult<Response> {
-    let metadata = Metadata::from_insert_headers(&headers, "")?;
+    let metadata = Metadata::from_insert_headers(&headers, "", access_time)?;
 
     state
         .config
         .usecases
         .validate(&context.usecase, &metadata)?;
 
-    let response_id = service.insert_object(context, None, metadata, body).await?;
+    let response_id = service
+        .insert_object(context, None, metadata, body, access_time)
+        .await?;
     let response = Json(InsertObjectResponse {
         key: response_id.key().to_string(),
     });
@@ -108,11 +112,12 @@ async fn object_get(
     service: AuthAwareService,
     State(state): State<ServiceState>,
     Xt(id): Xt<ObjectId>,
-    OptionalByteRange(byte_range): OptionalByteRange,
     _headers: HeaderMap,
+    RequestTime(access_time): RequestTime,
+    OptionalByteRange(byte_range): OptionalByteRange,
 ) -> ApiResult<Response> {
     let context = id.context().clone();
-    let result = service.get_object(id, byte_range).await;
+    let result = service.get_object(id, access_time, byte_range).await;
 
     let (metadata, content_range, stream) = match result {
         Ok(Some(result)) => result,
@@ -167,8 +172,12 @@ async fn object_get(
     Ok(response)
 }
 
-async fn object_head(service: AuthAwareService, Xt(id): Xt<ObjectId>) -> ApiResult<Response> {
-    let Some(metadata) = service.get_metadata(id).await? else {
+async fn object_head(
+    service: AuthAwareService,
+    Xt(id): Xt<ObjectId>,
+    RequestTime(access_time): RequestTime,
+) -> ApiResult<Response> {
+    let Some(metadata) = service.get_metadata(id, access_time).await? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
 
@@ -249,9 +258,10 @@ async fn insert_object(
     State(state): State<ServiceState>,
     Xt(id): Xt<ObjectId>,
     headers: HeaderMap,
+    RequestTime(access_time): RequestTime,
     MeteredBody(body): MeteredBody,
 ) -> ApiResult<Response> {
-    let metadata = Metadata::from_insert_headers(&headers, "")?;
+    let metadata = Metadata::from_insert_headers(&headers, "", access_time)?;
 
     let ObjectId { context, key } = id;
 
@@ -261,7 +271,7 @@ async fn insert_object(
         .validate(&context.usecase, &metadata)?;
 
     let response_id = service
-        .insert_object(context, Some(key), metadata, body)
+        .insert_object(context, Some(key), metadata, body, access_time)
         .await?;
 
     let response = Json(InsertObjectResponse {
@@ -274,7 +284,8 @@ async fn insert_object(
 async fn delete_object(
     service: AuthAwareService,
     Xt(id): Xt<ObjectId>,
+    RequestTime(access_time): RequestTime,
 ) -> ApiResult<impl IntoResponse> {
-    service.delete_object(id).await?;
+    service.delete_object(id, access_time).await?;
     Ok(StatusCode::NO_CONTENT)
 }

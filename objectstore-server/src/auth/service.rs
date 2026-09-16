@@ -10,6 +10,7 @@ use objectstore_types::auth::Permission;
 use objectstore_types::metadata::Metadata;
 use objectstore_types::range::ByteRange;
 use objectstore_types::resumable::{SessionToken, UploadProgress};
+use objectstore_types::time::Timestamp;
 
 use crate::auth::AuthContext;
 use crate::endpoints::common::ApiResult;
@@ -26,9 +27,13 @@ use crate::endpoints::common::ApiResult;
 /// ```
 /// use axum::http::StatusCode;
 /// use objectstore_server::auth::AuthAwareService;
+/// use objectstore_server::extractors::request_time::RequestTime;
 ///
-/// async fn my_endpoint(service: AuthAwareService) -> Result<StatusCode, StatusCode> {
-///     service.delete_object(todo!("pass some ID"))
+/// async fn my_endpoint(
+///     service: AuthAwareService,
+///     RequestTime(access_time): RequestTime,
+/// ) -> Result<StatusCode, StatusCode> {
+///     service.delete_object(todo!("pass some ID"), access_time)
 ///         .await
 ///         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 ///
@@ -83,34 +88,44 @@ impl AuthAwareService {
         key: Option<String>,
         metadata: Metadata,
         stream: ClientStream,
+        access_time: Timestamp,
     ) -> ApiResult<InsertResponse> {
         self.check_permission(Permission::ObjectWrite, &context)?;
         Ok(self
             .service
-            .insert_object(context, key, metadata, stream)
+            .insert_object(context, key, metadata, stream, access_time)
             .await?)
     }
 
     /// Auth-aware wrapper around [`StorageService::get_metadata`].
-    pub async fn get_metadata(&self, id: ObjectId) -> ApiResult<MetadataResponse> {
+    pub async fn get_metadata(
+        &self,
+        id: ObjectId,
+        access_time: Timestamp,
+    ) -> ApiResult<MetadataResponse> {
         self.check_permission(Permission::ObjectRead, id.context())?;
-        Ok(self.service.get_metadata(id).await?)
+        Ok(self.service.get_metadata(id, access_time).await?)
     }
 
     /// Auth-aware wrapper around [`StorageService::get_object`].
     pub async fn get_object(
         &self,
         id: ObjectId,
+        access_time: Timestamp,
         range: Option<ByteRange>,
     ) -> ApiResult<GetResponse> {
         self.check_permission(Permission::ObjectRead, id.context())?;
-        Ok(self.service.get_object(id, range).await?)
+        Ok(self.service.get_object(id, access_time, range).await?)
     }
 
     /// Auth-aware wrapper around [`StorageService::delete_object`].
-    pub async fn delete_object(&self, id: ObjectId) -> ApiResult<DeleteResponse> {
+    pub async fn delete_object(
+        &self,
+        id: ObjectId,
+        access_time: Timestamp,
+    ) -> ApiResult<DeleteResponse> {
         self.check_permission(Permission::ObjectDelete, id.context())?;
-        Ok(self.service.delete_object(id).await?)
+        Ok(self.service.delete_object(id, access_time).await?)
     }
 
     // --- Multipart upload operations ---
@@ -180,11 +195,12 @@ impl AuthAwareService {
         id: ObjectId,
         upload_id: UploadId,
         parts: Vec<CompletedPart>,
+        access_time: Timestamp,
     ) -> ApiResult<CompleteMultipartResponse> {
         self.check_permission(Permission::ObjectWrite, id.context())?;
         Ok(self
             .service
-            .complete_multipart(id, upload_id, parts)
+            .complete_multipart(id, upload_id, parts, access_time)
             .await?)
     }
 

@@ -361,20 +361,23 @@ impl Metadata {
     /// Unlike [`from_headers`](Self::from_headers), this skips parsing read-only attributes so
     /// clients cannot set them via headers.
     ///
-    /// This materializes the following attributes:
+    /// Uses `access_time` to materialize the following attributes:
     /// - [`time_created`](Self::time_created)
     /// - [`time_expires`](Self::time_expires)
     ///
     /// A prefix can also be provided which is stripped from custom non-standard headers.
-    pub fn from_insert_headers(headers: &HeaderMap, prefix: &str) -> Result<Self, Error> {
+    pub fn from_insert_headers(
+        headers: &HeaderMap,
+        prefix: &str,
+        access_time: Timestamp,
+    ) -> Result<Self, Error> {
         let mut metadata = Self::parse_headers(headers, prefix, true)?;
 
-        let time_created = Timestamp::now();
-        metadata.time_created = Some(time_created);
+        metadata.time_created = Some(access_time);
         metadata.time_expires = metadata
             .expiration_policy
             .expires_in()
-            .map(|ttl| time_created.checked_add(ttl).ok_or(InvalidTimestamp))
+            .map(|ttl| access_time.checked_add(ttl).ok_or(InvalidTimestamp))
             .transpose()?;
 
         Ok(metadata)
@@ -791,7 +794,7 @@ mod tests {
             "2024-01-16T12:00:00.000000Z".parse().unwrap(),
         );
 
-        let metadata = Metadata::from_insert_headers(&headers, "").unwrap();
+        let metadata = Metadata::from_insert_headers(&headers, "", Timestamp::now()).unwrap();
         // `time_created` is stamped by the server, not the client's forged value.
         let created = metadata.time_created.unwrap();
         assert_ne!(created, Timestamp::from_rfc3339(forged_created).unwrap());
@@ -808,7 +811,7 @@ mod tests {
         headers.insert(HEADER_TIME_CREATED, "not-a-timestamp".parse().unwrap());
         headers.insert(HEADER_TIME_EXPIRES, "not-a-timestamp".parse().unwrap());
 
-        let metadata = Metadata::from_insert_headers(&headers, "").unwrap();
+        let metadata = Metadata::from_insert_headers(&headers, "", Timestamp::now()).unwrap();
         assert!(metadata.time_created.is_some());
         assert!(metadata.time_expires.is_none());
     }
@@ -818,8 +821,10 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(HEADER_EXPIRATION, "ttl:30s".parse().unwrap());
 
-        let metadata = Metadata::from_insert_headers(&headers, "").unwrap();
+        let access_time = Timestamp::UNIX_EPOCH;
+        let metadata = Metadata::from_insert_headers(&headers, "", access_time).unwrap();
         let created = metadata.time_created.unwrap();
+        assert_eq!(created, access_time);
         let expires = metadata.time_expires.unwrap();
         assert_eq!(expires, created + Duration::from_secs(30));
     }
@@ -829,8 +834,10 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(HEADER_EXPIRATION, "tti:1h".parse().unwrap());
 
-        let metadata = Metadata::from_insert_headers(&headers, "").unwrap();
+        let access_time = Timestamp::UNIX_EPOCH;
+        let metadata = Metadata::from_insert_headers(&headers, "", access_time).unwrap();
         let created = metadata.time_created.unwrap();
+        assert_eq!(created, access_time);
         let expires = metadata.time_expires.unwrap();
         assert_eq!(expires, created + Duration::from_hours(1));
     }
@@ -838,7 +845,7 @@ mod tests {
     #[test]
     fn from_insert_headers_manual_leaves_time_expires_none() {
         let headers = HeaderMap::new();
-        let metadata = Metadata::from_insert_headers(&headers, "").unwrap();
+        let metadata = Metadata::from_insert_headers(&headers, "", Timestamp::now()).unwrap();
         assert_eq!(metadata.expiration_policy, ExpirationPolicy::Manual);
         assert!(metadata.time_expires.is_none());
     }
@@ -1067,7 +1074,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(HEADER_SIZE, "9999".parse().unwrap());
 
-        let metadata = Metadata::from_insert_headers(&headers, "").unwrap();
+        let metadata = Metadata::from_insert_headers(&headers, "", Timestamp::now()).unwrap();
         assert!(metadata.size.is_none());
     }
 

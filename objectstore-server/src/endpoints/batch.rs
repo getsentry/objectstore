@@ -20,6 +20,7 @@ use crate::batch::{
 use crate::endpoints::common::{ApiError, ApiErrorResponse};
 use crate::extractors::Xt;
 use crate::extractors::batch::{BatchError, BatchOperationStream};
+use crate::extractors::request_time::RequestTime;
 use crate::multipart::{IntoMultipartResponse, Part};
 use crate::state::ServiceState;
 
@@ -61,6 +62,7 @@ async fn batch(
     service: AuthAwareService,
     State(state): State<ServiceState>,
     Xt(context): Xt<ObjectContext>,
+    RequestTime(access_time): RequestTime,
     requests: BatchOperationStream,
 ) -> Response {
     let batch = state.service.stream();
@@ -114,11 +116,13 @@ async fn batch(
     // Step 6: execute concurrently, then convert each result to a multipart Part
     let state_ref = Arc::clone(&state);
     let context_ref = context.clone();
-    let responses = batch.execute(context, metered).then(move |(idx, result)| {
-        let state = Arc::clone(&state_ref);
-        let context = context_ref.clone();
-        async move { convert_to_part(idx, result, &state, &context).await }
-    });
+    let responses = batch
+        .execute(context, metered, access_time)
+        .then(move |(idx, result)| {
+            let state = Arc::clone(&state_ref);
+            let context = context_ref.clone();
+            async move { convert_to_part(idx, result, &state, &context).await }
+        });
 
     responses.into_multipart_response(rand::random())
 }
