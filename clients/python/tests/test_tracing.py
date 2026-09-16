@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Generator
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -78,6 +79,15 @@ def _spans_by_op(spans: list[SpanJSON]) -> dict[str, SpanJSON]:
 
 
 SIMPLE_OPERATIONS = [
+    pytest.param(
+        lambda upload: upload["session"].extend_expiry(
+            "my-key", from_now=timedelta(days=1)
+        ),
+        FakeResponse(204),
+        "objectstore.extend_expiry",
+        {"objectstore.key": "my-key"},
+        id="extend_expiry",
+    ),
     pytest.param(
         lambda upload: upload["session"].put(b"payload", key="my-key"),
         FakeResponse(200, json_data={"key": "my-key"}),

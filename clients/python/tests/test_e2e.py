@@ -285,6 +285,33 @@ def test_round_trips_expiration_policy_beyond_a_year(server_url: str) -> None:
     assert retrieved.metadata.expiration_policy == TimeToLive(ttl)
 
 
+def test_extend_expiry(server_url: str) -> None:
+    client = Client(server_url, token=TestSecretKey.get())
+    policy = TimeToLive(timedelta(days=1))
+    session = client.session(Usecase("test-usecase", expiration_policy=policy), org=42)
+    key = session.put(b"payload")
+
+    session.extend_expiry(key, from_creation=timedelta(days=3))
+    metadata = session.head(key)
+    assert metadata is not None and metadata.time_created is not None
+    assert metadata.time_expires == metadata.time_created + timedelta(days=3)
+    assert metadata.expiration_policy == policy
+
+    session.extend_expiry(key, from_creation=timedelta(days=2))
+    assert session.head(key) == metadata
+    result = session.get(key)
+    assert result is not None
+    assert result.payload.read() == b"payload"
+
+
+def test_extend_expiry_missing_object(server_url: str) -> None:
+    client = Client(server_url, token=TestSecretKey.get())
+    session = client.session(Usecase("test-usecase"), org=42)
+    with pytest.raises(RequestError) as error:
+        session.extend_expiry("missing", from_now=timedelta(days=1))
+    assert error.value.status == 409
+
+
 def test_full_cycle_uncompressed(server_url: str) -> None:
     client = Client(
         server_url,
