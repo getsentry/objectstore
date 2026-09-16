@@ -205,7 +205,6 @@ impl Backend for LocalFsBackend {
             .into());
         }
 
-        let original_len = upload.preamble_len + upload.payload_size;
         upload.file.seek(std::io::SeekFrom::End(0)).await.context(
             ErrorKind::BackendFailure,
             "seeking local-fs resumable upload",
@@ -216,26 +215,19 @@ impl Backend for LocalFsBackend {
             match tokio::io::copy(&mut declared, &mut upload.file).await {
                 Ok(copied) => copied,
                 Err(error) => {
-                    if let Some(client_error) = stream::unpack_client_error(&error) {
-                        upload.file.sync_data().await.context(
-                            ErrorKind::BackendFailure,
-                            "syncing partial local-fs resumable chunk",
-                        )?;
-                        return Err(Error::from(client_error));
-                    }
-                    upload.file.set_len(original_len).await.context(
-                        ErrorKind::BackendFailure,
-                        "rolling back failed local-fs resumable chunk",
-                    )?;
+                    let client_error = stream::unpack_client_error(&error);
                     upload.file.sync_data().await.context(
                         ErrorKind::BackendFailure,
-                        "syncing rolled-back local-fs resumable chunk",
+                        "syncing partial local-fs resumable chunk",
                     )?;
-                    return Err(Error::with_context(
-                        ErrorKind::BackendFailure,
-                        "writing local-fs resumable chunk",
-                        error,
-                    ));
+                    return Err(match client_error {
+                        Some(client_error) => Error::from(client_error),
+                        None => Error::with_context(
+                            ErrorKind::BackendFailure,
+                            "writing local-fs resumable chunk",
+                            error,
+                        ),
+                    });
                 }
             }
         };
@@ -925,8 +917,6 @@ impl UploadSession {
 /// An open resumable upload containing a metadata preamble followed by payload bytes.
 struct UploadFile {
     file: tokio::fs::File,
-    /// Number of bytes occupied by the metadata JSON and its newline delimiter.
-    preamble_len: u64,
     /// Number of payload bytes stored after the metadata preamble.
     payload_size: u64,
 }
@@ -961,11 +951,7 @@ impl UploadFile {
                 "reading truncated local-fs resumable upload",
             )
         })?;
-        Ok(Self {
-            file,
-            preamble_len,
-            payload_size,
-        })
+        Ok(Self { file, payload_size })
     }
 }
 
