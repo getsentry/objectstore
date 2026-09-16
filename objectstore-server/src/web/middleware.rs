@@ -95,6 +95,19 @@ pub async fn bind_sentry_body(request: Request, next: Next) -> Response {
         .map(|body| Body::new(SentryBody::new(hub, body)))
 }
 
+async fn get_usecase(request: &mut Request) -> Option<String> {
+    request
+        .extract_parts::<RawPathParams>()
+        .await
+        .ok()
+        .and_then(|params| {
+            params
+                .iter()
+                .find(|(name, _)| *name == "usecase")
+                .map(|(_, value)| value.to_owned())
+        })
+}
+
 /// A middleware that logs web request timings as metrics.
 ///
 /// Use this with [`from_fn`](axum::middleware::from_fn).
@@ -107,17 +120,9 @@ pub async fn bind_sentry_body(request: Request, next: Next) -> Response {
 pub async fn emit_request_metrics(mut request: Request, next: Next) -> Response {
     let matched_path = request.extract_parts::<MatchedPath>().await;
     let route = matched_path.as_ref().map_or("unknown", |m| m.as_str());
-    let usecase = request
-        .extract_parts::<RawPathParams>()
-        .await
-        .ok()
-        .and_then(|params| {
-            params
-                .iter()
-                .find(|(name, _)| *name == "usecase")
-                .map(|(_, value)| value.to_owned())
-        });
+
     let service = request.extract_parts::<DownstreamService>().await.unwrap();
+    let usecase = get_usecase(&mut request).await;
 
     let should_emit = !endpoints::is_internal_route(route);
     let guard =
