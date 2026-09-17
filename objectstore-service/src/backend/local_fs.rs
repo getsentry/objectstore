@@ -27,7 +27,9 @@ use objectstore_types::range::ByteRange;
 use objectstore_types::resumable::UploadProgress;
 use objectstore_types::time::Timestamp;
 use tokio::fs::OpenOptions;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::io::{
+    AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader, BufWriter,
+};
 use tokio::sync::Semaphore;
 use tokio_util::io::{ReaderStream, StreamReader};
 use uuid::Uuid;
@@ -329,7 +331,8 @@ impl Backend for LocalFsBackend {
             .into());
         }
 
-        let persisted_offset = upload.append(stream, content_length).await?;
+        let reader = StreamReader::new(stream).take(content_length);
+        let persisted_offset = upload.append(reader).await?;
 
         if persisted_offset != session.total_length.get() {
             return Ok(UploadProgress::Incomplete {
@@ -861,15 +864,13 @@ impl UploadFile {
         self.payload_size
     }
 
-    async fn append(&mut self, stream: ClientStream, content_length: u64) -> Result<u64> {
+    async fn append(&mut self, mut reader: impl AsyncRead + Unpin) -> Result<u64> {
         self.file.seek(std::io::SeekFrom::End(0)).await.context(
             ErrorKind::BackendFailure,
             "seeking local-fs resumable upload",
         )?;
 
-        let mut reader = pin!(StreamReader::new(stream));
-        let mut contents = reader.as_mut().take(content_length);
-        let copied = match tokio::io::copy(&mut contents, &mut self.file).await {
+        let copied = match tokio::io::copy(&mut reader, &mut self.file).await {
             Ok(copied) => copied,
             Err(error) => {
                 let client_error = stream::unpack_client_error(&error);
