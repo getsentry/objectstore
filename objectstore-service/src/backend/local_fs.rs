@@ -321,6 +321,7 @@ impl Backend for LocalFsBackend {
 
         let upload_path = self.upload_path(session.upload_id);
         let mut upload = UploadFile::open(&upload_path).await?;
+        // Assume that a previous call to `put_chunk` already materialized the object.
         if upload.offset() == session.total_length.get() {
             return Err(ErrorKind::UploadSessionGone.into());
         }
@@ -352,6 +353,7 @@ impl Backend for LocalFsBackend {
         let session = UploadSession::from_token(token)?;
         let _guard = self.locks.acquire(id).await?;
         let upload = UploadFile::open(&self.upload_path(session.upload_id)).await?;
+        // Assume that a previous call to `put_chunk` already materialized the object.
         if upload.offset() == session.total_length.get() {
             Err(ErrorKind::UploadSessionGone.into())
         } else {
