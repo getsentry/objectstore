@@ -798,10 +798,11 @@ impl UploadSession {
 struct UploadFile {
     file: tokio::fs::File,
     path: PathBuf,
-    stored_size: u64,
-    expires_at: Option<Timestamp>,
     /// Number of payload bytes stored after the metadata preamble.
     payload_size: u64,
+    /// Total size and expiration, for reporting to the `ChangeStream`.
+    stored_size: u64,
+    expires_at: Option<Timestamp>,
 }
 
 impl UploadFile {
