@@ -290,7 +290,6 @@ impl Backend for LocalFsBackend {
         metadata: &Metadata,
         total_length: NonZeroU64,
     ) -> Result<Option<BackendToken>> {
-        let _guard = self.locks.acquire(id).await?;
         let upload_id = uuid::Uuid::now_v7();
         let path = self.upload_path(upload_id);
         Self::create_dir_all(&path).await?;
