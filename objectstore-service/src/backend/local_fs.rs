@@ -6,8 +6,9 @@
 //!
 //! To avoid races on metadata, expiry, and upload updates, this backend uses locks placed under
 //! `.locks/` to synchronize mutations across backend instances and cooperating processes. The first
-//! two bytes of the BLAKE3 hash of an object's storage path or upload key select one of 65,536
-//! permanent lock slots under `.locks/<first byte>/<second byte>` (lowercase hexadecimal).
+//! two bytes of the BLAKE3 hash of an object's storage path select one of 65,536 permanent lock
+//! slots under `.locks/<first byte>/<second byte>` (lowercase hexadecimal). An object and all of its
+//! resumable uploads share the same lock.
 //!
 //! Shared filesystems are supported only when locks propagate across the cluster, pathname
 //! visibility is coherent, and rename is atomic.
@@ -282,13 +283,14 @@ impl Backend for LocalFsBackend {
         Ok(())
     }
 
-    #[tracing::instrument(level = "debug", fields(?_id, total_length), skip_all)]
+    #[tracing::instrument(level = "debug", fields(?id, total_length), skip_all)]
     async fn create_upload_session(
         &self,
-        _id: &ObjectId,
+        id: &ObjectId,
         metadata: &Metadata,
         total_length: NonZeroU64,
     ) -> Result<Option<BackendToken>> {
+        let _guard = self.locks.lock_object(id).await?;
         let upload_id = uuid::Uuid::now_v7();
         let path = self.upload_path(upload_id);
         Self::create_dir_all(&path).await?;
@@ -314,7 +316,7 @@ impl Backend for LocalFsBackend {
                 content_length,
                 upload_length: session.total_length.get(),
             })?;
-        let upload_guard = self.locks.lock_upload(session.upload_id).await?;
+        let _guard = self.locks.lock_object(id).await?;
 
         let upload_path = self.upload_path(session.upload_id);
         let mut upload = UploadFile::open(&upload_path).await?;
@@ -329,7 +331,6 @@ impl Backend for LocalFsBackend {
         }
 
         let persisted_offset = upload.append(stream, content_length).await?;
-        drop(upload);
 
         if persisted_offset != session.total_length.get() {
             return Ok(UploadProgress::Incomplete {
@@ -339,27 +340,15 @@ impl Backend for LocalFsBackend {
 
         let object_path = self.path(id);
         Self::create_dir_all(&object_path).await?;
-        drop(upload_guard);
-        let _guard = self
-            .locks
-            .lock_upload_and_object(session.upload_id, id)
-            .await?;
-        let upload = UploadFile::open(&upload_path).await?;
-        if upload.offset() != session.total_length.get() {
-            return Err(ErrorKind::UploadOffsetMismatch {
-                offset: upload.offset(),
-            }
-            .into());
-        }
         let (stored_size, expires_at) = upload.publish(object_path).await?;
         self.change_stream.write(id, stored_size, expires_at);
         Ok(UploadProgress::Complete)
     }
 
-    #[tracing::instrument(level = "debug", fields(?_id), skip_all)]
-    async fn upload_offset(&self, _id: &ObjectId, token: &BackendToken) -> Result<UploadProgress> {
+    #[tracing::instrument(level = "debug", fields(?id), skip_all)]
+    async fn upload_offset(&self, id: &ObjectId, token: &BackendToken) -> Result<UploadProgress> {
         let session = UploadSession::from_token(token)?;
-        let _guard = self.locks.lock_upload(session.upload_id).await?;
+        let _guard = self.locks.lock_object(id).await?;
         let upload = UploadFile::open(&self.upload_path(session.upload_id)).await?;
         if upload.offset() == session.total_length.get() {
             Err(ErrorKind::UploadSessionGone.into())
@@ -370,10 +359,10 @@ impl Backend for LocalFsBackend {
         }
     }
 
-    #[tracing::instrument(level = "debug", fields(?_id), skip_all)]
-    async fn cancel_upload(&self, _id: &ObjectId, token: &BackendToken) -> Result<()> {
+    #[tracing::instrument(level = "debug", fields(?id), skip_all)]
+    async fn cancel_upload(&self, id: &ObjectId, token: &BackendToken) -> Result<()> {
         let session = UploadSession::from_token(token)?;
-        let _guard = self.locks.lock_upload(session.upload_id).await?;
+        let _guard = self.locks.lock_object(id).await?;
         let path = self.upload_path(session.upload_id);
         match tokio::fs::remove_file(&path).await {
             Ok(()) => Ok(()),
@@ -727,13 +716,6 @@ struct ObjectLocks {
     blocking_waiters: Arc<Semaphore>,
 }
 
-struct LockGuard {
-    /// Holds the first slot lock until the guard is dropped.
-    _first: File,
-    /// Holds the second slot lock when the requested targets do not share a slot.
-    _second: Option<File>,
-}
-
 impl ObjectLocks {
     pub fn new(storage_root: &Path) -> Self {
         Self {
@@ -743,15 +725,7 @@ impl ObjectLocks {
     }
 
     fn object_lock_path(&self, id: &ObjectId) -> PathBuf {
-        self.lock_path_for_key(&id.as_storage_path().to_string())
-    }
-
-    fn upload_lock_path(&self, upload_id: Uuid) -> PathBuf {
-        self.lock_path_for_key(&format!("uploads/{upload_id}"))
-    }
-
-    fn lock_path_for_key(&self, key: &str) -> PathBuf {
-        let hash = blake3::hash(key.as_bytes());
+        let hash = blake3::hash(id.as_storage_path().to_string().as_bytes());
         let bytes = hash.as_bytes();
         self.root
             .join(format!("{:02x}", bytes[0]))
@@ -759,42 +733,14 @@ impl ObjectLocks {
     }
 
     /// Locks an object's slot until the returned guard is dropped.
-    async fn lock_object(&self, id: &ObjectId) -> Result<LockGuard> {
-        self.lock_paths(self.object_lock_path(id), None).await
-    }
-
-    /// Locks an in-progress upload's slot until the returned guard is dropped.
-    async fn lock_upload(&self, upload_id: Uuid) -> Result<LockGuard> {
-        self.lock_paths(self.upload_lock_path(upload_id), None)
+    async fn lock_object(&self, id: &ObjectId) -> Result<File> {
+        let path = self.object_lock_path(id);
+        tokio::fs::create_dir_all(path.parent().unwrap())
             .await
-    }
-
-    /// Locks an upload and its destination object until the returned guard is dropped.
-    async fn lock_upload_and_object(&self, upload_id: Uuid, id: &ObjectId) -> Result<LockGuard> {
-        self.lock_paths(
-            self.upload_lock_path(upload_id),
-            Some(self.object_lock_path(id)),
-        )
-        .await
-    }
-
-    async fn lock_paths(&self, first: PathBuf, second: Option<PathBuf>) -> Result<LockGuard> {
-        let (first, second) = match second {
-            Some(second) => match second.cmp(&first) {
-                std::cmp::Ordering::Less => (second, Some(first)),
-                std::cmp::Ordering::Equal => (first, None),
-                std::cmp::Ordering::Greater => (first, Some(second)),
-            },
-            None => (first, None),
-        };
-        for path in std::iter::once(&first).chain(second.as_ref()) {
-            tokio::fs::create_dir_all(path.parent().unwrap())
-                .await
-                .context(
-                    ErrorKind::BackendFailure,
-                    "creating local-fs object lock directory",
-                )?;
-        }
+            .context(
+                ErrorKind::BackendFailure,
+                "creating local-fs object lock directory",
+            )?;
 
         // Leave blocking-pool capacity available for the current lock holder's filesystem work.
         let permit = Arc::clone(&self.blocking_waiters)
@@ -802,25 +748,16 @@ impl ObjectLocks {
             .await
             .expect("local-fs lock semaphore is never closed");
 
-        tokio::task::spawn_blocking(move || -> io::Result<LockGuard> {
+        tokio::task::spawn_blocking(move || -> io::Result<File> {
             let _permit = permit;
-
-            let lock = |path| -> io::Result<File> {
-                let file = std::fs::OpenOptions::new()
-                    .create(true)
-                    .truncate(false)
-                    .read(true)
-                    .write(true)
-                    .open(path)?;
-                file.lock()?;
-                Ok(file)
-            };
-            let first = lock(first)?;
-            let second = second.map(lock).transpose()?;
-            Ok(LockGuard {
-                _first: first,
-                _second: second,
-            })
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(path)?;
+            file.lock()?;
+            Ok(file)
         })
         .await
         .context(ErrorKind::Internal, "waiting for local-fs object lock")?
@@ -1307,34 +1244,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concurrent_final_chunks_and_colliding_lock_slots_do_not_deadlock() {
+    async fn concurrent_uploads_for_same_object_do_not_deadlock() {
         let (_tempdir, backend) = make_backend();
         let id = make_id();
         let first = upload_token(&backend, &id, 3).await;
         let second = upload_token(&backend, &id, 3).await;
-        let mut slots = HashMap::new();
-        let (first_key, colliding_key) = (0..=65_536)
-            .find_map(|number| {
-                let key = format!("upload-{number}");
-                let slot = backend.locks.lock_path_for_key(&key);
-                slots
-                    .insert(slot, key.clone())
-                    .map(|previous| (previous, key))
-            })
-            .expect("65,537 keys must collide in 65,536 lock slots");
-        assert_ne!(first_key, colliding_key);
-        let pair = backend.locks.lock_paths(
-            backend.locks.lock_path_for_key(&first_key),
-            Some(backend.locks.lock_path_for_key(&colliding_key)),
-        );
-        assert!(
-            tokio::time::timeout(Duration::from_secs(1), pair)
-                .await
-                .unwrap()
-                .unwrap()
-                ._second
-                .is_none()
-        );
         let writes = async {
             tokio::join!(
                 backend.put_chunk(&id, &first, 0, 3, stream::single("one")),
