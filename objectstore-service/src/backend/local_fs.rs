@@ -726,7 +726,7 @@ impl ObjectLocks {
         }
     }
 
-    fn object_lock_path(&self, id: &ObjectId) -> PathBuf {
+    fn path(&self, id: &ObjectId) -> PathBuf {
         let hash = blake3::hash(id.as_storage_path().to_string().as_bytes());
         let bytes = hash.as_bytes();
         self.root
@@ -734,9 +734,9 @@ impl ObjectLocks {
             .join(format!("{:02x}", bytes[1]))
     }
 
-    /// Acquires an object's slot lock until the returned guard is dropped.
-    async fn acquire(&self, id: &ObjectId) -> Result<File> {
-        let path = self.object_lock_path(id);
+    /// Acquires a slot lock, released when the returned file is dropped.
+    pub async fn acquire(&self, id: &ObjectId) -> Result<File> {
+        let path = self.path(id);
         tokio::fs::create_dir_all(path.parent().unwrap())
             .await
             .context(
@@ -757,7 +757,7 @@ impl ObjectLocks {
                 .truncate(false)
                 .read(true)
                 .write(true)
-                .open(path)?;
+                .open(&path)?;
             file.lock()?;
             Ok(file)
         })
@@ -1132,6 +1132,8 @@ mod tests {
             content_type: "text/resumable".into(),
             ..Default::default()
         };
+
+        // Create a session and verify its initial state on disk.
         let token = backend
             .create_upload_session(&id, &metadata, NonZeroU64::new(6).unwrap())
             .await
@@ -1147,6 +1149,7 @@ mod tests {
         );
         assert!(!backend.path(&id).exists());
 
+        // Upload the first chunk and verify that only the session advances.
         assert_eq!(
             backend.upload_offset(&id, &token).await.unwrap(),
             UploadProgress::Incomplete { offset: 0 }
@@ -1170,6 +1173,8 @@ mod tests {
             backend.upload_offset(&id, &token).await.unwrap(),
             UploadProgress::Incomplete { offset: 3 }
         );
+
+        // Zero-length chunks report current progress, while stale non-empty offsets fail.
         assert_eq!(
             backend
                 .put_chunk(&id, &token, 0, 0, stream::single(""))
@@ -1182,6 +1187,8 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::UploadOffsetMismatch { offset: 3 });
+
+        // Upload the final chunk and verify atomic publication removes the session.
         assert_eq!(
             backend
                 .put_chunk(&id, &token, 3, 3, stream::single("def"))
@@ -1208,6 +1215,8 @@ mod tests {
         let (_tempdir, backend) = make_backend();
         let id = make_id();
         let token = upload_token(&backend, &id, 4).await;
+
+        // Persist a prefix, then disconnect after writing one byte of the next chunk.
         backend
             .put_chunk(&id, &token, 0, 2, stream::single("ab"))
             .await
@@ -1224,6 +1233,8 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::ClientStream);
+
+        // Resume from the partial byte and verify the complete object.
         assert_eq!(
             backend.upload_offset(&id, &token).await.unwrap(),
             UploadProgress::Incomplete { offset: 3 }
@@ -1249,6 +1260,8 @@ mod tests {
         let id = make_id();
         let first = upload_token(&backend, &id, 3).await;
         let second = upload_token(&backend, &id, 3).await;
+
+        // Complete both sessions concurrently through their shared object lock.
         let writes = async {
             tokio::join!(
                 backend.put_chunk(&id, &first, 0, 3, stream::single("one")),
@@ -1258,6 +1271,8 @@ mod tests {
         let (first_result, second_result) = tokio::time::timeout(Duration::from_secs(2), writes)
             .await
             .unwrap();
+
+        // Both requests finish without deadlock; the last publication wins.
         assert_eq!(first_result.unwrap(), UploadProgress::Complete);
         assert_eq!(second_result.unwrap(), UploadProgress::Complete);
         let (_, _, payload) = backend
@@ -1317,7 +1332,7 @@ mod tests {
         );
         assert_eq!(file_contents.as_ref(), b"oh hai!");
 
-        let lock_path = backend.locks.object_lock_path(&id);
+        let lock_path = backend.locks.path(&id);
         assert!(lock_path.exists());
         backend.delete_object(&id, Timestamp::now()).await.unwrap();
         assert!(lock_path.exists());
@@ -1332,16 +1347,16 @@ mod tests {
         let (first_id, colliding_id) = (0..=65_536)
             .find_map(|key| {
                 let id = ObjectId::from_parts("testing".into(), Scopes::empty(), key.to_string());
-                let path = first_locks.object_lock_path(&id);
+                let path = first_locks.path(&id);
                 slots.insert(path, id.clone()).map(|first| (first, id))
             })
             .expect("65,537 keys must collide in 65,536 slots");
-        let lock_path = first_locks.object_lock_path(&first_id);
+        let lock_path = first_locks.path(&first_id);
         let other_id = slots
             .values()
-            .find(|id| first_locks.object_lock_path(id) != lock_path)
+            .find(|id| first_locks.path(id) != lock_path)
             .unwrap();
-        assert_eq!(second_locks.object_lock_path(&colliding_id), lock_path);
+        assert_eq!(second_locks.path(&colliding_id), lock_path);
 
         let first_guard = first_locks.acquire(&first_id).await.unwrap();
         let mut waiter =
@@ -2181,7 +2196,10 @@ mod tests {
             .unwrap()
             .unwrap();
 
+        // Session creation alone does not report a stored object.
         assert!(producer.records().is_empty());
+
+        // Completing the upload reports the published file's full stored size.
         assert_eq!(
             backend
                 .put_chunk(
