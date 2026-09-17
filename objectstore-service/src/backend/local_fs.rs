@@ -169,7 +169,7 @@ impl Backend for LocalFsBackend {
         let stored_size = draft.preamble_len() + payload_size;
 
         draft.prepare().await?;
-        let _guard = self.locks.lock_object(id).await?;
+        let _guard = self.locks.acquire(id).await?;
         draft.publish().await?;
 
         self.change_stream
@@ -226,7 +226,7 @@ impl Backend for LocalFsBackend {
         expire_at: Timestamp,
         access_time: Timestamp,
     ) -> Result<bool> {
-        let _guard = self.locks.lock_object(id).await?;
+        let _guard = self.locks.acquire(id).await?;
 
         let path = self.path(id);
         let Some(object) = ObjectFile::try_open(&path, access_time).await? else {
@@ -266,7 +266,7 @@ impl Backend for LocalFsBackend {
         id: &ObjectId,
         _access_time: Timestamp,
     ) -> Result<DeleteResponse> {
-        let _guard = self.locks.lock_object(id).await?;
+        let _guard = self.locks.acquire(id).await?;
 
         objectstore_log::debug!("Deleting from local_fs backend");
         let path = self.path(id);
@@ -290,7 +290,7 @@ impl Backend for LocalFsBackend {
         metadata: &Metadata,
         total_length: NonZeroU64,
     ) -> Result<Option<BackendToken>> {
-        let _guard = self.locks.lock_object(id).await?;
+        let _guard = self.locks.acquire(id).await?;
         let upload_id = uuid::Uuid::now_v7();
         let path = self.upload_path(upload_id);
         Self::create_dir_all(&path).await?;
@@ -316,7 +316,7 @@ impl Backend for LocalFsBackend {
                 content_length,
                 upload_length: session.total_length.get(),
             })?;
-        let _guard = self.locks.lock_object(id).await?;
+        let _guard = self.locks.acquire(id).await?;
 
         let upload_path = self.upload_path(session.upload_id);
         let mut upload = UploadFile::open(&upload_path).await?;
@@ -348,7 +348,7 @@ impl Backend for LocalFsBackend {
     #[tracing::instrument(level = "debug", fields(?id), skip_all)]
     async fn upload_offset(&self, id: &ObjectId, token: &BackendToken) -> Result<UploadProgress> {
         let session = UploadSession::from_token(token)?;
-        let _guard = self.locks.lock_object(id).await?;
+        let _guard = self.locks.acquire(id).await?;
         let upload = UploadFile::open(&self.upload_path(session.upload_id)).await?;
         if upload.offset() == session.total_length.get() {
             Err(ErrorKind::UploadSessionGone.into())
@@ -362,7 +362,7 @@ impl Backend for LocalFsBackend {
     #[tracing::instrument(level = "debug", fields(?id), skip_all)]
     async fn cancel_upload(&self, id: &ObjectId, token: &BackendToken) -> Result<()> {
         let session = UploadSession::from_token(token)?;
-        let _guard = self.locks.lock_object(id).await?;
+        let _guard = self.locks.acquire(id).await?;
         let path = self.upload_path(session.upload_id);
         match tokio::fs::remove_file(&path).await {
             Ok(()) => Ok(()),
@@ -690,7 +690,7 @@ impl MultipartUploadBackend for LocalFsBackend {
         let stored_size = draft.preamble_len() + payload_size;
 
         draft.prepare().await?;
-        let guard = self.locks.lock_object(id).await?;
+        let guard = self.locks.acquire(id).await?;
         draft.publish().await?;
         drop(guard);
 
@@ -732,8 +732,8 @@ impl ObjectLocks {
             .join(format!("{:02x}", bytes[1]))
     }
 
-    /// Locks an object's slot until the returned guard is dropped.
-    async fn lock_object(&self, id: &ObjectId) -> Result<File> {
+    /// Acquires an object's slot lock until the returned guard is dropped.
+    async fn acquire(&self, id: &ObjectId) -> Result<File> {
         let path = self.object_lock_path(id);
         tokio::fs::create_dir_all(path.parent().unwrap())
             .await
@@ -1343,9 +1343,9 @@ mod tests {
             .unwrap();
         assert_eq!(second_locks.object_lock_path(&colliding_id), lock_path);
 
-        let first_guard = first_locks.lock_object(&first_id).await.unwrap();
+        let first_guard = first_locks.acquire(&first_id).await.unwrap();
         let mut waiter =
-            tokio::spawn(async move { second_locks.lock_object(&colliding_id).await.unwrap() });
+            tokio::spawn(async move { second_locks.acquire(&colliding_id).await.unwrap() });
         assert!(
             tokio::time::timeout(Duration::from_millis(50), &mut waiter)
                 .await
@@ -1353,7 +1353,7 @@ mod tests {
         );
 
         let other_guard =
-            tokio::time::timeout(Duration::from_secs(1), first_locks.lock_object(other_id))
+            tokio::time::timeout(Duration::from_secs(1), first_locks.acquire(other_id))
                 .await
                 .unwrap()
                 .unwrap();
