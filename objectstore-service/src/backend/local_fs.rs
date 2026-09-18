@@ -933,13 +933,13 @@ impl UploadFile {
         let payload_size = self.payload_size.checked_add(copied).ok_or_else(|| {
             Error::new(
                 ErrorKind::BackendFailure,
-                "local-fs resumable upload size overflow",
+                "local-fs resumable payload size overflow",
             )
         })?;
         let stored_size = self.stored_size.checked_add(copied).ok_or_else(|| {
             Error::new(
                 ErrorKind::BackendFailure,
-                "local-fs resumable upload size overflow",
+                "local-fs resumable stored size overflow",
             )
         })?;
         self.file.sync_data().await.context(
