@@ -126,7 +126,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::backend::changelog::{Change, ChangeGuard, ChangeLog, ChangeManager, ChangePhase};
 use crate::backend::common::{
-    Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse,
+    Backend, DeleteResponse, ExpiryTarget, GetResponse, HighVolumeBackend, MetadataResponse,
     MultipartUploadBackend, PutResponse, TieredGet, TieredMetadata, TieredUpdate, TieredWrite,
     Tombstone,
 };
@@ -542,43 +542,45 @@ impl Backend for TieredStorage {
     async fn set_expiry(
         &self,
         id: &ObjectId,
-        expire_at: Timestamp,
+        target: ExpiryTarget,
         access_time: Timestamp,
-    ) -> Result<bool> {
+    ) -> Result<Option<Timestamp>> {
         match self
             .inner
             .high_volume
             .get_tiered_metadata(id, access_time)
             .await?
         {
-            TieredMetadata::NotFound => Ok(false),
+            TieredMetadata::NotFound => Ok(None),
             TieredMetadata::Object(_) => {
                 self.inner
                     .high_volume
-                    .compare_and_update(id, None, TieredUpdate::SetExpiry(expire_at), access_time)
+                    .compare_and_update(id, None, TieredUpdate::SetExpiry(target), access_time)
                     .await
             }
             TieredMetadata::Tombstone(tombstone) => {
                 // Extend LT first. Extending the redirect first could leave it
                 // alive after the blob failed to extend and was reclaimed.
-                if !self
+                let Some(deadline) = self
                     .inner
                     .long_term
-                    .set_expiry(&tombstone.target, expire_at, access_time)
+                    .set_expiry(&tombstone.target, target, access_time)
                     .await?
-                {
-                    return Ok(false);
-                }
+                else {
+                    return Ok(None);
+                };
 
                 // NOTE: If this fails, LT may remain extended while the redirect
                 // becomes unreachable earlier. Rolling LT back could interfere
-                // with another renewal that succeeded concurrently.
+                // with another renewal that succeeded concurrently. Propagate
+                // the resolved request, not LT's stored deadline, so an
+                // already-later blob cannot over-extend the redirect.
                 self.inner
                     .high_volume
                     .compare_and_update(
                         id,
                         Some(&tombstone.target),
-                        TieredUpdate::SetExpiry(expire_at),
+                        TieredUpdate::SetExpiry(ExpiryTarget::At(deadline)),
                         access_time,
                     )
                     .await
@@ -1062,14 +1064,14 @@ mod tests {
             &self,
             inner: &InMemoryBackend,
             id: &ObjectId,
-            expire_at: Timestamp,
+            target: ExpiryTarget,
             access_time: Timestamp,
-        ) -> Result<bool> {
+        ) -> Result<Option<Timestamp>> {
             self.events.lock().unwrap().push(self.label);
             if self.reject {
-                Ok(false)
+                Ok(None)
             } else {
-                inner.set_expiry(id, expire_at, access_time).await
+                inner.set_expiry(id, target, access_time).await
             }
         }
 
@@ -1080,10 +1082,10 @@ mod tests {
             current: Option<&ObjectId>,
             update: TieredUpdate,
             access_time: Timestamp,
-        ) -> Result<bool> {
+        ) -> Result<Option<Timestamp>> {
             self.events.lock().unwrap().push(self.label);
             if self.reject {
-                Ok(false)
+                Ok(None)
             } else {
                 inner
                     .compare_and_update(id, current, update, access_time)
@@ -1121,6 +1123,7 @@ mod tests {
     ) {
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
+            time_created: expiry.checked_sub(Duration::from_mins(10)),
             time_expires: Some(expiry),
             ..Default::default()
         };
@@ -1153,22 +1156,131 @@ mod tests {
         let old_expiry = Timestamp::now() + Duration::from_mins(10);
         seed_redirect(&hv.inner, &lt.inner, &id, &target, old_expiry).await;
 
-        let requested = Timestamp::now() + Duration::from_hours(1);
-        assert!(
+        let created = old_expiry - Duration::from_mins(10);
+        let requested = created + Duration::from_hours(1);
+        let blob_expiry = requested + Duration::from_hours(1);
+        lt.inner
+            .put_object(
+                &target,
+                &Metadata {
+                    expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
+                    time_created: Some(created),
+                    time_expires: Some(blob_expiry),
+                    ..Default::default()
+                },
+                stream::single("payload"),
+                Timestamp::now(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
             storage
-                .set_expiry(&id, requested, Timestamp::now())
+                .set_expiry(
+                    &id,
+                    ExpiryTarget::FromCreation(Duration::from_hours(1)),
+                    Timestamp::now(),
+                )
                 .await
-                .unwrap()
+                .unwrap(),
+            Some(requested)
         );
         assert_eq!(events.lock().unwrap().as_slice(), &["lt", "hv"]);
         assert_eq!(
             lt.inner.get(&target).expect_object().0.time_expires,
-            Some(requested)
+            Some(blob_expiry)
         );
         assert_eq!(
             hv.inner.get(&id).expect_tombstone().time_expires,
             Some(requested)
         );
+    }
+
+    #[derive(Clone, Debug)]
+    struct ReplaceInlineOnLookup {
+        replacement: Metadata,
+        replaced: Arc<StdMutex<bool>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Hooks for ReplaceInlineOnLookup {
+        async fn get_tiered_metadata(
+            &self,
+            inner: &InMemoryBackend,
+            id: &ObjectId,
+            access_time: Timestamp,
+        ) -> Result<TieredMetadata> {
+            let observed = inner.get_tiered_metadata(id, access_time).await?;
+            let should_replace = {
+                let mut replaced = self.replaced.lock().unwrap();
+                !std::mem::replace(&mut *replaced, true)
+            };
+            if should_replace {
+                inner
+                    .put_object(
+                        id,
+                        &self.replacement,
+                        stream::single("replacement"),
+                        access_time,
+                    )
+                    .await?;
+            }
+            Ok(observed)
+        }
+    }
+
+    #[tokio::test]
+    async fn inline_creation_target_uses_update_snapshot() {
+        let access_time = Timestamp::from_unix_secs(1_700_000_000).unwrap();
+        let old_created = access_time - Duration::from_hours(2);
+        let new_created = access_time - Duration::from_mins(30);
+        let old_expiry = access_time + Duration::from_mins(10);
+        let resolved = new_created + Duration::from_hours(2);
+        let replacement = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
+            time_created: Some(new_created),
+            time_expires: Some(old_expiry),
+            ..Default::default()
+        };
+        let hv = TestBackend::new(ReplaceInlineOnLookup {
+            replacement,
+            replaced: Arc::new(StdMutex::new(false)),
+        });
+        let storage = TieredStorage::new(
+            Box::new(hv.clone()),
+            Box::new(InMemoryBackend::new("lt")),
+            Box::new(NoopChangeLog),
+        );
+        let id = make_id("inline-update-snapshot");
+        hv.inner
+            .put_object(
+                &id,
+                &Metadata {
+                    expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
+                    time_created: Some(old_created),
+                    time_expires: Some(old_expiry),
+                    ..Default::default()
+                },
+                stream::single("original"),
+                access_time,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            storage
+                .set_expiry(
+                    &id,
+                    ExpiryTarget::FromCreation(Duration::from_hours(2)),
+                    access_time,
+                )
+                .await
+                .unwrap(),
+            Some(resolved)
+        );
+        let (metadata, payload) = hv.inner.get(&id).expect_object();
+        assert_eq!(metadata.time_created, Some(new_created));
+        assert_eq!(metadata.time_expires, Some(resolved));
+        assert_eq!(payload, Bytes::from_static(b"replacement"));
     }
 
     #[tokio::test]
@@ -1179,19 +1291,27 @@ mod tests {
         let old_expiry = Timestamp::now() + Duration::from_mins(10);
         seed_redirect(&hv.inner, &lt.inner, &id, &target, old_expiry).await;
 
-        let requested = Timestamp::now() + Duration::from_hours(1);
-        assert!(
-            !storage
-                .set_expiry(&id, requested, Timestamp::now())
+        let requested = old_expiry + Duration::from_mins(50);
+        assert_eq!(
+            storage
+                .set_expiry(
+                    &id,
+                    ExpiryTarget::FromCreation(Duration::from_hours(1)),
+                    Timestamp::now(),
+                )
                 .await
-                .unwrap()
+                .unwrap(),
+            None
         );
         assert_eq!(events.lock().unwrap().as_slice(), &["lt", "hv"]);
         assert_eq!(
             hv.inner.get(&id).expect_tombstone().time_expires,
             Some(old_expiry)
         );
-        assert!(lt.inner.get(&target).expect_object().0.time_expires > Some(old_expiry));
+        assert_eq!(
+            lt.inner.get(&target).expect_object().0.time_expires,
+            Some(requested)
+        );
         assert_eq!(
             storage
                 .get_metadata(&id, Timestamp::now())
@@ -1217,15 +1337,16 @@ mod tests {
         )
         .await;
 
-        assert!(
-            !storage
+        assert_eq!(
+            storage
                 .set_expiry(
                     &id,
-                    Timestamp::now() + Duration::from_hours(1),
+                    ExpiryTarget::At(Timestamp::now() + Duration::from_hours(1)),
                     Timestamp::now()
                 )
                 .await
-                .unwrap()
+                .unwrap(),
+            None
         );
         assert_eq!(events.lock().unwrap().as_slice(), &["lt"]);
     }

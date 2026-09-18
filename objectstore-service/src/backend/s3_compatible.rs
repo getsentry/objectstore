@@ -15,7 +15,7 @@ use reqwest::{Body, IntoUrl, Method, RequestBuilder, Response, StatusCode};
 
 use super::extensions::{ResponseExt, SendTraced};
 use crate::backend::common::{
-    self, Backend, DeleteResponse, GetResponse, MetadataResponse, PutResponse,
+    self, Backend, DeleteResponse, ExpiryTarget, GetResponse, MetadataResponse, PutResponse,
 };
 use crate::backend::extensions::ReqwestResultExt;
 use crate::change_stream::{
@@ -437,22 +437,26 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
     async fn set_expiry(
         &self,
         id: &ObjectId,
-        expire_at: Timestamp,
+        target: ExpiryTarget,
         access_time: Timestamp,
-    ) -> Result<bool> {
+    ) -> Result<Option<Timestamp>> {
         let Some((mut metadata, _, response)) = self
             .request_object(Method::HEAD, id, access_time, None)
             .await?
         else {
-            return Ok(false);
+            return Ok(None);
         };
         let Some(current_expiry) = metadata.time_expires else {
             response.drain_body().await;
-            return Ok(false);
+            return Ok(None);
+        };
+        let Some(expire_at) = target.resolve(metadata.time_created) else {
+            response.drain_body().await;
+            return Ok(None);
         };
         if current_expiry >= expire_at {
             response.drain_body().await;
-            return Ok(true); // already satisfied
+            return Ok(Some(expire_at)); // already satisfied
         }
 
         let etag = response.headers().get(reqwest::header::ETAG).cloned();
@@ -467,7 +471,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             self.change_stream.update(id, Some(expire_at));
         }
 
-        Ok(applied)
+        Ok(applied.then_some(expire_at))
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
