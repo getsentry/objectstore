@@ -1379,7 +1379,7 @@ mod tests {
     // --- Resumable uploads ---
 
     #[tokio::test]
-    async fn resumable_in_memory_round_trip() {
+    async fn resumable_round_trip() {
         let service = make_service();
         let id = ObjectId::new(make_context(), "resumable".into());
         let token = service
