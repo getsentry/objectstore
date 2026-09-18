@@ -12,6 +12,9 @@
 //!
 //! Shared filesystems are supported only when locks propagate across the cluster, pathname
 //! visibility is coherent, and rename is atomic.
+//!
+//! Newly created files and directories are owner-only on Unix (0600 and 0700 respectively,
+//! further restricted by umask). Existing paths retain their permissions.
 
 use std::fs::File;
 use std::io;
@@ -48,6 +51,26 @@ use crate::multipart::{
 };
 use crate::resumable::BackendToken;
 use crate::stream::{self, ClientStream};
+
+/// Options for owner-only files on Unix, further restricted by umask.
+fn file_options() -> std::fs::OpenOptions {
+    let mut options = std::fs::OpenOptions::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    options
+}
+
+/// Creates owner-only directories on Unix without changing existing permissions.
+async fn create_directories(path: &Path) -> io::Result<()> {
+    let mut builder = tokio::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    builder.mode(0o700);
+    builder.create(path).await
+}
 
 /// Configuration for [`LocalFsBackend`].
 ///
@@ -121,16 +144,6 @@ impl LocalFsBackend {
     fn upload_path(&self, upload_id: Uuid) -> PathBuf {
         self.path.join("uploads").join(upload_id.to_string())
     }
-
-    /// Ensures that an object file can be created at the given path.
-    async fn create_dir_all(path: &Path) -> Result<()> {
-        tokio::fs::create_dir_all(path.parent().unwrap())
-            .await
-            .context(
-                ErrorKind::BackendFailure,
-                "creating local-fs object directory",
-            )
-    }
 }
 
 #[async_trait::async_trait]
@@ -153,7 +166,10 @@ impl Backend for LocalFsBackend {
     ) -> Result<PutResponse> {
         let path = self.path(id);
         objectstore_log::debug!(path=%path.display(), "Writing to local_fs backend");
-        Self::create_dir_all(&path).await?;
+        create_directories(path.parent().unwrap()).await.context(
+            ErrorKind::BackendFailure,
+            "creating local-fs object directory",
+        )?;
 
         let mut draft = Draft::create(&path, metadata).await?;
         let mut reader = pin!(StreamReader::new(stream));
@@ -294,7 +310,10 @@ impl Backend for LocalFsBackend {
     ) -> Result<Option<BackendToken>> {
         let upload_id = uuid::Uuid::now_v7();
         let path = self.upload_path(upload_id);
-        Self::create_dir_all(&path).await?;
+        create_directories(path.parent().unwrap()).await.context(
+            ErrorKind::BackendFailure,
+            "creating local-fs object directory",
+        )?;
         UploadFile::create(&path, metadata).await?;
         Ok(Some(format!("{total_length}.{upload_id}")))
     }
@@ -344,7 +363,12 @@ impl Backend for LocalFsBackend {
         }
 
         let object_path = self.path(id);
-        Self::create_dir_all(&object_path).await?;
+        create_directories(object_path.parent().unwrap())
+            .await
+            .context(
+                ErrorKind::BackendFailure,
+                "creating local-fs object directory",
+            )?;
         let (stored_size, expires_at) = upload.publish(object_path).await?;
         self.change_stream.write(id, stored_size, expires_at);
         Ok(UploadProgress::Complete)
@@ -407,7 +431,7 @@ impl MultipartUploadBackend for LocalFsBackend {
     ) -> Result<InitiateMultipartResponse> {
         let upload_id = UploadId::new(Uuid::now_v7().to_string())?;
         let dir = self.multipart_dir(id, &upload_id);
-        tokio::fs::create_dir_all(&dir).await.context(
+        create_directories(&dir).await.context(
             ErrorKind::BackendFailure,
             "creating local-fs multipart upload",
         )?;
@@ -415,9 +439,23 @@ impl MultipartUploadBackend for LocalFsBackend {
         let meta_path = dir.join("metadata.json");
         let metadata_json = serde_json::to_string(metadata)
             .context(ErrorKind::Internal, "encoding local-fs multipart metadata")?;
-        tokio::fs::write(meta_path, metadata_json).await.context(
+        let mut file = OpenOptions::from(file_options())
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(meta_path)
+            .await
+            .context(
+                ErrorKind::BackendFailure,
+                "creating local-fs multipart metadata",
+            )?;
+        file.write_all(metadata_json.as_bytes()).await.context(
             ErrorKind::BackendFailure,
             "writing local-fs multipart metadata",
+        )?;
+        file.flush().await.context(
+            ErrorKind::BackendFailure,
+            "flushing local-fs multipart metadata",
         )?;
 
         Ok(upload_id)
@@ -454,7 +492,7 @@ impl MultipartUploadBackend for LocalFsBackend {
             .context(ErrorKind::Internal, "encoding local-fs part header")?;
 
         let part_path = dir.join(format!("{part_number}.part"));
-        let file = OpenOptions::new()
+        let file = OpenOptions::from(file_options())
             .create(true)
             .write(true)
             .truncate(true)
@@ -674,7 +712,10 @@ impl MultipartUploadBackend for LocalFsBackend {
 
         // Assemble the parts into a draft before publishing the object.
         let path = self.path(id);
-        Self::create_dir_all(&path).await?;
+        create_directories(path.parent().unwrap()).await.context(
+            ErrorKind::BackendFailure,
+            "creating local-fs object directory",
+        )?;
         let mut draft = Draft::create(&path, &metadata).await?;
 
         let mut payload_size = 0;
@@ -743,12 +784,10 @@ impl ObjectLocks {
     /// Acquires a slot lock, released when the returned file is dropped.
     pub async fn acquire(&self, id: &ObjectId) -> Result<File> {
         let path = self.path(id);
-        tokio::fs::create_dir_all(path.parent().unwrap())
-            .await
-            .context(
-                ErrorKind::BackendFailure,
-                "creating local-fs object lock directory",
-            )?;
+        create_directories(path.parent().unwrap()).await.context(
+            ErrorKind::BackendFailure,
+            "creating local-fs object lock directory",
+        )?;
 
         // Leave blocking-pool capacity available for the current lock holder's filesystem work.
         let permit = Arc::clone(&self.blocking_waiters)
@@ -758,7 +797,7 @@ impl ObjectLocks {
 
         tokio::task::spawn_blocking(move || -> io::Result<File> {
             let _permit = permit;
-            let file = std::fs::OpenOptions::new()
+            let file = file_options()
                 .create(true)
                 .truncate(false)
                 .read(true)
@@ -813,10 +852,8 @@ struct UploadFile {
 
 impl UploadFile {
     async fn create(path: &Path, metadata: &Metadata) -> Result<()> {
-        let mut options = OpenOptions::new();
+        let mut options = OpenOptions::from(file_options());
         options.create_new(true).read(true).write(true);
-        #[cfg(unix)]
-        options.mode(0o666);
 
         let mut file = options.open(path).await.context(
             ErrorKind::BackendFailure,
@@ -1090,13 +1127,6 @@ impl Draft {
 fn create_tempfile(parent: &Path) -> io::Result<tempfile::NamedTempFile> {
     let mut builder = tempfile::Builder::new();
     builder.suffix(".draft");
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        builder.permissions(std::fs::Permissions::from_mode(0o666));
-    }
 
     builder.tempfile_in(parent)
 }
