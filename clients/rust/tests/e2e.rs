@@ -14,6 +14,9 @@ use serde::Serialize;
 
 use common::{test_server, test_token_generator};
 
+#[cfg(feature = "resumable-upload-api")]
+use objectstore_client::UploadProgress;
+
 #[derive(Serialize)]
 struct JwtClaims {
     exp: u64,
@@ -944,4 +947,75 @@ async fn batch_head_operations() {
     assert!(head_missing.is_none());
 }
 
-// TODO: Add end-to-end coverage for resumable uploads once the local_fs backend supports it.
+#[cfg(feature = "resumable-upload-api")]
+#[tokio::test]
+async fn test_resumable_upload() {
+    let server = test_server().await;
+    let session = common::test_session(&server);
+
+    // Create a session and upload the first chunk.
+    let upload = session
+        .create_upload(6)
+        .key("resumable-client")
+        .content_type("text/plain")
+        .compression(None)
+        .send()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(upload.key(), "resumable-client");
+    assert_eq!(
+        upload.progress().send().await.unwrap(),
+        UploadProgress::Incomplete { offset: 0 }
+    );
+    assert_eq!(
+        upload.put(0, "abc").send().await.unwrap(),
+        UploadProgress::Incomplete { offset: 3 }
+    );
+
+    // Resume the session and finish the upload.
+    let resumed = session.resume_upload(upload.key(), upload.token().clone());
+    assert_eq!(
+        resumed.progress().send().await.unwrap(),
+        UploadProgress::Incomplete { offset: 3 }
+    );
+    assert_eq!(
+        resumed.put(0, "bad").send().await.unwrap(),
+        UploadProgress::Incomplete { offset: 3 }
+    );
+    assert!(resumed.put(3, "defg").send().await.is_err());
+    assert_eq!(
+        resumed.put(3, "def").send().await.unwrap(),
+        UploadProgress::Complete
+    );
+
+    // Verify the published object and terminal session.
+    let response = session.get(upload.key()).send().await.unwrap().unwrap();
+    assert_eq!(response.metadata.content_type, "text/plain");
+    assert_eq!(response.payload().await.unwrap(), "abcdef");
+    assert!(resumed.progress().send().await.is_err());
+}
+
+#[cfg(feature = "resumable-upload-api")]
+#[tokio::test]
+async fn test_resumable_upload_cancel() {
+    let server = test_server().await;
+    let session = common::test_session(&server);
+
+    let upload = session
+        .create_upload(6)
+        .key("resumable-cancel")
+        .send()
+        .await
+        .unwrap()
+        .unwrap();
+    upload.put(0, "abc").send().await.unwrap();
+    upload.cancel().send().await.unwrap();
+
+    // A canceled partial upload is no longer available and publishes no object.
+    assert!(matches!(
+        upload.progress().send().await,
+        Err(Error::ResumableUploadUnavailable)
+    ));
+    assert!(session.get(upload.key()).send().await.unwrap().is_none());
+}
