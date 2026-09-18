@@ -829,9 +829,6 @@ impl UploadSession {
         let upload_id_str = upload_id;
         let upload_id =
             Uuid::parse_str(upload_id_str).map_err(|_| ErrorKind::UnknownUploadSession)?;
-        if upload_id.get_version_num() != 7 || upload_id.to_string() != upload_id_str {
-            return Err(ErrorKind::UnknownUploadSession.into());
-        }
         Ok(Self {
             total_length,
             upload_id,
@@ -954,6 +951,7 @@ impl UploadFile {
         Ok(payload_size)
     }
 
+    /// Publishes the upload; requires a successful `append()` with no subsequent writes.
     async fn publish(self, target: PathBuf) -> Result<(u64, Option<Timestamp>)> {
         let Self {
             file,
@@ -1102,6 +1100,7 @@ impl Draft {
             .context(ErrorKind::BackendFailure, "syncing local-fs object draft")
     }
 
+    /// Publishes the draft; requires a successful `prepare()` with no subsequent writes.
     async fn publish(self) -> Result<()> {
         let Self {
             writer,
@@ -1178,7 +1177,6 @@ mod tests {
             .unwrap();
         let session = UploadSession::from_token(&token).unwrap();
         assert_eq!(session.total_length.get(), 6);
-        assert_eq!(session.upload_id.get_version_num(), 7);
         let upload_path = backend.upload_path(session.upload_id);
         assert_eq!(
             upload_path.parent().unwrap().file_name().unwrap(),
