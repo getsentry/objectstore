@@ -318,6 +318,8 @@ impl Backend for LocalFsBackend {
         Ok(Some(format!("{total_length}.{upload_id}")))
     }
 
+    // In this backend, if all the bytes of a resumable upload have been written but publication failed,
+    // an empty chunk or offset query will retry publication.
     #[tracing::instrument(level = "debug", fields(?id, offset, content_length), skip_all)]
     async fn put_chunk(
         &self,
@@ -340,12 +342,6 @@ impl Backend for LocalFsBackend {
 
         let upload_path = self.upload_path(session.upload_id);
         let mut upload = UploadFile::open(&upload_path).await?;
-        // A previous call to `put_chunk` should have already materialized the object.
-        // If we find the object still here, it means that publication failed.
-        // Treat the session as permanently failed.
-        if upload.offset() == session.total_length.get() {
-            return Err(ErrorKind::UploadSessionGone.into());
-        }
         if content_length != 0 && offset != upload.offset() {
             return Err(ErrorKind::UploadOffsetMismatch {
                 offset: upload.offset(),
@@ -376,19 +372,8 @@ impl Backend for LocalFsBackend {
 
     #[tracing::instrument(level = "debug", fields(?id), skip_all)]
     async fn upload_offset(&self, id: &ObjectId, token: &BackendToken) -> Result<UploadProgress> {
-        let session = UploadSession::from_token(token)?;
-        let _guard = self.locks.acquire(id).await?;
-        let upload = UploadFile::open(&self.upload_path(session.upload_id)).await?;
-        // A previous call to `put_chunk` should have already materialized the object.
-        // If we find the object still here, it means that publication failed.
-        // Treat the session as permanently failed.
-        if upload.offset() == session.total_length.get() {
-            Err(ErrorKind::UploadSessionGone.into())
-        } else {
-            Ok(UploadProgress::Incomplete {
-                offset: upload.offset(),
-            })
-        }
+        self.put_chunk(id, token, 0, 0, futures_util::stream::empty().boxed())
+            .await
     }
 
     #[tracing::instrument(level = "debug", fields(?id), skip_all)]
@@ -1243,6 +1228,44 @@ mod tests {
             backend.upload_offset(&id, &token).await.unwrap_err().kind(),
             ErrorKind::UnknownUploadSession
         );
+    }
+
+    #[tokio::test]
+    async fn resumable_publication_can_be_retried() {
+        for query_offset in [false, true] {
+            let (_tempdir, backend) = make_backend();
+            let id = make_id();
+            let token = upload_token(&backend, &id, 4).await;
+            let object_path = backend.path(&id);
+
+            // A directory at the destination prevents rename after all bytes are persisted.
+            tokio::fs::create_dir_all(&object_path).await.unwrap();
+            let error = backend
+                .put_chunk(&id, &token, 0, 4, stream::single("data"))
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::BackendFailure);
+            tokio::fs::remove_dir(&object_path).await.unwrap();
+
+            let progress = if query_offset {
+                backend.upload_offset(&id, &token).await
+            } else {
+                backend
+                    .put_chunk(&id, &token, 4, 0, stream::single(""))
+                    .await
+            };
+            assert_eq!(progress.unwrap(), UploadProgress::Complete);
+            let (_, _, payload) = backend
+                .get_object(&id, Timestamp::now(), None)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stream::read_to_vec(payload).await.unwrap(), b"data");
+            assert_eq!(
+                backend.upload_offset(&id, &token).await.unwrap_err().kind(),
+                ErrorKind::UnknownUploadSession
+            );
+        }
     }
 
     #[tokio::test]
