@@ -1379,15 +1379,45 @@ mod tests {
     // --- Resumable uploads ---
 
     #[tokio::test]
-    async fn resumable_create_preserves_backend_refusal_as_none() {
+    async fn resumable_in_memory_round_trip() {
         let service = make_service();
         let id = ObjectId::new(make_context(), "resumable".into());
-
-        let result = service
-            .create_upload_session(id, Metadata::default(), 1024)
-            .await;
-
-        assert!(matches!(result, Ok(None)), "{result:?}");
+        let token = service
+            .create_upload_session(id.clone(), Metadata::default(), 3)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            service
+                .put_chunk(id.clone(), token.clone(), 0, 1, stream::single("a"))
+                .await
+                .unwrap(),
+            UploadProgress::Incomplete { offset: 1 }
+        );
+        assert_eq!(
+            service
+                .upload_offset(id.clone(), token.clone())
+                .await
+                .unwrap(),
+            UploadProgress::Incomplete { offset: 1 }
+        );
+        assert_eq!(
+            service
+                .put_chunk(id.clone(), token, 1, 2, stream::single("bc"))
+                .await
+                .unwrap(),
+            UploadProgress::Complete
+        );
+        let (metadata, _, body) = service
+            .get_object(id, Timestamp::now(), None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(metadata.size, Some(3));
+        assert_eq!(
+            body.try_collect::<BytesMut>().await.unwrap().as_ref(),
+            b"abc"
+        );
     }
 
     #[tokio::test]
