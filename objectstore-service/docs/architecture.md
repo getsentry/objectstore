@@ -275,8 +275,9 @@ defaults to 1,000 and is configurable by the server through
 `service.background_queue`. Graceful shutdown drains all accepted extensions.
 
 Apart from the expiration policy, metadata during object creation must carry a
-`time_expires` field with the correct expiration timestamp. This is ensured
-during metadata creation by the server.
+`time_expires` field with the correct initial expiration timestamp. This is
+ensured during metadata creation by the server. Explicit deadline extensions
+can later increase `time_expires` without changing the policy or its duration.
 
 # Backpressure
 

@@ -302,9 +302,11 @@ impl StorageService {
         .await
     }
 
-    /// Extends an existing TTL or TTI object's deadline.
+    /// Extends an existing TTL or TTI object's deadline without changing its policy.
     ///
-    /// Returns the resolved requested deadline when applied or already satisfied.
+    /// This is distinct from the initial policy-derived deadline created on insertion. It
+    /// preserves the policy duration and every other part of the object. Returns the resolved
+    /// requested deadline when applied or already satisfied.
     pub async fn set_expiry(
         &self,
         id: ObjectId,
