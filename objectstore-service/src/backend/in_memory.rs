@@ -297,13 +297,13 @@ impl super::common::Backend for InMemoryBackend {
         }
 
         let mut remaining = content_length;
-        while remaining != 0 {
-            let Some(bytes) = stream.try_next().await? else {
+        while remaining > 0 {
+            let Some(chunk) = stream.try_next().await? else {
                 break;
             };
-            let length = remaining.min(bytes.len() as u64) as usize;
-            upload.data.extend_from_slice(&bytes[..length]);
-            remaining = remaining.saturating_sub(length as u64);
+            let count = remaining.min(chunk.len() as u64) as usize;
+            upload.data.extend_from_slice(&chunk[..count]);
+            remaining -= count as u64;
         }
 
         let offset = upload.data.len() as u64;
