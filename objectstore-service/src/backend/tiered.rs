@@ -99,9 +99,9 @@
 //!
 //! # Resumable Uploads
 //!
-//! Resumable uploads are always written to the long-term backend, regardless of size.
-//! A Resumable Upload remains inaccessible until the long-term backend completes and
-//! a high-volume tombstone is committed.
+//! Resumable uploads are accepted only when their declared size exceeds 1 MiB and are
+//! written to the long-term backend. A resumable upload remains inaccessible until
+//! the long-term backend completes and a high-volume tombstone is committed.
 
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -202,7 +202,7 @@ pub struct TieredStorageConfig {
 ///   and writes of small objects (e.g. BigTable).
 /// - Objects **> 1 MiB** go to the `long_term` backend — optimized for cost-efficient
 ///   storage of large objects (e.g. GCS).
-/// - Resumable uploads always go to the `long_term` backend, regardless of size.
+/// - Resumable uploads at or below 1 MiB are declined; larger uploads go to `long_term`.
 ///
 /// # Redirect Tombstones
 ///
@@ -436,6 +436,10 @@ impl Backend for TieredStorage {
         metadata: &Metadata,
         total_length: NonZeroU64,
     ) -> Result<Option<BackendToken>> {
+        if total_length.get() <= BACKEND_SIZE_THRESHOLD as u64 {
+            return Ok(None);
+        }
+
         let revision = new_long_term_revision(id);
         let Some(backend_token) = self
             .inner
@@ -1272,12 +1276,20 @@ mod tests {
     async fn resumable_inmemory() -> anyhow::Result<()> {
         let (storage, _, _, _) = make_tiered_storage();
         let id = make_id("tiered-resumable-inmemory");
-        let token = resumable_token(&storage, &id, &Metadata::default(), 3).await;
+        let payload = vec![b'a'; BACKEND_SIZE_THRESHOLD + 1];
+        let token =
+            resumable_token(&storage, &id, &Metadata::default(), payload.len() as u64).await;
 
         // A completed upload creates a logical object.
         assert_eq!(
             storage
-                .put_chunk(&id, &token, 0, 3, stream::single("abc"))
+                .put_chunk(
+                    &id,
+                    &token,
+                    0,
+                    payload.len() as u64,
+                    stream::single(payload.clone())
+                )
                 .await?,
             UploadProgress::Complete
         );
@@ -1290,7 +1302,7 @@ mod tests {
             .get_object(&id, Timestamp::now(), None)
             .await?
             .unwrap();
-        assert_eq!(stream::read_to_vec(body).await?, b"abc");
+        assert_eq!(stream::read_to_vec(body).await?, payload);
         Ok(())
     }
 
@@ -1321,12 +1333,20 @@ mod tests {
         .await?;
         let storage = TieredStorage::new(Box::new(hv), Box::new(lt), Box::new(NoopChangeLog));
         let id = make_id(&format!("tiered-resumable-{}", uuid::Uuid::now_v7()));
-        let token = resumable_token(&storage, &id, &Metadata::default(), 3).await;
+        let payload = vec![b'a'; BACKEND_SIZE_THRESHOLD + 1];
+        let token =
+            resumable_token(&storage, &id, &Metadata::default(), payload.len() as u64).await;
 
         // A completed upload creates a logical object.
         assert_eq!(
             storage
-                .put_chunk(&id, &token, 0, 3, stream::single("abc"))
+                .put_chunk(
+                    &id,
+                    &token,
+                    0,
+                    payload.len() as u64,
+                    stream::single(payload.clone())
+                )
                 .await?,
             UploadProgress::Complete
         );
@@ -1339,7 +1359,7 @@ mod tests {
             .get_object(&id, Timestamp::now(), None)
             .await?
             .unwrap();
-        assert_eq!(stream::read_to_vec(body).await?, b"abc");
+        assert_eq!(stream::read_to_vec(body).await?, payload);
         Ok(())
     }
 
@@ -1347,7 +1367,8 @@ mod tests {
     async fn resumable_invalid_chunks() {
         let (storage, _, _, _) = make_tiered_storage();
         let id = make_id("resumable-invalid");
-        let token = resumable_token(&storage, &id, &Metadata::default(), 3).await;
+        let length = BACKEND_SIZE_THRESHOLD as u64 + 1;
+        let token = resumable_token(&storage, &id, &Metadata::default(), length).await;
 
         // Overflow and future offsets are rejected.
         assert_eq!(
@@ -1359,12 +1380,12 @@ mod tests {
             ErrorKind::ChunkExceedsUploadLength {
                 offset: u64::MAX,
                 content_length: 1,
-                upload_length: 3
+                upload_length: length
             }
         );
         assert_eq!(
             storage
-                .put_chunk(&id, &token, 2, 1, stream::single("x"))
+                .put_chunk(&id, &token, length - 1, 1, stream::single("x"))
                 .await
                 .unwrap_err()
                 .kind(),
@@ -1376,7 +1397,13 @@ mod tests {
     async fn resumable_cancel() {
         let (storage, hv, _, _) = make_tiered_storage();
         let id = make_id("resumable-invalid");
-        let token = resumable_token(&storage, &id, &Metadata::default(), 3).await;
+        let token = resumable_token(
+            &storage,
+            &id,
+            &Metadata::default(),
+            BACKEND_SIZE_THRESHOLD as u64 + 1,
+        )
+        .await;
 
         // Cancellation removes the open long-term session.
         storage.cancel_upload(&id, &token).await.unwrap();
