@@ -16,7 +16,13 @@ from pathlib import Path
 import pytest
 import urllib3
 import zstandard
-from objectstore_client import Client, Session, Usecase
+from objectstore_client import (
+    Client,
+    ExpiryExtensionRejected,
+    ObjectNotFound,
+    Session,
+    Usecase,
+)
 from objectstore_client.auth import Permission, SecretKey
 from objectstore_client.errors import RequestError
 from objectstore_client.metadata import TimeToLive
@@ -307,7 +313,7 @@ def test_extend_expiry(server_url: str) -> None:
 def test_extend_expiry_missing_object(server_url: str) -> None:
     client = Client(server_url, token=TestSecretKey.get())
     session = client.session(Usecase("test-usecase"), org=42)
-    with pytest.raises(RequestError) as error:
+    with pytest.raises(ObjectNotFound) as error:
         session.extend_expiry("missing", from_now=timedelta(days=1))
     assert error.value.status == 404
 
@@ -316,7 +322,7 @@ def test_extend_expiry_non_expiring_object(server_url: str) -> None:
     client = Client(server_url, token=TestSecretKey.get())
     session = client.session(Usecase("test-usecase"), org=42)
     key = session.put(b"payload")
-    with pytest.raises(RequestError) as error:
+    with pytest.raises(ExpiryExtensionRejected) as error:
         session.extend_expiry(key, from_now=timedelta(days=1))
     assert error.value.status == 409
 

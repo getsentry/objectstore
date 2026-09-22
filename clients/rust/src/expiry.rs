@@ -2,6 +2,7 @@ use std::time::{Duration, SystemTime};
 
 use objectstore_types::metadata::{self, ExpiryAnchor, MetadataUpdate};
 use objectstore_types::time::Timestamp;
+use reqwest::StatusCode;
 
 use crate::response::ResponseExt as _;
 use crate::{ObjectKey, Session};
@@ -43,8 +44,23 @@ impl ExpiryExtension {
     }
 }
 
-/// The result of a successful [`Session::extend_expiry`] call.
-pub type ExtendExpiryResponse = ();
+/// The outcome of a [`Session::extend_expiry`] call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExtendExpiryResponse {
+    /// The deadline was extended or already satisfied the request.
+    ///
+    /// Does not report whether the deadline changed or its stored value.
+    Satisfied,
+    /// The object was observed to be absent or expired.
+    NotFound,
+    /// The extension could not be satisfied.
+    ///
+    /// The object is non-expiring, lacks creation metadata required by a
+    /// creation-relative target, or conflicts with a conditional update.
+    /// A conflict can result from concurrent deletion, so this does not
+    /// guarantee that the object still exists.
+    Rejected,
+}
 
 impl Session {
     /// Extends an object's expiration deadline without changing its policy or payload.
@@ -53,18 +69,22 @@ impl Session {
     /// targets are resolved by the server, not added to the existing deadline.
     /// This requires object-write permission and a server supporting expiry updates.
     ///
-    /// HTTP errors are returned through [`crate::Error::Reqwest`]. An object observed
-    /// absent or expired returns 404. An extension rejected because the object is
-    /// non-expiring, changed concurrently, or lacks creation metadata for a
-    /// creation-relative target returns 409.
-    /// Success does not report whether the deadline changed or its stored value.
+    /// Returns [`ExtendExpiryResponse`] to distinguish a satisfied request, an
+    /// absent or expired object, and a rejected extension. Other HTTP and transport
+    /// errors are returned through [`crate::Error::Reqwest`].
     ///
     /// ```no_run
     /// # async fn example(session: objectstore_client::Session) -> objectstore_client::Result<()> {
     /// use std::time::Duration;
-    /// use objectstore_client::ExpiryExtension;
-    /// session.extend_expiry("key", ExpiryExtension::FromNow(Duration::from_secs(86400)))
-    ///     .send().await?;
+    /// use objectstore_client::{ExpiryExtension, ExtendExpiryResponse};
+    ///
+    /// match session.extend_expiry("key", ExpiryExtension::FromNow(Duration::from_secs(86400)))
+    ///     .send().await?
+    /// {
+    ///     ExtendExpiryResponse::Satisfied => println!("Deadline satisfied"),
+    ///     ExtendExpiryResponse::NotFound => println!("Object is missing or expired"),
+    ///     ExtendExpiryResponse::Rejected => println!("Extension was rejected"),
+    /// }
     /// # Ok(())
     /// # }
     /// ```
@@ -89,16 +109,26 @@ impl ExtendExpiryBuilder {
     /// Sends the extension request, failing locally for an out-of-range timestamp.
     pub async fn send(self) -> crate::Result<ExtendExpiryResponse> {
         let update = self.target.into_update()?;
-        self.session
+        let response = self
+            .session
             .request(reqwest::Method::PATCH, &self.key)?
             .json(&update)
             .send()
-            .await?
-            .error_for_status_and_drain()
-            .await?
-            .drain_body()
-            .await;
-        Ok(())
+            .await?;
+        let outcome = match response.status() {
+            StatusCode::NOT_FOUND => ExtendExpiryResponse::NotFound,
+            StatusCode::CONFLICT => ExtendExpiryResponse::Rejected,
+            _ => {
+                response
+                    .error_for_status_and_drain()
+                    .await?
+                    .drain_body()
+                    .await;
+                return Ok(ExtendExpiryResponse::Satisfied);
+            }
+        };
+        response.drain_body().await;
+        Ok(outcome)
     }
 }
 

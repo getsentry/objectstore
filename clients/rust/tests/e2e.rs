@@ -7,7 +7,8 @@ use std::time::Duration;
 use futures_util::StreamExt as _;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, get_current_timestamp};
 use objectstore_client::{
-    Client, Error, ExpirationPolicy, ExpiryExtension, OperationResult, Permission, Usecase,
+    Client, Error, ExpirationPolicy, ExpiryExtension, ExtendExpiryResponse, OperationResult,
+    Permission, Usecase,
 };
 use objectstore_test::server::{TEST_EDDSA_KID, TEST_EDDSA_PRIVKEY};
 use objectstore_types::metadata::Compression;
@@ -370,6 +371,18 @@ async fn fails_with_insufficient_auth_token_perms() {
         Err(Error::Reqwest(err)) => assert_eq!(err.status().unwrap(), StatusCode::FORBIDDEN),
         _ => panic!("Expected error"),
     }
+
+    let error = session
+        .extend_expiry(
+            "some-key",
+            ExpiryExtension::FromNow(Duration::from_secs(86400)),
+        )
+        .send()
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, Error::Reqwest(error) if error.status() == Some(StatusCode::FORBIDDEN))
+    );
 }
 
 #[tokio::test]
@@ -905,7 +918,7 @@ async fn extends_expiry() {
         .unwrap()
         .key;
 
-    session
+    let outcome = session
         .extend_expiry(
             &key,
             ExpiryExtension::FromCreation(Duration::from_secs(3 * 86400)),
@@ -913,6 +926,7 @@ async fn extends_expiry() {
         .send()
         .await
         .unwrap();
+    assert_eq!(outcome, ExtendExpiryResponse::Satisfied);
     let metadata = session.head(&key).send().await.unwrap().unwrap();
     assert_eq!(
         metadata.time_expires,
@@ -920,7 +934,7 @@ async fn extends_expiry() {
     );
     assert_eq!(metadata.expiration_policy, policy);
 
-    session
+    let outcome = session
         .extend_expiry(
             &key,
             ExpiryExtension::FromCreation(Duration::from_secs(2 * 86400)),
@@ -928,6 +942,7 @@ async fn extends_expiry() {
         .send()
         .await
         .unwrap();
+    assert_eq!(outcome, ExtendExpiryResponse::Satisfied);
     assert_eq!(session.head(&key).send().await.unwrap().unwrap(), metadata);
     let response = session.get(&key).send().await.unwrap().unwrap();
     assert_eq!(response.payload().await.unwrap(), "payload");
@@ -937,17 +952,15 @@ async fn extends_expiry() {
 async fn extend_expiry_missing_object() {
     let server = test_server().await;
     let session = common::test_session(&server);
-    let error = session
+    let outcome = session
         .extend_expiry(
             "missing",
             ExpiryExtension::FromNow(Duration::from_secs(86400)),
         )
         .send()
         .await
-        .unwrap_err();
-    assert!(
-        matches!(error, Error::Reqwest(error) if error.status() == Some(StatusCode::NOT_FOUND))
-    );
+        .unwrap();
+    assert_eq!(outcome, ExtendExpiryResponse::NotFound);
 }
 
 #[tokio::test]
@@ -955,12 +968,12 @@ async fn extend_expiry_non_expiring_object() {
     let server = test_server().await;
     let session = common::test_session(&server);
     let key = session.put("payload").send().await.unwrap().key;
-    let error = session
+    let outcome = session
         .extend_expiry(&key, ExpiryExtension::FromNow(Duration::from_secs(86400)))
         .send()
         .await
-        .unwrap_err();
-    assert!(matches!(error, Error::Reqwest(error) if error.status() == Some(StatusCode::CONFLICT)));
+        .unwrap();
+    assert_eq!(outcome, ExtendExpiryResponse::Rejected);
 }
 
 #[tokio::test]

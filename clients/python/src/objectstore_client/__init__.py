@@ -5,7 +5,11 @@ from objectstore_client.client import (
     Session,
     Usecase,
 )
-from objectstore_client.errors import RequestError
+from objectstore_client.errors import (
+    ExpiryExtensionRejected,
+    ObjectNotFound,
+    RequestError,
+)
 from objectstore_client.metadata import (
     Compression,
     ExpirationPolicy,
@@ -22,6 +26,8 @@ __all__ = [
     "Session",
     "GetResponse",
     "RequestError",
+    "ObjectNotFound",
+    "ExpiryExtensionRejected",
     "Compression",
     "ExpirationPolicy",
     "Metadata",

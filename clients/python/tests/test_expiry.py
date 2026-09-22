@@ -3,7 +3,13 @@ from typing import TypedDict
 from unittest.mock import Mock
 
 import pytest
-from objectstore_client import Client, Usecase
+from objectstore_client import (
+    Client,
+    ExpiryExtensionRejected,
+    ObjectNotFound,
+    RequestError,
+    Usecase,
+)
 
 
 class ExpiryArgs(TypedDict, total=False):
@@ -61,3 +67,29 @@ def test_invalid_targets(monkeypatch: pytest.MonkeyPatch, kwargs: ExpiryArgs) ->
     with pytest.raises(ValueError):
         session.extend_expiry("key", **kwargs)
     request.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("status", "error_type"),
+    [
+        (404, ObjectNotFound),
+        (409, ExpiryExtensionRejected),
+        (403, RequestError),
+        (500, RequestError),
+    ],
+)
+def test_request_errors(
+    monkeypatch: pytest.MonkeyPatch, status: int, error_type: type[RequestError]
+) -> None:
+    session = Client("http://localhost:8888", token="test-token").session(
+        Usecase("test"), org=42
+    )
+    request = Mock(return_value=Mock(status=status, data=b"failure details"))
+    monkeypatch.setattr(session._pool, "request", request)
+
+    with pytest.raises(RequestError) as error:
+        session.extend_expiry("key", from_now=timedelta(days=1))
+
+    assert type(error.value) is error_type
+    assert error.value.status == status
+    assert error.value.response == "failure details"

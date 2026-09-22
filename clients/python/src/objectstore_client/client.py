@@ -17,7 +17,12 @@ from urllib3.connectionpool import HTTPConnectionPool
 
 from objectstore_client import presign, utils
 from objectstore_client.auth import Permission, SecretKey, TokenProvider
-from objectstore_client.errors import raise_for_status
+from objectstore_client.errors import (
+    ExpiryExtensionRejected,
+    ObjectNotFound,
+    RequestError,
+    raise_for_status,
+)
 from objectstore_client.metadata import (
     HEADER_EXPIRATION,
     HEADER_FILENAME,
@@ -693,15 +698,24 @@ class Session:
 
         Raises ``ValueError`` for missing or multiple targets, naive datetimes,
         or negative durations. Zero durations are valid. Objects observed absent
-        or expired raise ``RequestError`` with status 404. Rejected extensions
-        raise it with status 409 for non-expiring or concurrently changed objects,
-        or missing creation metadata needed for a creation-relative target.
+        or expired raise ``ObjectNotFound``. Rejected extensions raise
+        ``ExpiryExtensionRejected`` for non-expiring or concurrently changed
+        objects, or missing creation metadata needed for a creation-relative
+        target. Both exceptions subclass ``RequestError``. Rejection does not
+        guarantee that the object still exists, since it may be deleted concurrently.
         Other HTTP errors propagate normally. Retrying ``from_now`` establishes
         a new server-time anchor and can extend the deadline further.
 
         Example::
 
-            session.extend_expiry(key, from_now=timedelta(days=30))
+            from objectstore_client import ExpiryExtensionRejected, ObjectNotFound
+
+            try:
+                session.extend_expiry(key, from_now=timedelta(days=30))
+            except ObjectNotFound:
+                print("Object is missing or expired")
+            except ExpiryExtensionRejected:
+                print("Extension was rejected")
         """
         if sum(value is not None for value in (at, from_creation, from_now)) != 1:
             raise ValueError("Supply exactly one of at, from_creation, or from_now")
@@ -735,7 +749,12 @@ class Session:
                 json={"extend_expiry": extension},
                 preload_content=True,
             )
-            raise_for_status(response)
+            error_type: type[RequestError] = RequestError
+            if response.status == 404:
+                error_type = ObjectNotFound
+            elif response.status == 409:
+                error_type = ExpiryExtensionRejected
+            raise_for_status(response, error_type=error_type)
 
     def delete(self, key: str) -> None:
         """

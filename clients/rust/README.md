@@ -78,9 +78,8 @@ session.put("payload")
     .send().await?;
 ```
 
-Extend an existing object's deadline with [`Session::extend_expiry`], preserving its
-TTL/TTI policy, payload, and other metadata. An already-sufficient deadline succeeds.
-This requires object-write permission and a server supporting expiry updates.
+Use [`Session::extend_expiry`] to keep an existing object longer without changing its
+TTL/TTI policy:
 
 ```rust,no_run
 # async fn example(session: objectstore_client::Session) -> objectstore_client::Result<()> {
@@ -93,10 +92,8 @@ session.extend_expiry("key", ExpiryExtension::FromNow(Duration::from_secs(30 * 8
 # }
 ```
 
-Use `FromCreation(duration)` for total lifetime since creation or replacement, or
-`At(system_time)` for an absolute deadline. Relative durations are resolved by the
-server; retrying `FromNow` can extend further. See [`ExpiryExtension`] for precision
-and [`Session::extend_expiry`] for failure semantics.
+See [`ExpiryExtension`] for target options and [`Session::extend_expiry`] for
+outcome handling.
 
 ### Origin Tracking
 
