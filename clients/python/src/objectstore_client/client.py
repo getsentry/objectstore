@@ -681,7 +681,7 @@ class Session:
     ) -> None:
         """Extend an object's expiration deadline, preserving its policy and payload.
 
-        Supply exactly one target: ``at`` is an aware absolute datetime;
+        Supply exactly one target: ``at`` is a timezone-aware absolute datetime;
         ``from_creation`` is total lifetime since creation or replacement; and
         ``from_now`` is lifetime from server request start. Relative targets are
         resolved by the server, not added to the existing deadline. Fractional
