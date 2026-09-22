@@ -945,6 +945,21 @@ async fn extend_expiry_missing_object() {
         .send()
         .await
         .unwrap_err();
+    assert!(
+        matches!(error, Error::Reqwest(error) if error.status() == Some(StatusCode::NOT_FOUND))
+    );
+}
+
+#[tokio::test]
+async fn extend_expiry_non_expiring_object() {
+    let server = test_server().await;
+    let session = common::test_session(&server);
+    let key = session.put("payload").send().await.unwrap().key;
+    let error = session
+        .extend_expiry(&key, ExpiryExtension::FromNow(Duration::from_secs(86400)))
+        .send()
+        .await
+        .unwrap_err();
     assert!(matches!(error, Error::Reqwest(error) if error.status() == Some(StatusCode::CONFLICT)));
 }
 

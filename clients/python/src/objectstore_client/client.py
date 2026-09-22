@@ -692,9 +692,10 @@ class Session:
         Requires object-write permission and a server supporting expiry updates.
 
         Raises ``ValueError`` for missing or multiple targets, naive datetimes,
-        or negative durations. Zero durations are valid. Unsatisfied extensions
-        raise ``RequestError`` with status 409, including absent, expired,
-        non-expiring, or concurrently changed objects, or missing creation metadata.
+        or negative durations. Zero durations are valid. Objects observed absent
+        or expired raise ``RequestError`` with status 404. Rejected extensions
+        raise it with status 409 for non-expiring or concurrently changed objects,
+        or missing creation metadata needed for a creation-relative target.
         Other HTTP errors propagate normally. Retrying ``from_now`` establishes
         a new server-time anchor and can extend the deadline further.
 

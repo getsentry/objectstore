@@ -55,9 +55,10 @@ impl Session {
     /// targets are resolved by the server, not added to the existing deadline.
     /// This requires object-write permission and a server supporting expiry updates.
     ///
-    /// HTTP 409 is returned through [`crate::Error::Reqwest`] if the extension
-    /// cannot be satisfied, including absent, expired, non-expiring, or concurrently
-    /// changed objects, or missing creation metadata for a creation-relative target.
+    /// HTTP errors are returned through [`crate::Error::Reqwest`]. An object observed
+    /// absent or expired returns 404. An extension rejected because the object is
+    /// non-expiring, changed concurrently, or lacks creation metadata for a
+    /// creation-relative target returns 409.
     /// Success does not report whether the deadline changed or its stored value.
     ///
     /// ```no_run

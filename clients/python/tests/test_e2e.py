@@ -309,6 +309,15 @@ def test_extend_expiry_missing_object(server_url: str) -> None:
     session = client.session(Usecase("test-usecase"), org=42)
     with pytest.raises(RequestError) as error:
         session.extend_expiry("missing", from_now=timedelta(days=1))
+    assert error.value.status == 404
+
+
+def test_extend_expiry_non_expiring_object(server_url: str) -> None:
+    client = Client(server_url, token=TestSecretKey.get())
+    session = client.session(Usecase("test-usecase"), org=42)
+    key = session.put(b"payload")
+    with pytest.raises(RequestError) as error:
+        session.extend_expiry(key, from_now=timedelta(days=1))
     assert error.value.status == 409
 
 

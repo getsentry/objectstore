@@ -77,7 +77,8 @@ session.extend_expiry(key, at=deadline)  # timezone-aware datetime
 Supply exactly one target. `from_creation` means total lifetime since creation or
 replacement; `from_now` uses server request time, so retrying can extend further.
 Fractional duration seconds are truncated; absolute deadlines round upward to seconds.
-Unsatisfied extensions raise `RequestError` with status 409. See the method's
+Missing or expired objects raise `RequestError` with status 404; rejected extensions
+raise it with status 409. See the method's
 documentation for validation and failure details.
 
 ### Origin Tracking
