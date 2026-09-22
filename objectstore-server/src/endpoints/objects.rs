@@ -18,6 +18,9 @@
 //!
 //! The operation only extends live TTL and TTI objects. It preserves the expiration policy,
 //! including its duration, as well as the payload and all other metadata.
+//! A satisfied request returns 204, including an already-sufficient deadline. An object
+//! observed absent or expired returns 404. Ineligible or conflicting updates return 409;
+//! backend failures use the normal service error responses.
 
 use std::fmt::Write as _;
 
@@ -28,7 +31,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing;
 use axum::{Json, Router};
-use objectstore_service::backend::common::ExpiryTarget;
+use objectstore_service::backend::common::{ExpiryTarget, SetExpiryResponse};
 use objectstore_service::error::ErrorKind;
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_types::duration::parse_duration;
@@ -132,12 +135,12 @@ async fn object_patch(
         }
     };
 
-    if service.set_expiry(id, target, access_time).await?.is_some() {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Err(ApiError::conflict(
+    match service.set_expiry(id, target, access_time).await? {
+        SetExpiryResponse::Satisfied(_) => Ok(StatusCode::NO_CONTENT),
+        SetExpiryResponse::NotFound => Ok(StatusCode::NOT_FOUND),
+        SetExpiryResponse::Rejected => Err(ApiError::conflict(
             "expiry extension could not be satisfied",
-        ))
+        )),
     }
 }
 
@@ -379,6 +382,64 @@ mod tests {
             },
             key.into(),
         )
+    }
+
+    #[tokio::test]
+    async fn expiry_extension_distinguishes_missing_and_ineligible_objects() {
+        let access_time = Timestamp::now();
+        for (metadata, expected) in [
+            (None, StatusCode::NOT_FOUND),
+            (
+                Some(Metadata {
+                    expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(60)),
+                    time_expires: Some(access_time - Duration::from_secs(1)),
+                    ..Default::default()
+                }),
+                StatusCode::NOT_FOUND,
+            ),
+            (Some(Metadata::default()), StatusCode::CONFLICT),
+        ] {
+            let storage = StorageService::new(
+                Box::new(InMemoryBackend::new("in-memory")),
+                Cipher::ephemeral().unwrap(),
+            );
+            let id = object_id("expiry-outcome");
+            if let Some(metadata) = metadata {
+                storage
+                    .insert_object(
+                        id.context().clone(),
+                        Some(id.key().into()),
+                        metadata,
+                        stream::single("payload"),
+                        access_time,
+                    )
+                    .await
+                    .unwrap();
+            }
+            let service = AuthAwareService::new(storage, AuthContext::Disabled, true);
+            let response = object_patch(
+                service,
+                Xt(id),
+                RequestTime(access_time),
+                Json(MetadataUpdate {
+                    extend_expiry: ExpiryExtension::After {
+                        after: "1h".into(),
+                        from: ExpiryAnchor::Now,
+                    },
+                }),
+            )
+            .await
+            .into_response();
+            assert_eq!(response.status(), expected);
+            if expected == StatusCode::NOT_FOUND {
+                assert!(
+                    axum::body::to_bytes(response.into_body(), 1024)
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+        }
     }
 
     #[tokio::test]

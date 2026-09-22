@@ -308,7 +308,6 @@ impl StorageService {
     /// preserves the policy duration and every other part of the object.
     /// Returns whether the request was satisfied, the object was absent or expired,
     /// or the update was rejected. See [`SetExpiryResponse`] for details.
-
     pub async fn set_expiry(
         &self,
         id: ObjectId,

@@ -1,4 +1,4 @@
-use objectstore_service::backend::common::ExpiryTarget;
+use objectstore_service::backend::common::{ExpiryTarget, SetExpiryResponse};
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_service::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
@@ -114,7 +114,7 @@ impl AuthAwareService {
         id: ObjectId,
         target: ExpiryTarget,
         access_time: Timestamp,
-    ) -> ApiResult<Option<Timestamp>> {
+    ) -> ApiResult<SetExpiryResponse> {
         self.check_permission(Permission::ObjectWrite, id.context())?;
         Ok(self.service.set_expiry(id, target, access_time).await?)
     }

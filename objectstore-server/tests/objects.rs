@@ -214,6 +214,25 @@ async fn patch_extends_expiry() -> Result<()> {
 }
 
 #[tokio::test]
+async fn patch_missing_object_returns_not_found() -> Result<()> {
+    let server = test_server().await;
+    let client = reqwest::Client::new();
+    let url = server.url("/v1/objects/test/org=1/missing-expiry");
+    let response = client
+        .patch(&url)
+        .json(&serde_json::json!({"extend_expiry": {"after": "1d", "from": "now"}}))
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+    assert!(response.bytes().await?.is_empty());
+    assert_eq!(
+        client.get(&url).send().await?.status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn filename_with_slashes_is_sanitized() -> Result<()> {
     let server = test_server().await;
     let client = reqwest::Client::new();
