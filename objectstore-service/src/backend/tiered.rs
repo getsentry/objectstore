@@ -388,34 +388,19 @@ impl TieredStorage {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum ResumableBackendChoice {
-    LongTerm(String),
-}
+type LongTermBackendToken = BackendToken;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct TieredResumableToken {
-    backend: ResumableBackendChoice,
-    backend_token: BackendToken,
+    inner: LongTermBackendToken,
+    revision: String,
     total_length: u64,
     time_expires: Option<Timestamp>,
 }
 
 impl TieredResumableToken {
-    fn decode(id: &ObjectId, token: &BackendToken) -> Result<Self> {
-        let session: Self =
-            serde_json::from_str(token).map_err(|_| ErrorKind::UnknownUploadSession)?;
-        let ResumableBackendChoice::LongTerm(key) = &session.backend;
-        let suffix = key
-            .strip_prefix(id.key())
-            .and_then(|key| key.strip_prefix('/'))
-            .ok_or(ErrorKind::UnknownUploadSession)?;
-        if NonZeroU64::new(session.total_length).is_none() || uuid::Uuid::parse_str(suffix).is_err()
-        {
-            return Err(ErrorKind::UnknownUploadSession.into());
-        }
-        Ok(session)
+    fn decode(token: &BackendToken) -> Result<Self> {
+        serde_json::from_str(token).map_err(|_| ErrorKind::UnknownUploadSession.into())
     }
 }
 
@@ -441,7 +426,7 @@ impl Backend for TieredStorage {
         }
 
         let revision = new_long_term_revision(id);
-        let Some(backend_token) = self
+        let Some(inner) = self
             .inner
             .long_term
             .create_upload_session(&revision, metadata, total_length)
@@ -450,8 +435,8 @@ impl Backend for TieredStorage {
             return Ok(None);
         };
         let token = TieredResumableToken {
-            backend: ResumableBackendChoice::LongTerm(revision.key),
-            backend_token,
+            revision: revision.key,
+            inner,
             total_length: total_length.get(),
             time_expires: metadata.time_expires,
         };
@@ -470,11 +455,10 @@ impl Backend for TieredStorage {
         content_length: u64,
         stream: ClientStream,
     ) -> Result<UploadProgress> {
-        let session = TieredResumableToken::decode(id, token)?;
-        let ResumableBackendChoice::LongTerm(key) = &session.backend;
+        let session = TieredResumableToken::decode(token)?;
         let revision = ObjectId {
             context: id.context.clone(),
-            key: key.clone(),
+            key: session.revision.clone(),
         };
         let end = offset
             .checked_add(content_length)
@@ -490,13 +474,7 @@ impl Backend for TieredStorage {
             let progress = self
                 .inner
                 .long_term
-                .put_chunk(
-                    &revision,
-                    &session.backend_token,
-                    offset,
-                    content_length,
-                    stream,
-                )
+                .put_chunk(&revision, &session.inner, offset, content_length, stream)
                 .await?;
             return match progress {
                 UploadProgress::Incomplete { .. } => Ok(progress),
@@ -546,13 +524,7 @@ impl Backend for TieredStorage {
         let progress = self
             .inner
             .long_term
-            .put_chunk(
-                &revision,
-                &session.backend_token,
-                offset,
-                content_length,
-                stream,
-            )
+            .put_chunk(&revision, &session.inner, offset, content_length, stream)
             .await?;
         if progress != UploadProgress::Complete {
             return Ok(progress);
@@ -590,29 +562,27 @@ impl Backend for TieredStorage {
 
     #[tracing::instrument(level = "debug", fields(?id), skip_all)]
     async fn upload_offset(&self, id: &ObjectId, token: &BackendToken) -> Result<UploadProgress> {
-        let session = TieredResumableToken::decode(id, token)?;
-        let ResumableBackendChoice::LongTerm(key) = &session.backend;
+        let session = TieredResumableToken::decode(token)?;
         let revision = ObjectId {
             context: id.context.clone(),
-            key: key.clone(),
+            key: session.revision.clone(),
         };
         self.inner
             .long_term
-            .upload_offset(&revision, &session.backend_token)
+            .upload_offset(&revision, &session.inner)
             .await
     }
 
     #[tracing::instrument(level = "debug", fields(?id), skip_all)]
     async fn cancel_upload(&self, id: &ObjectId, token: &BackendToken) -> Result<()> {
-        let session = TieredResumableToken::decode(id, token)?;
-        let ResumableBackendChoice::LongTerm(key) = &session.backend;
+        let session = TieredResumableToken::decode(token)?;
         let revision = ObjectId {
             context: id.context.clone(),
-            key: key.clone(),
+            key: session.revision.clone(),
         };
         self.inner
             .long_term
-            .cancel_upload(&revision, &session.backend_token)
+            .cancel_upload(&revision, &session.inner)
             .await
     }
 
