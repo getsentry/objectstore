@@ -7,13 +7,14 @@
 //! The default serde representation preserves the `SystemTime` metadata format. Use
 //! [`Timestamp::as_rfc3339`] for HTTP headers and JSON fields containing RFC3339 strings.
 
+use std::borrow::Cow;
 use std::fmt;
 use std::ops::{Add, Sub};
 use std::str::FromStr;
 use std::time::{Duration, SystemTime};
 
 use humantime::TimestampError;
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 /// A whole-second Unix timestamp used for access time and expiration.
@@ -169,7 +170,7 @@ impl Serialize for Timestamp {
 
 impl<'de> Deserialize<'de> for Timestamp {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Self::try_from(SystemTime::deserialize(deserializer)?).map_err(de::Error::custom)
+        Self::try_from(SystemTime::deserialize(deserializer)?).map_err(serde::de::Error::custom)
     }
 }
 
@@ -213,8 +214,13 @@ impl Serialize for Rfc3339Timestamp {
 
 impl<'de> Deserialize<'de> for Rfc3339Timestamp {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = String::deserialize(deserializer)?;
-        value.parse().map_err(de::Error::custom)
+        // Plain `Cow::deserialize` always owns; `borrow` enables borrowing from the input.
+        #[derive(Deserialize)]
+        #[serde(transparent)]
+        struct BorrowedStr<'a>(#[serde(borrow)] Cow<'a, str>);
+
+        let BorrowedStr(value) = BorrowedStr::deserialize(deserializer)?;
+        value.parse().map_err(serde::de::Error::custom)
     }
 }
 

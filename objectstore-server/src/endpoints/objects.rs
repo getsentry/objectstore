@@ -20,7 +20,8 @@
 //! including its duration, as well as the payload and all other metadata.
 //! A satisfied request returns 204, including an already-sufficient deadline. An object
 //! observed absent or expired returns 404. Ineligible or conflicting updates return 409;
-//! backend failures use the normal service error responses.
+//! backend failures use the normal service error responses. Invalid timestamp or duration
+//! strings are rejected by JSON deserialization with 422.
 
 use std::fmt::Write as _;
 
@@ -34,11 +35,9 @@ use axum::{Json, Router};
 use objectstore_service::backend::common::{ExpiryTarget, SetExpiryResponse};
 use objectstore_service::error::ErrorKind;
 use objectstore_service::id::{ObjectContext, ObjectId};
-use objectstore_types::duration::parse_duration;
 use objectstore_types::headers::ExtValue;
 use objectstore_types::metadata::{ExpiryAnchor, ExpiryExtension, Metadata, MetadataUpdate};
 use objectstore_types::range::ContentRange;
-use objectstore_types::time::Timestamp;
 use serde::Serialize;
 
 use crate::auth::AuthAwareService;
@@ -111,28 +110,20 @@ async fn object_patch(
     Json(update): Json<MetadataUpdate>,
 ) -> ApiResult<StatusCode> {
     let target = match update.extend_expiry {
-        ExpiryExtension::At { at } => ExpiryTarget::At(
-            Timestamp::from_rfc3339(&at)
-                .map_err(|error| ApiError::map_client("invalid expiration timestamp", error))?,
-        ),
+        ExpiryExtension::At { at } => ExpiryTarget::At(at.into_inner()),
         ExpiryExtension::After {
             after,
             from: ExpiryAnchor::Now,
         } => {
-            let duration = parse_duration(&after)
-                .map_err(|error| ApiError::map_client("invalid expiration duration", error))?;
-            ExpiryTarget::At(access_time.checked_add(duration).ok_or_else(|| {
+            let at = access_time.checked_add(after).ok_or_else(|| {
                 ApiError::client("expiration deadline is outside supported range")
-            })?)
+            })?;
+            ExpiryTarget::At(at)
         }
         ExpiryExtension::After {
             after,
             from: ExpiryAnchor::Creation,
-        } => {
-            let duration = parse_duration(&after)
-                .map_err(|error| ApiError::map_client("invalid expiration duration", error))?;
-            ExpiryTarget::FromCreation(duration)
-        }
+        } => ExpiryTarget::FromCreation(after),
     };
 
     match service.set_expiry(id, target, access_time).await? {
@@ -370,6 +361,7 @@ mod tests {
     use objectstore_service::stream;
     use objectstore_types::metadata::ExpirationPolicy;
     use objectstore_types::scope::{Scope, Scopes};
+    use objectstore_types::time::Timestamp;
 
     use super::*;
     use crate::auth::AuthContext;
@@ -423,7 +415,7 @@ mod tests {
                 RequestTime(access_time),
                 Json(MetadataUpdate {
                     extend_expiry: ExpiryExtension::After {
-                        after: "1h".into(),
+                        after: Duration::from_hours(1),
                         from: ExpiryAnchor::Now,
                     },
                 }),
@@ -473,7 +465,7 @@ mod tests {
             RequestTime(access_time),
             Json(MetadataUpdate {
                 extend_expiry: ExpiryExtension::After {
-                    after: "30d".into(),
+                    after: Duration::from_secs(30 * 86400),
                     from: ExpiryAnchor::Creation,
                 },
             }),
@@ -497,22 +489,20 @@ mod tests {
             (
                 "absolute",
                 ExpiryExtension::At {
-                    at: (access_time + Duration::from_secs(120))
-                        .as_rfc3339()
-                        .to_string(),
+                    at: (access_time + Duration::from_secs(120)).as_rfc3339(),
                 },
             ),
             (
                 "now",
                 ExpiryExtension::After {
-                    after: "2m".into(),
+                    after: Duration::from_mins(2),
                     from: ExpiryAnchor::Now,
                 },
             ),
             (
                 "creation",
                 ExpiryExtension::After {
-                    after: "2m".into(),
+                    after: Duration::from_mins(2),
                     from: ExpiryAnchor::Creation,
                 },
             ),
@@ -586,9 +576,7 @@ mod tests {
             RequestTime(access_time),
             Json(MetadataUpdate {
                 extend_expiry: ExpiryExtension::At {
-                    at: (access_time + Duration::from_secs(120))
-                        .as_rfc3339()
-                        .to_string(),
+                    at: (access_time + Duration::from_secs(120)).as_rfc3339(),
                 },
             }),
         )

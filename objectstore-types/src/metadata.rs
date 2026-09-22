@@ -58,7 +58,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::duration::{ParseDurationError, format_duration, parse_duration};
 use crate::headers;
-use crate::time::{InvalidTimestamp, Timestamp};
+use crate::time::{InvalidTimestamp, Rfc3339Timestamp, Timestamp};
 
 /// The custom HTTP header that contains the serialized [`ExpirationPolicy`].
 pub const HEADER_EXPIRATION: &str = "x-sn-expiration";
@@ -104,15 +104,16 @@ pub struct MetadataUpdate {
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(untagged, deny_unknown_fields)]
 pub enum ExpiryExtension {
-    /// An RFC3339 deadline, parsed by the endpoint with [`Timestamp::from_rfc3339`].
+    /// An RFC3339 deadline, validated during deserialization.
     At {
         /// The requested absolute deadline.
-        at: String,
+        at: Rfc3339Timestamp,
     },
     /// A duration relative to an explicit anchor.
     After {
         /// A duration in the format documented by [`crate::duration`].
-        after: String,
+        #[serde(with = "crate::duration")]
+        after: Duration,
         /// The timestamp against which the duration is resolved.
         from: ExpiryAnchor,
     },
@@ -634,20 +635,20 @@ mod tests {
             (
                 r#"{"extend_expiry":{"at":"2026-10-16T12:00:00Z"}}"#,
                 ExpiryExtension::At {
-                    at: "2026-10-16T12:00:00Z".into(),
+                    at: "2026-10-16T12:00:00Z".parse().unwrap(),
                 },
             ),
             (
                 r#"{"extend_expiry":{"after":"30d","from":"creation"}}"#,
                 ExpiryExtension::After {
-                    after: "30d".into(),
+                    after: Duration::from_secs(30 * 86400),
                     from: ExpiryAnchor::Creation,
                 },
             ),
             (
                 r#"{"extend_expiry":{"after":"0s","from":"now"}}"#,
                 ExpiryExtension::After {
-                    after: "0s".into(),
+                    after: Duration::ZERO,
                     from: ExpiryAnchor::Now,
                 },
             ),
@@ -656,12 +657,15 @@ mod tests {
         for (json, expected) in cases {
             let update: MetadataUpdate = serde_json::from_str(json).unwrap();
             assert_eq!(update.extend_expiry, expected);
+            assert_eq!(serde_json::to_string(&update).unwrap(), json);
         }
     }
 
     #[test]
     fn metadata_update_rejects_invalid_structures() {
         let cases = [
+            r#"{"extend_expiry":{"at":"not a timestamp"}}"#,
+            r#"{"extend_expiry":{"after":"not a duration","from":"now"}}"#,
             r#"{}"#,
             r#"{"extend_expiry":null}"#,
             r#"{"extend_expiry":{}}"#,
