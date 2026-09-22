@@ -19,7 +19,7 @@ use objectstore_types::range::{ByteRange, ContentRange};
 use objectstore_types::resumable::{SessionToken as EncryptedSessionToken, UploadProgress};
 use objectstore_types::time::Timestamp;
 
-use crate::backend::common::{Backend, ExpiryTarget};
+use crate::backend::common::{Backend, ExpiryTarget, SetExpiryResponse};
 use crate::backend::counting::CountingBackend;
 use crate::background::RenewalScheduler;
 use crate::concurrency::ConcurrencyLimiter;
@@ -304,13 +304,14 @@ impl StorageService {
 
     /// Extends an existing TTL or TTI object's deadline.
     ///
-    /// Returns the resolved requested deadline when applied or already satisfied.
+    /// Returns whether the request was satisfied, the object was absent or expired,
+    /// or the update was rejected. See [`SetExpiryResponse`] for details.
     pub async fn set_expiry(
         &self,
         id: ObjectId,
         target: ExpiryTarget,
         access_time: Timestamp,
-    ) -> Result<Option<Timestamp>> {
+    ) -> Result<SetExpiryResponse> {
         let inner = Arc::clone(&self.inner);
         self.spawn("set_expiry", async move {
             inner.set_expiry(&id, target, access_time).await
@@ -871,7 +872,7 @@ mod tests {
                 .set_expiry(id.clone(), ExpiryTarget::At(requested), Timestamp::now())
                 .await
                 .unwrap(),
-            Some(requested)
+            SetExpiryResponse::Satisfied(requested)
         );
         assert_eq!(
             service
@@ -937,7 +938,7 @@ mod tests {
             id: &ObjectId,
             target: ExpiryTarget,
             access_time: Timestamp,
-        ) -> Result<Option<Timestamp>> {
+        ) -> Result<SetExpiryResponse> {
             *self.access_time.lock().unwrap() = Some(access_time);
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.started.notify_one();
@@ -1119,7 +1120,7 @@ mod tests {
             id: &ObjectId,
             target: ExpiryTarget,
             access_time: Timestamp,
-        ) -> Result<Option<Timestamp>> {
+        ) -> Result<SetExpiryResponse> {
             if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 assert!(!self.panic, "intentional renewal panic");
                 return Err(ErrorKind::BackendFailure.into());

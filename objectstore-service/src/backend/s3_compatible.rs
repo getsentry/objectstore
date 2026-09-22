@@ -16,6 +16,7 @@ use reqwest::{Body, IntoUrl, Method, RequestBuilder, Response, StatusCode};
 use super::extensions::{ResponseExt, SendTraced};
 use crate::backend::common::{
     self, Backend, DeleteResponse, ExpiryTarget, GetResponse, MetadataResponse, PutResponse,
+    SetExpiryResponse,
 };
 use crate::backend::extensions::ReqwestResultExt;
 use crate::change_stream::{
@@ -304,8 +305,9 @@ where
         &self,
         id: &ObjectId,
         metadata: &Metadata,
+        deadline: Timestamp,
         etag: &HeaderValue,
-    ) -> Result<bool> {
+    ) -> Result<SetExpiryResponse> {
         // NB: Meta updates require CopyObject + REPLACE along with *all* metadata. See
         // https://docs.aws.amazon.com/AmazonS3/latest/API/API_CopyObject.html
         let request = self
@@ -324,12 +326,16 @@ where
 
         let response = request.send_traced().await;
         let response = response.reqwest_context("updating S3 expiration")?;
-        if matches!(
-            response.status(),
-            StatusCode::NOT_FOUND | StatusCode::CONFLICT | StatusCode::PRECONDITION_FAILED
-        ) {
+        let outcome = match response.status() {
+            StatusCode::NOT_FOUND => Some(SetExpiryResponse::NotFound),
+            StatusCode::CONFLICT | StatusCode::PRECONDITION_FAILED => {
+                Some(SetExpiryResponse::Rejected)
+            }
+            _ => None,
+        };
+        if let Some(outcome) = outcome {
             response.drain_body().await;
-            return Ok(false);
+            return Ok(outcome);
         }
         response
             .check_error("updating S3 expiration")
@@ -337,7 +343,7 @@ where
             .drain_body()
             .await;
 
-        Ok(true)
+        Ok(SetExpiryResponse::Satisfied(deadline))
     }
 }
 
@@ -439,24 +445,24 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         id: &ObjectId,
         target: ExpiryTarget,
         access_time: Timestamp,
-    ) -> Result<Option<Timestamp>> {
+    ) -> Result<SetExpiryResponse> {
         let Some((mut metadata, _, response)) = self
             .request_object(Method::HEAD, id, access_time, None)
             .await?
         else {
-            return Ok(None);
+            return Ok(SetExpiryResponse::NotFound);
         };
         let Some(current_expiry) = metadata.time_expires else {
             response.drain_body().await;
-            return Ok(None);
+            return Ok(SetExpiryResponse::Rejected);
         };
         let Some(expire_at) = target.resolve(metadata.time_created) else {
             response.drain_body().await;
-            return Ok(None);
+            return Ok(SetExpiryResponse::Rejected);
         };
         if current_expiry >= expire_at {
             response.drain_body().await;
-            return Ok(Some(expire_at)); // already satisfied
+            return Ok(SetExpiryResponse::Satisfied(expire_at)); // already satisfied
         }
 
         let etag = response.headers().get(reqwest::header::ETAG).cloned();
@@ -466,12 +472,14 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         })?;
 
         metadata.time_expires = Some(expire_at);
-        let applied = self.update_metadata(id, &metadata, &etag).await?;
-        if applied {
+        let outcome = self
+            .update_metadata(id, &metadata, expire_at, &etag)
+            .await?;
+        if matches!(outcome, SetExpiryResponse::Satisfied(_)) {
             self.change_stream.update(id, Some(expire_at));
         }
 
-        Ok(applied.then_some(expire_at))
+        Ok(outcome)
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
@@ -584,11 +592,12 @@ mod tests {
 
     #[tokio::test]
     async fn update_metadata_uses_conditional_s3_copy() {
+        let deadline = Timestamp::now() + Duration::from_hours(1);
         for (status, expected) in [
-            ("200 OK", true),
-            ("404 Not Found", false),
-            ("409 Conflict", false),
-            ("412 Precondition Failed", false),
+            ("200 OK", SetExpiryResponse::Satisfied(deadline)),
+            ("404 Not Found", SetExpiryResponse::NotFound),
+            ("409 Conflict", SetExpiryResponse::Rejected),
+            ("412 Precondition Failed", SetExpiryResponse::Rejected),
         ] {
             let (endpoint, request_rx, server) = start_copy_server(status);
             let backend = S3CompatibleBackend::without_token(
@@ -604,7 +613,11 @@ mod tests {
                 backend
                     .update_metadata(
                         &make_id(),
-                        &Metadata::default(),
+                        &Metadata {
+                            time_expires: Some(deadline),
+                            ..Default::default()
+                        },
+                        deadline,
                         &HeaderValue::from_static("\"etag\""),
                     )
                     .await

@@ -14,7 +14,7 @@ use std::time::Duration;
 use objectstore_types::time::Timestamp;
 use tokio::sync::{Notify, mpsc};
 
-use crate::backend::common::{Backend, ExpiryTarget};
+use crate::backend::common::{Backend, ExpiryTarget, SetExpiryResponse};
 use crate::concurrency::ConcurrencyLimiter;
 use crate::error::ErrorKind;
 use crate::id::ObjectId;
@@ -141,11 +141,11 @@ impl RenewalWorker {
                 .set_expiry(&id, ExpiryTarget::At(expire_at), access_time)
                 .await
             {
-                Ok(Some(_)) => {
+                Ok(SetExpiryResponse::Satisfied(_)) => {
                     objectstore_metrics::count!("service.expiry_renewal", outcome = "applied");
                     Ok(())
                 }
-                Ok(None) => {
+                Ok(SetExpiryResponse::NotFound | SetExpiryResponse::Rejected) => {
                     objectstore_metrics::count!(
                         "service.expiry_renewal",
                         outcome = "skipped",

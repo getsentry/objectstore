@@ -369,7 +369,7 @@ mod tests {
     use objectstore_types::time::Timestamp;
 
     use super::*;
-    use crate::backend::common::{ExpiryTarget, PutResponse};
+    use crate::backend::common::{ExpiryTarget, PutResponse, SetExpiryResponse};
     use crate::backend::in_memory::InMemoryBackend;
     use crate::backend::testing::{Hooks, TestBackend};
     use crate::concurrency::ConcurrencyLimiter;
@@ -417,7 +417,7 @@ mod tests {
             id: &ObjectId,
             target: ExpiryTarget,
             access_time: Timestamp,
-        ) -> Result<Option<Timestamp>> {
+        ) -> Result<SetExpiryResponse> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.started.notify_one();
             self.resume.notified().await;

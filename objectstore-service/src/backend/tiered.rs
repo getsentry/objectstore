@@ -127,8 +127,8 @@ use serde::{Deserialize, Serialize};
 use crate::backend::changelog::{Change, ChangeGuard, ChangeLog, ChangeManager, ChangePhase};
 use crate::backend::common::{
     Backend, DeleteResponse, ExpiryTarget, GetResponse, HighVolumeBackend, MetadataResponse,
-    MultipartUploadBackend, PutResponse, TieredGet, TieredMetadata, TieredUpdate, TieredWrite,
-    Tombstone,
+    MultipartUploadBackend, PutResponse, SetExpiryResponse, TieredGet, TieredMetadata,
+    TieredUpdate, TieredWrite, Tombstone,
 };
 use crate::backend::{HighVolumeStorageConfig, MultipartUploadStorageConfig};
 use crate::error::{Error, ErrorKind, Result, ResultExt as _};
@@ -544,14 +544,14 @@ impl Backend for TieredStorage {
         id: &ObjectId,
         target: ExpiryTarget,
         access_time: Timestamp,
-    ) -> Result<Option<Timestamp>> {
+    ) -> Result<SetExpiryResponse> {
         match self
             .inner
             .high_volume
             .get_tiered_metadata(id, access_time)
             .await?
         {
-            TieredMetadata::NotFound => Ok(None),
+            TieredMetadata::NotFound => Ok(SetExpiryResponse::NotFound),
             TieredMetadata::Object(_) => {
                 self.inner
                     .high_volume
@@ -561,13 +561,16 @@ impl Backend for TieredStorage {
             TieredMetadata::Tombstone(tombstone) => {
                 // Extend LT first. Extending the redirect first could leave it
                 // alive after the blob failed to extend and was reclaimed.
-                let Some(deadline) = self
+                let deadline = match self
                     .inner
                     .long_term
                     .set_expiry(&tombstone.target, target, access_time)
                     .await?
-                else {
-                    return Ok(None);
+                {
+                    SetExpiryResponse::Satisfied(deadline) => deadline,
+                    outcome @ (SetExpiryResponse::NotFound | SetExpiryResponse::Rejected) => {
+                        return Ok(outcome);
+                    }
                 };
 
                 // NOTE: If this fails, LT may remain extended while the redirect
@@ -1066,10 +1069,10 @@ mod tests {
             id: &ObjectId,
             target: ExpiryTarget,
             access_time: Timestamp,
-        ) -> Result<Option<Timestamp>> {
+        ) -> Result<SetExpiryResponse> {
             self.events.lock().unwrap().push(self.label);
             if self.reject {
-                Ok(None)
+                Ok(SetExpiryResponse::Rejected)
             } else {
                 inner.set_expiry(id, target, access_time).await
             }
@@ -1082,10 +1085,10 @@ mod tests {
             current: Option<&ObjectId>,
             update: TieredUpdate,
             access_time: Timestamp,
-        ) -> Result<Option<Timestamp>> {
+        ) -> Result<SetExpiryResponse> {
             self.events.lock().unwrap().push(self.label);
             if self.reject {
-                Ok(None)
+                Ok(SetExpiryResponse::Rejected)
             } else {
                 inner
                     .compare_and_update(id, current, update, access_time)
@@ -1182,7 +1185,7 @@ mod tests {
                 )
                 .await
                 .unwrap(),
-            Some(requested)
+            SetExpiryResponse::Satisfied(requested)
         );
         assert_eq!(events.lock().unwrap().as_slice(), &["lt", "hv"]);
         assert_eq!(
@@ -1275,7 +1278,7 @@ mod tests {
                 )
                 .await
                 .unwrap(),
-            Some(resolved)
+            SetExpiryResponse::Satisfied(resolved)
         );
         let (metadata, payload) = hv.inner.get(&id).expect_object();
         assert_eq!(metadata.time_created, Some(new_created));
@@ -1301,7 +1304,7 @@ mod tests {
                 )
                 .await
                 .unwrap(),
-            None
+            SetExpiryResponse::Rejected
         );
         assert_eq!(events.lock().unwrap().as_slice(), &["lt", "hv"]);
         assert_eq!(
@@ -1346,9 +1349,34 @@ mod tests {
                 )
                 .await
                 .unwrap(),
-            None
+            SetExpiryResponse::Rejected
         );
         assert_eq!(events.lock().unwrap().as_slice(), &["lt"]);
+    }
+
+    #[tokio::test]
+    async fn expiry_not_found() {
+        for missing_blob in [false, true] {
+            let (storage, hv, lt, events) = tiered_with_expiry_hooks(false, false);
+            let id = make_id("tiered-expiry-missing");
+            let target = new_long_term_revision(&id);
+            let access_time = Timestamp::now();
+            let deadline = access_time + Duration::from_hours(1);
+            if missing_blob {
+                seed_redirect(&hv.inner, &lt.inner, &id, &target, deadline).await;
+                lt.inner.delete_object(&target, access_time).await.unwrap();
+            }
+
+            assert_eq!(
+                storage
+                    .set_expiry(&id, ExpiryTarget::At(deadline), access_time)
+                    .await
+                    .unwrap(),
+                SetExpiryResponse::NotFound
+            );
+            let expected: &[&str] = if missing_blob { &["lt"] } else { &[] };
+            assert_eq!(events.lock().unwrap().as_slice(), expected);
+        }
     }
 
     // --- new_long_term_revision tests ---

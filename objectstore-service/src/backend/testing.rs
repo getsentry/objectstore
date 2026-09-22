@@ -48,8 +48,8 @@ use objectstore_types::resumable::UploadProgress;
 
 use crate::backend::common::{
     Backend, DeleteResponse, ExpiryTarget, GetResponse, HighVolumeBackend, MetadataResponse,
-    MultipartUploadBackend, PutResponse, TieredGet, TieredMetadata, TieredUpdate, TieredWrite,
-    Tombstone,
+    MultipartUploadBackend, PutResponse, SetExpiryResponse, TieredGet, TieredMetadata,
+    TieredUpdate, TieredWrite, Tombstone,
 };
 use crate::backend::in_memory::InMemoryBackend;
 use crate::error::Result;
@@ -118,7 +118,7 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         id: &ObjectId,
         target: ExpiryTarget,
         access_time: Timestamp,
-    ) -> Result<Option<Timestamp>> {
+    ) -> Result<SetExpiryResponse> {
         inner.set_expiry(id, target, access_time).await
     }
 
@@ -206,7 +206,7 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         current: Option<&ObjectId>,
         update: TieredUpdate,
         access_time: Timestamp,
-    ) -> Result<Option<Timestamp>> {
+    ) -> Result<SetExpiryResponse> {
         inner
             .compare_and_update(id, current, update, access_time)
             .await
@@ -419,7 +419,7 @@ impl<H: Hooks> Backend for TestBackend<H> {
         id: &ObjectId,
         target: ExpiryTarget,
         access_time: Timestamp,
-    ) -> Result<Option<Timestamp>> {
+    ) -> Result<SetExpiryResponse> {
         self.hooks
             .set_expiry(&self.inner, id, target, access_time)
             .await
@@ -529,7 +529,7 @@ impl<H: Hooks> HighVolumeBackend for TestBackend<H> {
         current: Option<&ObjectId>,
         update: TieredUpdate,
         access_time: Timestamp,
-    ) -> Result<Option<Timestamp>> {
+    ) -> Result<SetExpiryResponse> {
         self.hooks
             .compare_and_update(&self.inner, id, current, update, access_time)
             .await

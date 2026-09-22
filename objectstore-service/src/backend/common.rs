@@ -34,6 +34,23 @@ pub type MetadataResponse = Option<Metadata>;
 /// Backend response for delete operations.
 pub type DeleteResponse = ();
 
+/// The outcome of an expiry update.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SetExpiryResponse {
+    /// The deadline was extended or already satisfied the request.
+    ///
+    /// Contains the resolved requested deadline, not necessarily the stored deadline.
+    Satisfied(Timestamp),
+    /// The object or redirect was observed to be absent or expired.
+    NotFound,
+    /// The update could not be satisfied.
+    ///
+    /// The entry is non-expiring, lacks required creation metadata, or conflicts
+    /// with the conditional update. A failed conditional write does not establish
+    /// absence, even if a concurrent deletion caused it to fail.
+    Rejected,
+}
+
 /// The requested minimum deadline for an expiry update.
 ///
 /// [`ExpiryTarget::At`] is already resolved. [`ExpiryTarget::FromCreation`]
@@ -111,17 +128,16 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// This only changes the stored deadline: the expiration policy, duration,
     /// payload, and all other metadata remain unchanged.
     ///
-    /// Returns the resolved requested deadline when the deadline was extended or
-    /// was already at least as late. Returns `None` when the object is absent,
-    /// expired, non-expiring, changed concurrently, or lacks the creation time
-    /// needed to resolve the target. The returned deadline is not necessarily the
-    /// stored deadline.
+    /// Returns [`SetExpiryResponse::Satisfied`] when extended or already satisfied,
+    /// [`SetExpiryResponse::NotFound`] when observed absent or expired, or
+    /// [`SetExpiryResponse::Rejected`] when ineligible or conflicting.
+    /// Backend failures are returned as errors.
     async fn set_expiry(
         &self,
         id: &ObjectId,
         target: ExpiryTarget,
         access_time: Timestamp,
-    ) -> Result<Option<Timestamp>>;
+    ) -> Result<SetExpiryResponse>;
 
     /// Deletes the object at the given path.
     async fn delete_object(&self, id: &ObjectId, access_time: Timestamp) -> Result<DeleteResponse>;
@@ -357,17 +373,18 @@ pub trait HighVolumeBackend: Backend {
     /// a live redirect to exactly that target. Updates never authorize creation
     /// of an absent row.
     ///
-    /// Returns the resolved requested deadline when the update was applied or
-    /// already satisfied. Returns `None` for an absent, expired, non-expiring,
-    /// conflicting, or unresolvable entry. Redirects can only resolve absolute
-    /// targets because tombstones do not store creation time.
+    /// Returns [`SetExpiryResponse::Satisfied`] when applied or already satisfied,
+    /// [`SetExpiryResponse::NotFound`] when observed absent or expired, or
+    /// [`SetExpiryResponse::Rejected`] for an ineligible entry or failed condition.
+    /// Redirects can only resolve absolute targets because tombstones do not store
+    /// creation time. Backend failures are returned as errors.
     async fn compare_and_update(
         &self,
         id: &ObjectId,
         current: Option<&ObjectId>,
         update: TieredUpdate,
         access_time: Timestamp,
-    ) -> Result<Option<Timestamp>>;
+    ) -> Result<SetExpiryResponse>;
 }
 
 /// Information about a redirect tombstone in the high-volume backend.

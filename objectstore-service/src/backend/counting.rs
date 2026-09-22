@@ -24,7 +24,7 @@ use objectstore_types::time::Timestamp;
 
 use crate::backend::common::{
     Backend, DeleteResponse, ExpiryTarget, GetResponse, MetadataResponse, MultipartUploadBackend,
-    PutResponse,
+    PutResponse, SetExpiryResponse,
 };
 use crate::error::Result;
 use crate::id::ObjectId;
@@ -108,7 +108,7 @@ impl Backend for CountingBackend {
         id: &ObjectId,
         target: ExpiryTarget,
         access_time: Timestamp,
-    ) -> Result<Option<Timestamp>> {
+    ) -> Result<SetExpiryResponse> {
         count(&id.context.usecase);
         self.inner.set_expiry(id, target, access_time).await
     }

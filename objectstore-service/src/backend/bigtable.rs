@@ -47,7 +47,8 @@ use tracing::Instrument;
 
 use crate::backend::common::{
     Backend, DeleteResponse, ExpiryTarget, GetResponse, HighVolumeBackend, MetadataResponse,
-    PutResponse, TieredGet, TieredMetadata, TieredUpdate, TieredWrite, Tombstone,
+    PutResponse, SetExpiryResponse, TieredGet, TieredMetadata, TieredUpdate, TieredWrite,
+    Tombstone,
 };
 use crate::change_stream::{
     ChangeStream, ChangeStreamFactory, CostTrackerStreamConfig, flush_change_stream,
@@ -1037,7 +1038,7 @@ impl Backend for BigTableBackend {
         id: &ObjectId,
         target: ExpiryTarget,
         access_time: Timestamp,
-    ) -> Result<Option<Timestamp>> {
+    ) -> Result<SetExpiryResponse> {
         self.compare_and_update(id, None, TieredUpdate::SetExpiry(target), access_time)
             .await
     }
@@ -1212,7 +1213,7 @@ impl HighVolumeBackend for BigTableBackend {
         current: Option<&ObjectId>,
         update: TieredUpdate,
         access_time: Timestamp,
-    ) -> Result<Option<Timestamp>> {
+    ) -> Result<SetExpiryResponse> {
         let TieredUpdate::SetExpiry(expiry_target) = update;
         let path = id.as_storage_path().to_string().into_bytes();
 
@@ -1222,7 +1223,7 @@ impl HighVolumeBackend for BigTableBackend {
             .read_row(&path, "set_expiry", access_time, None)
             .await?
         else {
-            return Ok(None);
+            return Ok(SetExpiryResponse::NotFound);
         };
 
         let (expire_at, predicate, mutations): (_, _, Vec<_>) = match row {
@@ -1232,20 +1233,20 @@ impl HighVolumeBackend for BigTableBackend {
                 expiry_micros,
             } => {
                 if current.is_some() {
-                    return Ok(None); // wrong row kind
+                    return Ok(SetExpiryResponse::Rejected); // wrong row kind
                 }
                 let Some(old_expiry) = metadata.time_expires else {
-                    return Ok(None);
+                    return Ok(SetExpiryResponse::Rejected);
                 };
 
                 if old_expiry < access_time {
-                    return Ok(None); // already expired
+                    return Ok(SetExpiryResponse::NotFound); // already expired
                 }
                 let Some(expire_at) = expiry_target.resolve(metadata.time_created) else {
-                    return Ok(None);
+                    return Ok(SetExpiryResponse::Rejected);
                 };
                 if old_expiry >= expire_at {
-                    return Ok(Some(expire_at)); // already satisfied
+                    return Ok(SetExpiryResponse::Satisfied(expire_at)); // already satisfied
                 }
 
                 // Observing a live cell here is not atomic with wall-clock
@@ -1263,21 +1264,24 @@ impl HighVolumeBackend for BigTableBackend {
                 expiry_micros,
             } => {
                 let Some(expected) = current else {
-                    return Ok(None); // wrong row kind
+                    return Ok(SetExpiryResponse::Rejected); // wrong row kind
                 };
                 let Some(old_expiry) = time_expires else {
-                    return Ok(None);
+                    return Ok(SetExpiryResponse::Rejected);
                 };
 
                 let redirect_target = parse_redirect_target(&target, id)?;
-                if redirect_target != *expected || old_expiry < access_time {
-                    return Ok(None); // wrong target or already expired
+                if old_expiry < access_time {
+                    return Ok(SetExpiryResponse::NotFound);
+                }
+                if redirect_target != *expected {
+                    return Ok(SetExpiryResponse::Rejected); // wrong target
                 }
                 let Some(expire_at) = expiry_target.resolve(None) else {
-                    return Ok(None);
+                    return Ok(SetExpiryResponse::Rejected);
                 };
                 if old_expiry >= expire_at {
-                    return Ok(Some(expire_at)); // already satisfied
+                    return Ok(SetExpiryResponse::Satisfied(expire_at)); // already satisfied
                 }
 
                 let predicate =
@@ -1298,7 +1302,11 @@ impl HighVolumeBackend for BigTableBackend {
             self.change_stream.update(id, Some(expire_at));
         }
 
-        Ok(applied.then_some(expire_at))
+        Ok(if applied {
+            SetExpiryResponse::Satisfied(expire_at)
+        } else {
+            SetExpiryResponse::Rejected
+        })
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
@@ -1846,7 +1854,7 @@ mod tests {
         ] {
             assert_eq!(
                 backend.set_expiry(&id, target, Timestamp::now()).await?,
-                Some(requested)
+                SetExpiryResponse::Satisfied(requested)
             );
         }
         assert_eq!(
@@ -1868,6 +1876,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_expiry_outcomes() -> Result<()> {
+        let backend = create_test_backend().await?;
+        let access_time = Timestamp::now();
+        let deadline = access_time + Duration::from_hours(1);
+        for (expiry, expected) in [
+            (None, SetExpiryResponse::Rejected),
+            (
+                Some(access_time - Duration::from_secs(1)),
+                SetExpiryResponse::NotFound,
+            ),
+            (Some(deadline), SetExpiryResponse::Rejected),
+        ] {
+            let id = make_id();
+            let metadata = Metadata {
+                time_expires: expiry,
+                ..Default::default()
+            };
+            create_object(&backend, &id, &metadata, b"payload", access_time).await?;
+            assert_eq!(
+                backend
+                    .set_expiry(
+                        &id,
+                        ExpiryTarget::FromCreation(Duration::from_hours(2)),
+                        access_time
+                    )
+                    .await?,
+                expected
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_expiry_conflict() -> Result<()> {
         let backend = create_test_backend().await?;
         let missing = make_id();
@@ -1879,7 +1920,7 @@ mod tests {
                     Timestamp::now()
                 )
                 .await?,
-            None
+            SetExpiryResponse::NotFound
         );
 
         let id = make_id();
@@ -1951,7 +1992,7 @@ mod tests {
                     Timestamp::now(),
                 )
                 .await?,
-            None
+            SetExpiryResponse::Rejected
         );
         assert_eq!(
             backend
@@ -1962,7 +2003,7 @@ mod tests {
                     Timestamp::now()
                 )
                 .await?,
-            Some(later)
+            SetExpiryResponse::Satisfied(later)
         );
         let requested = old_expiry + Duration::from_mins(30);
         assert_eq!(
@@ -1974,7 +2015,7 @@ mod tests {
                     Timestamp::now(),
                 )
                 .await?,
-            Some(requested)
+            SetExpiryResponse::Satisfied(requested)
         );
         let TieredMetadata::Tombstone(tombstone) =
             backend.get_tiered_metadata(&id, Timestamp::now()).await?
@@ -2589,7 +2630,7 @@ mod tests {
                     Timestamp::now()
                 )
                 .await?,
-            Some(requested)
+            SetExpiryResponse::Satisfied(requested)
         );
 
         // After extension, the row uses the requested timestamp.

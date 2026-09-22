@@ -30,6 +30,7 @@ use tokio_util::io::{ReaderStream, StreamReader};
 
 use crate::backend::common::{
     Backend, DeleteResponse, ExpiryTarget, GetResponse, MultipartUploadBackend, PutResponse,
+    SetExpiryResponse,
 };
 use crate::change_stream::{
     ChangeStream, ChangeStreamFactory, CostTrackerStreamConfig, flush_change_stream,
@@ -216,12 +217,12 @@ impl Backend for LocalFsBackend {
         id: &ObjectId,
         target: ExpiryTarget,
         access_time: Timestamp,
-    ) -> Result<Option<Timestamp>> {
+    ) -> Result<SetExpiryResponse> {
         let _guard = self.locks.acquire(id).await?;
 
         let path = self.path(id);
         let Some(object) = ObjectFile::try_open(&path, access_time).await? else {
-            return Ok(None);
+            return Ok(SetExpiryResponse::NotFound);
         };
         let ObjectFile {
             mut metadata,
@@ -230,13 +231,13 @@ impl Backend for LocalFsBackend {
         } = object;
 
         let Some(current_expiry) = metadata.time_expires else {
-            return Ok(None);
+            return Ok(SetExpiryResponse::Rejected);
         };
         let Some(expire_at) = target.resolve(metadata.time_created) else {
-            return Ok(None);
+            return Ok(SetExpiryResponse::Rejected);
         };
         if current_expiry >= expire_at {
-            return Ok(Some(expire_at)); // already satisfied
+            return Ok(SetExpiryResponse::Satisfied(expire_at)); // already satisfied
         }
         metadata.time_expires = Some(expire_at);
 
@@ -251,7 +252,7 @@ impl Backend for LocalFsBackend {
 
         self.change_stream.update(id, Some(expire_at));
 
-        Ok(Some(expire_at))
+        Ok(SetExpiryResponse::Satisfied(expire_at))
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
@@ -970,7 +971,7 @@ mod tests {
                 )
                 .await
                 .unwrap(),
-            None
+            SetExpiryResponse::NotFound
         );
         let descendant = ObjectId::new(id.context.clone(), "foo/bar".into());
         backend
@@ -1113,7 +1114,7 @@ mod tests {
                     .set_expiry(&id, target, Timestamp::now())
                     .await
                     .unwrap(),
-                Some(requested)
+                SetExpiryResponse::Satisfied(requested)
             );
         }
         let (updated, _, payload) = backend
@@ -1160,7 +1161,7 @@ mod tests {
                 )
                 .await
                 .unwrap(),
-            None
+            SetExpiryResponse::NotFound
         );
     }
 
