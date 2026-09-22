@@ -1,6 +1,5 @@
 use std::time::{Duration, SystemTime};
 
-use objectstore_types::duration;
 use objectstore_types::metadata::{self, ExpiryAnchor, MetadataUpdate};
 use objectstore_types::time::Timestamp;
 
@@ -29,15 +28,14 @@ impl ExpiryExtension {
             Self::At(at) => metadata::ExpiryExtension::At {
                 at: Timestamp::try_from(at)
                     .map_err(metadata::Error::ExpirationTime)?
-                    .as_rfc3339()
-                    .to_string(),
+                    .as_rfc3339(),
             },
             Self::FromCreation(after) => metadata::ExpiryExtension::After {
-                after: duration::format_duration(after).to_string(),
+                after,
                 from: ExpiryAnchor::Creation,
             },
             Self::FromNow(after) => metadata::ExpiryExtension::After {
-                after: duration::format_duration(after).to_string(),
+                after,
                 from: ExpiryAnchor::Now,
             },
         };
@@ -114,20 +112,20 @@ mod tests {
             (
                 ExpiryExtension::At(SystemTime::UNIX_EPOCH + Duration::from_millis(1500)),
                 metadata::ExpiryExtension::At {
-                    at: "1970-01-01T00:00:02Z".into(),
+                    at: "1970-01-01T00:00:02Z".parse().unwrap(),
                 },
             ),
             (
                 ExpiryExtension::FromCreation(Duration::from_millis(1500)),
                 metadata::ExpiryExtension::After {
-                    after: "1s".into(),
+                    after: Duration::from_millis(1500),
                     from: ExpiryAnchor::Creation,
                 },
             ),
             (
                 ExpiryExtension::FromNow(Duration::ZERO),
                 metadata::ExpiryExtension::After {
-                    after: "0s".into(),
+                    after: Duration::ZERO,
                     from: ExpiryAnchor::Now,
                 },
             ),
