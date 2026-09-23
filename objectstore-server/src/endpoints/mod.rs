@@ -16,11 +16,12 @@
 //! | `GET`    | `/v1/objects/{usecase}/{scopes}/{*key}`   | Retrieve object              |
 //! | `HEAD`   | `/v1/objects/{usecase}/{scopes}/{*key}`   | Retrieve metadata only       |
 //! | `PUT`    | `/v1/objects/{usecase}/{scopes}/{*key}`   | Insert or overwrite with key |
+//! | `PATCH`  | `/v1/objects/{usecase}/{scopes}/{*key}`   | Extend expiry                |
 //! | `DELETE` | `/v1/objects/{usecase}/{scopes}/{*key}`   | Delete object                |
 //! | `POST`   | `/v1/objects:batch/{usecase}/{scopes}/`   | Batch operations (multipart) |
 //!
 //! Object metadata travels in request and response headers; see
-//! [`objectstore_types::metadata`] for the mapping.
+//! [`objectstore_types::metadata`] for the mapping and the separate JSON update contract.
 //!
 //! # Resumable Upload Endpoints
 //!

@@ -54,6 +54,10 @@ pub enum ApiError {
         cause: Option<Box<dyn Error + Send + Sync>>,
     },
 
+    /// The requested operation was valid but could not be satisfied.
+    #[error("{0}")]
+    Conflict(Cow<'static, str>),
+
     /// Authorization/authentication errors.
     #[error("auth error: {0}")]
     Auth(#[from] AuthError),
@@ -97,6 +101,11 @@ impl ApiError {
         }
     }
 
+    /// Creates a conflict error with a client-safe explanation.
+    pub fn conflict(context: impl Into<Cow<'static, str>>) -> Self {
+        Self::Conflict(context.into())
+    }
+
     /// Creates an internal server error with context and an underlying cause.
     pub fn internal<E>(context: impl Into<Cow<'static, str>>, cause: E) -> Self
     where
@@ -112,6 +121,7 @@ impl ApiError {
     pub fn status(&self) -> StatusCode {
         match &self {
             ApiError::Client { .. } => StatusCode::BAD_REQUEST,
+            ApiError::Conflict(_) => StatusCode::CONFLICT,
 
             ApiError::Batch(BatchError::BadRequest(_))
             | ApiError::Batch(BatchError::Metadata(_))

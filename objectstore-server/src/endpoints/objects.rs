@@ -1,3 +1,28 @@
+//! Object creation, retrieval, expiry extension, and deletion endpoints.
+//!
+//! `PATCH /v1/objects/{usecase}/{scopes}/{key}` accepts `application/json` with exactly one
+//! expiry-extension request. Absolute deadlines and durations anchored to request or creation time
+//! are supported:
+//!
+//! ```json
+//! {"extend_expiry": {"at": "2026-10-16T12:00:00Z"}}
+//! ```
+//!
+//! ```json
+//! {"extend_expiry": {"after": "30d", "from": "creation"}}
+//! ```
+//!
+//! ```json
+//! {"extend_expiry": {"after": "30d", "from": "now"}}
+//! ```
+//!
+//! The operation only extends live TTL and TTI objects. It preserves the expiration policy,
+//! including its duration, as well as the payload and all other metadata.
+//! A satisfied request returns 204, including an already-sufficient deadline. An object
+//! observed absent or expired returns 404. Ineligible or conflicting updates return 409;
+//! backend failures use the normal service error responses. Invalid timestamp or duration
+//! strings are rejected by JSON deserialization with 422.
+
 use std::fmt::Write as _;
 
 use axum::body::Body;
@@ -7,10 +32,11 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing;
 use axum::{Json, Router};
+use objectstore_service::backend::common::{ExpiryTarget, SetExpiryResponse};
 use objectstore_service::error::ErrorKind;
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_types::headers::ExtValue;
-use objectstore_types::metadata::Metadata;
+use objectstore_types::metadata::{ExpiryAnchor, ExpiryExtension, Metadata, MetadataUpdate};
 use objectstore_types::range::ContentRange;
 use serde::Serialize;
 
@@ -28,7 +54,7 @@ pub fn router() -> Router<ServiceState> {
     let object_routes = routing::get(object_get)
         .head(object_head)
         .put(dispatch_object_put)
-        // TODO(ja): Implement PATCH (metadata update w/o body)
+        .patch(object_patch)
         .delete(dispatch_object_delete);
 
     Router::new()
@@ -74,6 +100,38 @@ async fn dispatch_object_delete(
         resumable::cancel_session.call(request, state).await
     } else {
         delete_object.call(request, state).await
+    }
+}
+
+async fn object_patch(
+    service: AuthAwareService,
+    Xt(id): Xt<ObjectId>,
+    RequestTime(access_time): RequestTime,
+    Json(update): Json<MetadataUpdate>,
+) -> ApiResult<StatusCode> {
+    let target = match update.extend_expiry {
+        ExpiryExtension::At { at } => ExpiryTarget::At(at.into_inner()),
+        ExpiryExtension::After {
+            after,
+            from: ExpiryAnchor::Now,
+        } => {
+            let at = access_time.checked_add(after).ok_or_else(|| {
+                ApiError::client("expiration deadline is outside supported range")
+            })?;
+            ExpiryTarget::At(at)
+        }
+        ExpiryExtension::After {
+            after,
+            from: ExpiryAnchor::Creation,
+        } => ExpiryTarget::FromCreation(after),
+    };
+
+    match service.set_expiry(id, target, access_time).await? {
+        SetExpiryResponse::Satisfied(_) => Ok(StatusCode::NO_CONTENT),
+        SetExpiryResponse::NotFound => Ok(StatusCode::NOT_FOUND),
+        SetExpiryResponse::Rejected => Err(ApiError::conflict(
+            "expiry extension could not be satisfied",
+        )),
     }
 }
 
@@ -288,4 +346,244 @@ async fn delete_object(
 ) -> ApiResult<impl IntoResponse> {
     service.delete_object(id, access_time).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use objectstore_service::StorageService;
+    use objectstore_service::backend::common::Backend;
+    use objectstore_service::backend::in_memory::InMemoryBackend;
+    use objectstore_service::concurrency::ConcurrencyLimiter;
+    use objectstore_service::encryption::Cipher;
+    use objectstore_service::id::ObjectContext;
+    use objectstore_service::stream;
+    use objectstore_types::metadata::ExpirationPolicy;
+    use objectstore_types::scope::{Scope, Scopes};
+    use objectstore_types::time::Timestamp;
+
+    use super::*;
+    use crate::auth::AuthContext;
+
+    fn object_id(key: &str) -> ObjectId {
+        ObjectId::new(
+            ObjectContext {
+                usecase: "testing".into(),
+                scopes: Scopes::from_iter([Scope::create("org", "1").unwrap()]),
+            },
+            key.into(),
+        )
+    }
+
+    #[tokio::test]
+    async fn expiry_extension_distinguishes_missing_and_ineligible_objects() {
+        let access_time = Timestamp::now();
+        for (metadata, expected) in [
+            (None, StatusCode::NOT_FOUND),
+            (
+                Some(Metadata {
+                    expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(60)),
+                    time_expires: Some(access_time - Duration::from_secs(1)),
+                    ..Default::default()
+                }),
+                StatusCode::NOT_FOUND,
+            ),
+            (Some(Metadata::default()), StatusCode::CONFLICT),
+        ] {
+            let storage = StorageService::new(
+                Box::new(InMemoryBackend::new("in-memory")),
+                Cipher::ephemeral().unwrap(),
+            );
+            let id = object_id("expiry-outcome");
+            if let Some(metadata) = metadata {
+                storage
+                    .insert_object(
+                        id.context().clone(),
+                        Some(id.key().into()),
+                        metadata,
+                        stream::single("payload"),
+                        access_time,
+                    )
+                    .await
+                    .unwrap();
+            }
+            let service = AuthAwareService::new(storage, AuthContext::Disabled, true);
+            let response = object_patch(
+                service,
+                Xt(id),
+                RequestTime(access_time),
+                Json(MetadataUpdate {
+                    extend_expiry: ExpiryExtension::After {
+                        after: Duration::from_hours(1),
+                        from: ExpiryAnchor::Now,
+                    },
+                }),
+            )
+            .await
+            .into_response();
+            assert_eq!(response.status(), expected);
+            if expected == StatusCode::NOT_FOUND {
+                assert!(
+                    axum::body::to_bytes(response.into_body(), 1024)
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn creation_relative_extension_without_creation_time_is_rejected() {
+        let storage = StorageService::new(
+            Box::new(InMemoryBackend::new("in-memory")),
+            Cipher::ephemeral().unwrap(),
+        );
+        let service = AuthAwareService::new(storage.clone(), AuthContext::Disabled, true);
+        let access_time = Timestamp::now();
+        let id = object_id("missing-creation");
+        storage
+            .insert_object(
+                id.context().clone(),
+                Some(id.key().into()),
+                Metadata {
+                    expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(60)),
+                    time_created: None,
+                    time_expires: Some(access_time + Duration::from_secs(60)),
+                    ..Default::default()
+                },
+                stream::single("payload"),
+                access_time,
+            )
+            .await
+            .unwrap();
+
+        let error = object_patch(
+            service,
+            Xt(id),
+            RequestTime(access_time),
+            Json(MetadataUpdate {
+                extend_expiry: ExpiryExtension::After {
+                    after: Duration::from_secs(30 * 86400),
+                    from: ExpiryAnchor::Creation,
+                },
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.status(), StatusCode::CONFLICT);
+        assert_eq!(error.to_string(), "expiry extension could not be satisfied");
+    }
+
+    #[tokio::test]
+    async fn every_anchor_uses_one_set_expiry_operation() {
+        let storage = StorageService::new(
+            Box::new(InMemoryBackend::new("in-memory")),
+            Cipher::ephemeral().unwrap(),
+        );
+        let access_time = Timestamp::now();
+
+        for (key, extension) in [
+            (
+                "absolute",
+                ExpiryExtension::At {
+                    at: (access_time + Duration::from_secs(120)).as_rfc3339(),
+                },
+            ),
+            (
+                "now",
+                ExpiryExtension::After {
+                    after: Duration::from_mins(2),
+                    from: ExpiryAnchor::Now,
+                },
+            ),
+            (
+                "creation",
+                ExpiryExtension::After {
+                    after: Duration::from_mins(2),
+                    from: ExpiryAnchor::Creation,
+                },
+            ),
+        ] {
+            let id = object_id(key);
+            storage
+                .insert_object(
+                    id.context().clone(),
+                    Some(id.key().into()),
+                    Metadata {
+                        expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(60)),
+                        time_created: Some(access_time),
+                        time_expires: Some(access_time + Duration::from_secs(60)),
+                        ..Default::default()
+                    },
+                    stream::single("payload"),
+                    access_time,
+                )
+                .await
+                .unwrap();
+
+            let captured = objectstore_metrics::with_capturing_test_client_async(async {
+                let service = AuthAwareService::new(storage.clone(), AuthContext::Disabled, true);
+                let status = object_patch(
+                    service,
+                    Xt(id),
+                    RequestTime(access_time),
+                    Json(MetadataUpdate {
+                        extend_expiry: extension,
+                    }),
+                )
+                .await
+                .unwrap();
+                assert_eq!(status, StatusCode::NO_CONTENT);
+            })
+            .await;
+            let operations = captured
+                .iter()
+                .filter(|metric| metric.starts_with("cogs.usage"))
+                .count();
+            assert_eq!(operations, 1, "{captured:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn expiry_extension_preserves_service_errors() {
+        let backend = InMemoryBackend::new("in-memory");
+        let access_time = Timestamp::now();
+        let id = object_id("service-error");
+        backend
+            .put_object(
+                &id,
+                &Metadata {
+                    expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(60)),
+                    time_created: Some(access_time),
+                    time_expires: Some(access_time + Duration::from_secs(60)),
+                    ..Default::default()
+                },
+                stream::single("payload"),
+                access_time,
+            )
+            .await
+            .unwrap();
+        let storage = StorageService::new(Box::new(backend), Cipher::ephemeral().unwrap())
+            .with_concurrency(ConcurrencyLimiter::new(0));
+        let service = AuthAwareService::new(storage, AuthContext::Disabled, true);
+
+        let error = object_patch(
+            service,
+            Xt(id),
+            RequestTime(access_time),
+            Json(MetadataUpdate {
+                extend_expiry: ExpiryExtension::At {
+                    at: (access_time + Duration::from_secs(120)).as_rfc3339(),
+                },
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, ApiError::Service(_)));
+        assert_eq!(error.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
 }

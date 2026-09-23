@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use anyhow::Result;
 use objectstore_server::config::{AuthZ, Config};
 use objectstore_test::server::TestServer;
@@ -172,6 +174,61 @@ async fn custom_metadata_with_unicode_roundtrips() -> Result<()> {
         assert_eq!(resp.headers().get("x-snme-note").unwrap(), "100%25 done");
     }
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn patch_extends_expiry() -> Result<()> {
+    let server = test_server().await;
+    let client = reqwest::Client::new();
+    let url = server.url("/v1/objects/test/org=1/extend-expiry");
+    let response = client
+        .put(&url)
+        .header("x-sn-expiration", "ttl:1d")
+        .body("payload")
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+    let response = client.head(&url).send().await?;
+    let before = Metadata::from_headers(response.headers(), "")?;
+    let expected_expiry = before
+        .time_created
+        .unwrap()
+        .checked_add(Duration::from_secs(30 * 24 * 60 * 60))
+        .unwrap();
+
+    let response = client
+        .patch(&url)
+        .json(&serde_json::json!({"extend_expiry": {"after": "30d", "from": "creation"}}))
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
+
+    let response = client.head(&url).send().await?;
+    let after = Metadata::from_headers(response.headers(), "")?;
+    assert_eq!(after.expiration_policy, before.expiration_policy);
+    assert_eq!(after.time_expires, Some(expected_expiry));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn patch_missing_object_returns_not_found() -> Result<()> {
+    let server = test_server().await;
+    let client = reqwest::Client::new();
+    let url = server.url("/v1/objects/test/org=1/missing-expiry");
+    let response = client
+        .patch(&url)
+        .json(&serde_json::json!({"extend_expiry": {"after": "1d", "from": "now"}}))
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+    assert!(response.bytes().await?.is_empty());
+    assert_eq!(
+        client.get(&url).send().await?.status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
     Ok(())
 }
 
