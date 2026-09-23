@@ -694,7 +694,7 @@ class Session:
 
         An already-sufficient deadline succeeds without being shortened. Success
         returns no value and does not indicate whether the deadline changed.
-        Requires object-write permission and a server supporting expiry updates.
+        Requires object-write permission.
 
         Raises ``ValueError`` for missing or multiple targets, naive datetimes,
         or negative durations. Zero durations are valid. Objects observed absent
