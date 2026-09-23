@@ -46,7 +46,7 @@ use tonic::Code;
 use tracing::Instrument;
 
 use crate::backend::common::{
-    Backend, DeleteResponse, ExpiryUpdate, GetResponse, HighVolumeBackend, MetadataResponse,
+    self, Backend, DeleteResponse, ExpiryUpdate, GetResponse, HighVolumeBackend, MetadataResponse,
     PutResponse, SetExpiryResponse, TieredGet, TieredMetadata, TieredUpdate, TieredWrite,
     Tombstone,
 };
@@ -1255,6 +1255,12 @@ impl HighVolumeBackend for BigTableBackend {
                 // to either and then returns false.
                 let predicate = inline_expiry_predicate(expiry_micros, access_time)?;
                 let mut metadata = metadata;
+                metadata.expiration_policy = common::extended_expiration_policy(
+                    metadata.expiration_policy,
+                    metadata.time_created,
+                    old_expiry,
+                    expire_at,
+                )?;
                 metadata.time_expires = Some(expire_at);
                 let (mutations, _) = object_mutations(&path, metadata, payload)?;
                 (expire_at, predicate, mutations.into())
@@ -1807,72 +1813,85 @@ mod tests {
     /// Backend reads are side-effect-free; explicit extension preserves payload.
     #[tokio::test]
     async fn test_set_expiry() -> Result<()> {
-        let backend = create_test_backend().await?;
-        let tti = Duration::from_hours(2 * 24);
-        let mut metadata = Metadata {
-            expiration_policy: ExpirationPolicy::TimeToIdle(tti),
-            ..Default::default()
-        };
+        for is_ttl in [false, true] {
+            let backend = create_test_backend().await?;
+            let tti = Duration::from_hours(2 * 24);
+            let mut metadata = Metadata {
+                expiration_policy: if is_ttl {
+                    ExpirationPolicy::TimeToLive(tti)
+                } else {
+                    ExpirationPolicy::TimeToIdle(tti)
+                },
+                ..Default::default()
+            };
 
-        // Backdate `now` so the written expiry (past_now + tti) is stale but not expired.
-        let past_now = Timestamp::now() - tti + Duration::from_mins(1);
+            // Backdate `now` so the written expiry (past_now + tti) is stale but not expired.
+            let past_now = Timestamp::now() - tti + Duration::from_mins(1);
 
-        let id = make_id();
-        metadata.time_created = Some(past_now);
-        metadata.time_expires = Some(past_now + tti);
-        let path = id.as_storage_path().to_string().into_bytes();
-        let (mutations, _) = object_mutations(&path, metadata, b"hello, world".to_vec())?;
-        // Simulate a legacy fractional deadline. Renewal must match the raw GC timestamp.
-        let mutations = mutations.map(|mut mutation| {
-            if let Some(mutation::Mutation::SetCell(cell)) = &mut mutation.mutation {
-                cell.timestamp_micros -= 500_000;
-            }
-            mutation
-        });
-        backend.mutate(path, mutations, "test-setup").await?;
+            let id = make_id();
+            metadata.time_created = Some(past_now);
+            metadata.time_expires = Some(past_now + tti);
+            let path = id.as_storage_path().to_string().into_bytes();
+            let (mutations, _) = object_mutations(&path, metadata, b"hello, world".to_vec())?;
+            // Simulate a legacy fractional deadline. Renewal must match the raw GC timestamp.
+            let mutations = mutations.map(|mut mutation| {
+                if let Some(mutation::Mutation::SetCell(cell)) = &mut mutation.mutation {
+                    cell.timestamp_micros -= 500_000;
+                }
+                mutation
+            });
+            backend.mutate(path, mutations, "test-setup").await?;
 
-        let (observed, _, _) = backend
-            .get_object(&id, Timestamp::now(), None)
-            .await?
-            .unwrap();
-        let observed_expiry = observed.time_expires.unwrap();
-        assert_eq!(
-            backend
-                .get_metadata(&id, Timestamp::now())
+            let (observed, _, _) = backend
+                .get_object(&id, Timestamp::now(), None)
                 .await?
-                .unwrap()
-                .time_expires,
-            Some(observed_expiry),
-            "backend reads must not renew TTI"
-        );
-
-        let requested = past_now + tti + tti;
-        for target in [
-            ExpiryTarget::At(requested),
-            ExpiryTarget::FromCreation(tti + tti),
-        ] {
+                .unwrap();
+            let observed_expiry = observed.time_expires.unwrap();
             assert_eq!(
                 backend
-                    .set_expiry(&id, target.into(), Timestamp::now())
-                    .await?,
-                SetExpiryResponse::Satisfied(requested)
+                    .get_metadata(&id, Timestamp::now())
+                    .await?
+                    .unwrap()
+                    .time_expires,
+                Some(observed_expiry),
+                "backend reads must not renew TTI"
             );
-        }
-        assert_eq!(
-            backend
-                .get_metadata(&id, Timestamp::now())
-                .await?
-                .unwrap()
-                .time_expires,
-            Some(requested)
-        );
-        let (_, _, stream) = backend
-            .get_object(&id, Timestamp::now(), None)
-            .await?
-            .unwrap();
-        let payload = stream::read_to_vec(stream).await?;
-        assert_eq!(payload, b"hello, world");
 
+            let requested = past_now + tti + tti;
+            for target in [
+                ExpiryTarget::At(requested),
+                ExpiryTarget::FromCreation(tti + tti),
+            ] {
+                assert_eq!(
+                    backend
+                        .set_expiry(&id, target.into(), Timestamp::now())
+                        .await?,
+                    SetExpiryResponse::Satisfied(requested)
+                );
+            }
+            assert_eq!(
+                backend
+                    .get_metadata(&id, Timestamp::now())
+                    .await?
+                    .unwrap()
+                    .time_expires,
+                Some(requested)
+            );
+            let (updated, _, stream) = backend
+                .get_object(&id, Timestamp::now(), None)
+                .await?
+                .unwrap();
+            assert_eq!(
+                updated.expiration_policy,
+                if is_ttl {
+                    ExpirationPolicy::TimeToLive(tti + tti)
+                } else {
+                    ExpirationPolicy::TimeToIdle(tti)
+                }
+            );
+            let payload = stream::read_to_vec(stream).await?;
+            assert_eq!(payload, b"hello, world");
+        }
         Ok(())
     }
 

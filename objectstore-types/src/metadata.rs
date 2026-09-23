@@ -93,7 +93,7 @@ const MAX_TTI_DEBOUNCE: Duration = Duration::from_hours(24);
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct MetadataUpdate {
-    /// Extends the existing expiration deadline without changing its policy.
+    /// Extends the existing expiration deadline, adjusting TTL duration to match.
     pub extend_expiry: ExpiryExtension,
 }
 
@@ -348,10 +348,9 @@ pub struct Metadata {
 
     /// The resolved expiration timestamp (header: `x-sn-time-expires`).
     ///
-    /// Initially derived from the [`expiration_policy`](Self::expiration_policy), but it may later
-    /// be extended explicitly without changing that policy or its duration. When using a
-    /// time-to-idle policy, this reflects the expiration timestamp present *prior to* the current
-    /// access to the object.
+    /// Initially derived from the [`expiration_policy`](Self::expiration_policy), but may be later
+    /// extended by explicit updates. This timestamp reflects the deadline present *prior to* the
+    /// current access to the object.
     ///
     /// Fractional deadlines round up to whole seconds; see [`Timestamp`].
     #[serde(skip_serializing_if = "Option::is_none")]

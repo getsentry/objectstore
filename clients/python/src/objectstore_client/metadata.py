@@ -54,8 +54,7 @@ class Metadata:
     timestamp present prior to the current access to the object.
 
     This field is computed by the server. Use `expiration_policy` to set the
-    policy on upload, or `Session.extend_expiry` to extend an existing deadline
-    without changing that policy.
+    policy on upload, or `Session.extend_expiry` to extend an existing deadline.
     """
 
     origin: str | None

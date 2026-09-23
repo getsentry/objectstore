@@ -38,7 +38,7 @@ use tokio_util::io::{ReaderStream, StreamReader};
 use uuid::Uuid;
 
 use crate::backend::common::{
-    Backend, DeleteResponse, ExpiryUpdate, GetResponse, MultipartUploadBackend, PutResponse,
+    self, Backend, DeleteResponse, ExpiryUpdate, GetResponse, MultipartUploadBackend, PutResponse,
     SetExpiryResponse,
 };
 use crate::change_stream::{
@@ -266,6 +266,12 @@ impl Backend for LocalFsBackend {
         if current_expiry >= expire_at {
             return Ok(SetExpiryResponse::Satisfied(expire_at)); // already satisfied
         }
+        metadata.expiration_policy = common::extended_expiration_policy(
+            metadata.expiration_policy,
+            metadata.time_created,
+            current_expiry,
+            expire_at,
+        )?;
         metadata.time_expires = Some(expire_at);
 
         let mut draft = Draft::create(&path, &metadata).await?;
@@ -1574,48 +1580,61 @@ mod tests {
 
     #[tokio::test]
     async fn set_expiry() {
-        let (_tempdir, backend) = make_backend();
-        let id = make_id();
-        let created = Timestamp::now();
-        let old_expiry = created + Duration::from_hours(1);
-        let metadata = Metadata {
-            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
-            time_created: Some(created),
-            time_expires: Some(old_expiry),
-            custom: [("preserved".into(), "yes".into())].into(),
-            ..Default::default()
-        };
-        backend
-            .put_object(&id, &metadata, stream::single("payload"), Timestamp::now())
-            .await
-            .unwrap();
+        for is_ttl in [false, true] {
+            let (_tempdir, backend) = make_backend();
+            let id = make_id();
+            let created = Timestamp::now();
+            let old_expiry = created + Duration::from_hours(1);
+            let metadata = Metadata {
+                expiration_policy: if is_ttl {
+                    ExpirationPolicy::TimeToLive(Duration::from_hours(1))
+                } else {
+                    ExpirationPolicy::TimeToIdle(Duration::from_hours(1))
+                },
+                time_created: Some(created),
+                time_expires: Some(old_expiry),
+                custom: [("preserved".into(), "yes".into())].into(),
+                ..Default::default()
+            };
+            backend
+                .put_object(&id, &metadata, stream::single("payload"), Timestamp::now())
+                .await
+                .unwrap();
 
-        let duration = Duration::from_hours(2) + Duration::from_nanos(999);
-        let requested = created + duration;
-        for target in [
-            ExpiryTarget::At(requested),
-            ExpiryTarget::FromCreation(duration),
-        ] {
+            let duration = Duration::from_hours(2) + Duration::from_nanos(999);
+            let requested = created + duration;
+            for target in [
+                ExpiryTarget::At(requested),
+                ExpiryTarget::FromCreation(duration),
+            ] {
+                assert_eq!(
+                    backend
+                        .set_expiry(&id, target.into(), Timestamp::now())
+                        .await
+                        .unwrap(),
+                    SetExpiryResponse::Satisfied(requested)
+                );
+            }
+            let (updated, _, payload) = backend
+                .get_object(&id, Timestamp::now(), None)
+                .await
+                .unwrap()
+                .unwrap();
             assert_eq!(
-                backend
-                    .set_expiry(&id, target.into(), Timestamp::now())
-                    .await
-                    .unwrap(),
-                SetExpiryResponse::Satisfied(requested)
+                updated.expiration_policy,
+                if is_ttl {
+                    ExpirationPolicy::TimeToLive(Duration::from_hours(2))
+                } else {
+                    metadata.expiration_policy
+                }
             );
-        }
-        let (updated, _, payload) = backend
-            .get_object(&id, Timestamp::now(), None)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(updated.expiration_policy, metadata.expiration_policy);
-        assert_eq!(updated.time_created, metadata.time_created);
-        assert_eq!(updated.custom, metadata.custom);
-        assert_eq!(updated.time_expires, Some(requested));
-        assert_eq!(stream::read_to_vec(payload).await.unwrap(), b"payload");
+            assert_eq!(updated.time_created, metadata.time_created);
+            assert_eq!(updated.custom, metadata.custom);
+            assert_eq!(updated.time_expires, Some(requested));
+            assert_eq!(stream::read_to_vec(payload).await.unwrap(), b"payload");
 
-        assert_eq!(draft_count(&backend, &id), 0);
+            assert_eq!(draft_count(&backend, &id), 0);
+        }
     }
 
     #[tokio::test]

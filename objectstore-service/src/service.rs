@@ -302,10 +302,11 @@ impl StorageService {
         .await
     }
 
-    /// Extends an existing TTL or TTI object's deadline without changing its policy.
+    /// Extends an existing TTL or TTI object's deadline.
     ///
-    /// This is distinct from the initial policy-derived deadline created on insertion. It
-    /// preserves the policy duration and every other part of the object.
+    /// Actual extensions adjust TTL duration to approximately match the lifetime since
+    /// creation. TTI duration, payload, and other metadata remain unchanged.
+    ///
     /// Returns whether the request was satisfied, the object was absent or expired,
     /// or the update was rejected. See [`SetExpiryResponse`] for details.
     /// Remaining-lifetime limits in [`ExpiryUpdate`] are enforced against `access_time`;

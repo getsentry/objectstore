@@ -3,7 +3,7 @@ use std::time::Duration;
 use anyhow::Result;
 use objectstore_server::config::{AuthZ, Config};
 use objectstore_test::server::TestServer;
-use objectstore_types::metadata::Metadata;
+use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 
 async fn test_server() -> TestServer {
     TestServer::with_config(Config {
@@ -207,7 +207,10 @@ async fn patch_extends_expiry() -> Result<()> {
 
     let response = client.head(&url).send().await?;
     let after = Metadata::from_headers(response.headers(), "")?;
-    assert_eq!(after.expiration_policy, before.expiration_policy);
+    assert_eq!(
+        after.expiration_policy,
+        ExpirationPolicy::TimeToLive(Duration::from_secs(30 * 24 * 60 * 60))
+    );
     assert_eq!(after.time_expires, Some(expected_expiry));
 
     Ok(())

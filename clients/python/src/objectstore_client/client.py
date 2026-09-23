@@ -684,7 +684,7 @@ class Session:
         from_creation: timedelta | None = None,
         from_now: timedelta | None = None,
     ) -> None:
-        """Extend an object's expiration deadline, preserving its policy and payload.
+        """Extend an object's expiration deadline, preserving its payload.
 
         Supply exactly one target: ``at`` is a timezone-aware absolute datetime;
         ``from_creation`` is total lifetime since creation or replacement; and
@@ -695,6 +695,9 @@ class Session:
         An already-sufficient deadline succeeds without being shortened. Success
         returns no value and does not indicate whether the deadline changed.
         Requires object-write permission.
+
+        Actual extensions adjust TTL duration to approximately match the total
+        lifetime since creation; TTI duration remains unchanged.
 
         Raises ``ValueError`` for missing or multiple targets, naive datetimes,
         or negative durations. Zero durations are valid. Objects observed absent
@@ -717,6 +720,7 @@ class Session:
             except ExpiryExtensionRejected:
                 print("Extension was rejected")
         """
+
         if sum(value is not None for value in (at, from_creation, from_now)) != 1:
             raise ValueError("Supply exactly one of at, from_creation, or from_now")
 

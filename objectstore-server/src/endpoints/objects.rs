@@ -16,8 +16,9 @@
 //! {"extend_expiry": {"after": "30d", "from": "now"}}
 //! ```
 //!
-//! The operation only extends live TTL and TTI objects. It preserves the expiration policy,
-//! including its duration, as well as the payload and all other metadata.
+//! The operation only extends live TTL and TTI objects while preserving the payload and
+//! unrelated metadata.
+//!
 //! A satisfied request returns 204, including an already-sufficient deadline. An object
 //! observed absent or expired returns 404. Ineligible or conflicting updates return 409;
 //! backend failures use the normal service error responses. Invalid timestamp or duration

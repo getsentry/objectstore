@@ -470,6 +470,12 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             Error::new(ErrorKind::BackendFailure, "S3 HEAD response missing ETag")
         })?;
 
+        metadata.expiration_policy = common::extended_expiration_policy(
+            metadata.expiration_policy,
+            metadata.time_created,
+            current_expiry,
+            expire_at,
+        )?;
         metadata.time_expires = Some(expire_at);
         let outcome = self
             .update_metadata(id, &metadata, expire_at, &etag)
@@ -573,11 +579,23 @@ mod tests {
 
     fn start_copy_server(
         copy_status: &'static str,
+        metadata: Metadata,
     ) -> (String, mpsc::Receiver<String>, thread::JoinHandle<()>) {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let (request_tx, request_rx) = mpsc::channel();
         let server = thread::spawn(move || {
+            let (mut head, _) = listener.accept().unwrap();
+            assert!(read_http_request(&mut head).starts_with("HEAD "));
+            write!(
+                head,
+                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nETag: \"etag\"\r\nConnection: close\r\n"
+            )
+            .unwrap();
+            for (name, value) in metadata.to_headers(GCS_CUSTOM_PREFIX).unwrap().iter() {
+                write!(head, "{name}: {}\r\n", value.to_str().unwrap()).unwrap();
+            }
+            write!(head, "\r\n").unwrap();
             let (mut copy, _) = listener.accept().unwrap();
             request_tx.send(read_http_request(&mut copy)).unwrap();
             write!(
@@ -591,14 +609,24 @@ mod tests {
 
     #[tokio::test]
     async fn update_metadata_uses_conditional_s3_copy() {
-        let deadline = Timestamp::now() + Duration::from_hours(1);
+        let created = Timestamp::now();
+        let deadline = created + Duration::from_hours(2);
         for (status, expected) in [
             ("200 OK", SetExpiryResponse::Satisfied(deadline)),
             ("404 Not Found", SetExpiryResponse::NotFound),
             ("409 Conflict", SetExpiryResponse::Rejected),
             ("412 Precondition Failed", SetExpiryResponse::Rejected),
         ] {
-            let (endpoint, request_rx, server) = start_copy_server(status);
+            let (endpoint, request_rx, server) = start_copy_server(
+                status,
+                Metadata {
+                    expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
+                    time_created: Some(created),
+                    time_expires: Some(created + Duration::from_hours(1)),
+                    custom: [("preserved".into(), "yes".into())].into(),
+                    ..Default::default()
+                },
+            );
             let backend = S3CompatibleBackend::without_token(
                 S3CompatibleConfig {
                     endpoint,
@@ -610,14 +638,10 @@ mod tests {
 
             assert_eq!(
                 backend
-                    .update_metadata(
+                    .set_expiry(
                         &make_id(),
-                        &Metadata {
-                            time_expires: Some(deadline),
-                            ..Default::default()
-                        },
-                        deadline,
-                        &HeaderValue::from_static("\"etag\""),
+                        common::ExpiryTarget::At(deadline).into(),
+                        created
                     )
                     .await
                     .unwrap(),
@@ -627,6 +651,20 @@ mod tests {
             assert!(request.contains("x-amz-copy-source: /bucket/"));
             assert!(request.contains("x-amz-metadata-directive: replace"));
             assert!(request.contains("x-amz-copy-source-if-match: \"etag\""));
+            let expected_headers = Metadata {
+                expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(2)),
+                time_created: Some(created),
+                time_expires: Some(deadline),
+                custom: [("preserved".into(), "yes".into())].into(),
+                ..Default::default()
+            }
+            .to_headers(GCS_CUSTOM_PREFIX)
+            .unwrap();
+            for (name, value) in &expected_headers {
+                assert!(request.contains(
+                    &format!("{name}: {}", value.to_str().unwrap()).to_ascii_lowercase()
+                ));
+            }
             server.join().unwrap();
         }
     }

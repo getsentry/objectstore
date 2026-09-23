@@ -1122,7 +1122,7 @@ mod tests {
         expiry: Timestamp,
     ) {
         let metadata = Metadata {
-            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_mins(10)),
             time_created: expiry.checked_sub(Duration::from_mins(10)),
             time_expires: Some(expiry),
             ..Default::default()
@@ -1299,6 +1299,10 @@ mod tests {
             SetExpiryResponse::Satisfied(resolved)
         );
         let (metadata, payload) = hv.inner.get(&id).expect_object();
+        assert_eq!(
+            metadata.expiration_policy,
+            ExpirationPolicy::TimeToLive(Duration::from_hours(2))
+        );
         assert_eq!(metadata.time_created, Some(new_created));
         assert_eq!(metadata.time_expires, Some(resolved));
         assert_eq!(payload, Bytes::from_static(b"replacement"));
@@ -1341,6 +1345,10 @@ mod tests {
                 .unwrap()
                 .time_expires,
             Some(old_expiry)
+        );
+        assert_eq!(
+            lt.inner.get(&target).expect_object().0.expiration_policy,
+            ExpirationPolicy::TimeToLive(Duration::from_hours(1))
         );
     }
 
