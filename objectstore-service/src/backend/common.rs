@@ -4,7 +4,7 @@ use std::fmt;
 use std::num::NonZeroU64;
 use std::time::Duration;
 
-use objectstore_types::metadata::Metadata;
+use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use objectstore_types::range::{ByteRange, ContentRange};
 use objectstore_types::resumable::UploadProgress;
 use objectstore_types::time::Timestamp;
@@ -84,7 +84,7 @@ impl ExpiryTarget {
 /// An expiry target and optional limit on the remaining lifetime it requests.
 ///
 /// The limit is measured from the operation's `access_time`, regardless of the target's
-/// anchor. It does not change the stored policy or shorten existing deadlines.
+/// anchor. It does not change the policy kind or shorten existing deadlines.
 /// Repeated updates can therefore keep an object alive indefinitely.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExpiryUpdate {
@@ -127,6 +127,55 @@ impl ExpiryUpdate {
         }
         Ok(Some(deadline))
     }
+}
+
+/// Derives a TTL matching an extended deadline, leaving other policies unchanged.
+///
+/// Uses creation time when available, otherwise infers the original lifetime from
+/// the previous deadline and TTL. The inferred creation time is not persisted.
+/// Rounds to the coarsest whole day, hour, or minute within 1% of the duration,
+/// falling back to whole seconds. The deadline itself must remain exact.
+///
+/// Returns corrupt-data errors for inconsistent creation times or duration overflow.
+pub(super) fn extended_expiration_policy(
+    policy: ExpirationPolicy,
+    time_created: Option<Timestamp>,
+    old_expiry: Timestamp,
+    new_expiry: Timestamp,
+) -> Result<ExpirationPolicy> {
+    let ExpirationPolicy::TimeToLive(ttl) = policy else {
+        return Ok(policy);
+    };
+
+    let duration_opt = match time_created {
+        Some(created) => new_expiry.checked_duration_since(created),
+        None => new_expiry
+            .checked_duration_since(old_expiry)
+            .and_then(|extension| ttl.checked_add(extension)),
+    };
+
+    let duration = duration_opt
+        .ok_or_else(|| Error::new(ErrorKind::CorruptData, "invalid TTL expiry metadata"))?;
+    Ok(ExpirationPolicy::TimeToLive(round_duration(duration)))
+}
+
+/// Rounds a duration to the coarsest whole day, hour, or minute within 1%, otherwise seconds.
+fn round_duration(duration: Duration) -> Duration {
+    let mut seconds = duration.as_secs();
+
+    // Match Timestamp's upward rounding for legacy fractional durations.
+    if duration.subsec_nanos() != 0 {
+        seconds = seconds.saturating_add(1);
+    }
+
+    for unit in [86_400, 3_600, 60] {
+        let rounded = seconds.saturating_add(unit / 2) / unit * unit;
+        if rounded.abs_diff(seconds) <= seconds / 100 {
+            return Duration::from_secs(rounded);
+        }
+    }
+
+    Duration::from_secs(seconds)
 }
 
 /// Trait implemented by all storage backends.
@@ -173,8 +222,8 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
 
     /// Extends the deadline of an existing object with expiration policy.
     ///
-    /// This only changes the stored deadline: the expiration policy, duration,
-    /// payload, and all other metadata remain unchanged.
+    /// Actual extensions also update TTL durations to approximately match the time since
+    /// creation. TTI durations, payload, and other metadata remain unchanged.
     ///
     /// Returns [`SetExpiryResponse::Satisfied`] when extended or already satisfied,
     /// [`SetExpiryResponse::NotFound`] when observed absent or expired, or
@@ -515,7 +564,7 @@ impl TieredWrite {
 /// The in-place operation performed by [`HighVolumeBackend::compare_and_update`].
 #[derive(Clone, Debug)]
 pub enum TieredUpdate {
-    /// Extend the deadline while preserving all other stored data.
+    /// Extend the deadline and adjust TTL duration while preserving other stored data.
     SetExpiry(ExpiryUpdate),
 }
 
@@ -541,6 +590,124 @@ pub(super) fn reqwest_client() -> reqwest::Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extended_ttl_rounding() {
+        let created = Timestamp::from_unix_secs(1_700_000_000).unwrap();
+        let policy = ExpirationPolicy::TimeToLive(Duration::from_hours(1));
+        for (seconds, rounded) in [
+            (0, 0),
+            (59, 59),
+            (61, 61),
+            (119, 120),
+            (121, 120),
+            (3598, 3600),
+            (3602, 3600),
+            (86_398, 86_400),
+            (86_402, 86_400),
+            (90 * 86_400 - 2, 90 * 86_400),
+            (90 * 86_400 + 2, 90 * 86_400),
+            (40_000, 39_600), // Exactly 1% rounds to hours.
+            (40_001, 40_020), // Just outside 1% falls back to minutes.
+        ] {
+            assert_eq!(
+                extended_expiration_policy(
+                    policy,
+                    Some(created),
+                    created,
+                    created + Duration::from_secs(seconds)
+                )
+                .unwrap(),
+                ExpirationPolicy::TimeToLive(Duration::from_secs(rounded)),
+                "{seconds} seconds",
+            );
+        }
+
+        assert_eq!(
+            round_duration(Duration::MAX),
+            Duration::from_secs(u64::MAX - u64::MAX % 86_400),
+        );
+    }
+
+    #[test]
+    fn extended_ttl_without_creation_time() {
+        // The inferred creation time may precede the epoch.
+        let epoch = Timestamp::from_unix_secs(0).unwrap();
+        let policy = ExpirationPolicy::TimeToLive(Duration::from_hours(1));
+        let first_expiry = epoch + Duration::from_hours(1);
+        let extended = extended_expiration_policy(policy, None, epoch, first_expiry).unwrap();
+        assert_eq!(
+            extended,
+            ExpirationPolicy::TimeToLive(Duration::from_hours(2))
+        );
+
+        let next_expiry = first_expiry + Duration::from_hours(1);
+        let extended_again =
+            extended_expiration_policy(extended, None, first_expiry, next_expiry).unwrap();
+        assert_eq!(
+            extended_again,
+            ExpirationPolicy::TimeToLive(Duration::from_hours(3))
+        );
+    }
+
+    #[test]
+    fn extended_ttl_fractional_duration() {
+        let epoch = Timestamp::from_unix_secs(0).unwrap();
+        assert_eq!(
+            extended_expiration_policy(
+                ExpirationPolicy::TimeToLive(Duration::from_millis(1500)),
+                None,
+                epoch,
+                epoch + Duration::from_secs(1)
+            )
+            .unwrap(),
+            ExpirationPolicy::TimeToLive(Duration::from_secs(3)),
+        );
+    }
+
+    #[test]
+    fn extended_ttl_invalid_creation_time() {
+        let expiry = Timestamp::from_unix_secs(1_700_000_000).unwrap();
+        let created = expiry + Duration::from_secs(1);
+        let policy = ExpirationPolicy::TimeToLive(Duration::from_hours(1));
+        assert_eq!(
+            extended_expiration_policy(policy, Some(created), expiry, expiry)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::CorruptData
+        );
+    }
+
+    #[test]
+    fn extended_ttl_duration_overflow() {
+        let epoch = Timestamp::from_unix_secs(0).unwrap();
+        assert_eq!(
+            extended_expiration_policy(
+                ExpirationPolicy::TimeToLive(Duration::MAX),
+                None,
+                epoch,
+                epoch + Duration::from_secs(1),
+            )
+            .unwrap_err()
+            .kind(),
+            ErrorKind::CorruptData
+        );
+    }
+
+    #[test]
+    fn extended_ttl_saturated_deadline() {
+        let max = Timestamp::from_unix_secs(253_402_300_799).unwrap();
+        assert_eq!(
+            extended_expiration_policy(
+                ExpirationPolicy::TimeToLive(Duration::from_hours(3)),
+                Some(max - Duration::from_hours(1)),
+                max - Duration::from_secs(1),
+                max.saturating_add(Duration::from_hours(1))
+            )
+            .unwrap(),
+            ExpirationPolicy::TimeToLive(Duration::from_hours(1))
+        );
+    }
 
     #[test]
     fn expiry_target_resolution() {
