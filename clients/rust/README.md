@@ -78,6 +78,23 @@ session.put("payload")
     .send().await?;
 ```
 
+Use [`Session::extend_expiry`] to keep an existing object longer without changing its
+TTL/TTI policy:
+
+```rust,no_run
+# async fn example(session: objectstore_client::Session) -> objectstore_client::Result<()> {
+use std::time::Duration;
+use objectstore_client::ExpiryExtension;
+
+session.extend_expiry("key", ExpiryExtension::FromNow(Duration::from_secs(30 * 86400)))
+    .send().await?;
+# Ok(())
+# }
+```
+
+See [`ExpiryExtension`] for target options and [`Session::extend_expiry`] for
+outcome handling.
+
 ### Origin Tracking
 
 We encourage setting the `origin` on every upload to track where the payload was
