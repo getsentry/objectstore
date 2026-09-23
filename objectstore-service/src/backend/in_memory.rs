@@ -763,20 +763,25 @@ fn extend_object_expiry(
         return Ok(ExpiryOutcome::Rejected); // entry without a deadline
     };
 
+    // Only write `updated_expires` back if `extended_expiration_policy` also succeeds
+    let mut updated_expires = Some(original_expires);
     let outcome = extend_expiry(
-        &mut metadata.time_expires,
+        &mut updated_expires,
         target,
         metadata.time_created,
         access_time,
     )?;
 
     if let ExpiryOutcome::Extended(expire_at) = outcome {
-        metadata.expiration_policy = common::extended_expiration_policy(
+        let updated_policy = common::extended_expiration_policy(
             metadata.expiration_policy,
             metadata.time_created,
             original_expires,
             expire_at,
         )?;
+
+        metadata.time_expires = updated_expires;
+        metadata.expiration_policy = updated_policy;
     }
 
     Ok(outcome)
@@ -1163,6 +1168,41 @@ mod tests {
                     SetExpiryResponse::Satisfied(original_expiry)
                 );
                 assert_eq!(backend.get(&id).expect_object().0, updated);
+            }
+        }
+    }
+
+    #[test]
+    fn extend_object_expiry_preserves_metadata_on_error() {
+        let access_time = Timestamp::from_unix_secs(1_700_000_000).unwrap();
+        let original_expiry = access_time + Duration::from_hours(1);
+        let requested = original_expiry + Duration::from_hours(1);
+        for (time_created, ttl) in [
+            (
+                Some(requested + Duration::from_secs(1)),
+                Duration::from_hours(1),
+            ),
+            (None, Duration::MAX),
+        ] {
+            let original = Metadata {
+                expiration_policy: ExpirationPolicy::TimeToLive(ttl),
+                time_created,
+                time_expires: Some(original_expiry),
+                ..Default::default()
+            };
+            let mut metadata = original.clone();
+            for _ in 0..2 {
+                assert_eq!(
+                    extend_object_expiry(
+                        &mut metadata,
+                        ExpiryTarget::At(requested).into(),
+                        access_time,
+                    )
+                    .unwrap_err()
+                    .kind(),
+                    ErrorKind::CorruptData
+                );
+                assert_eq!(metadata, original);
             }
         }
     }
