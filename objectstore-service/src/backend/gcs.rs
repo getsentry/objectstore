@@ -14,7 +14,7 @@ use objectstore_types::headers;
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use objectstore_types::range::{ByteRange, ContentRange};
 use objectstore_types::time::{Rfc3339Timestamp, Timestamp};
-use reqwest::header::HeaderName;
+use reqwest::header::{HeaderMap, HeaderName};
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode, Url, header, multipart};
 use serde::{Deserialize, Serialize};
 
@@ -914,6 +914,11 @@ impl Backend for GcsBackend {
         let metadata_json = serde_json::to_string(&gcs_metadata)
             .context(ErrorKind::Internal, "encoding GCS upload metadata")?;
 
+        let content_type = metadata
+            .content_type
+            .parse()
+            .context(ErrorKind::InvalidMetadata, "encoding GCS content type")?;
+
         let multipart = multipart::Form::new()
             .part(
                 "metadata",
@@ -924,8 +929,9 @@ impl Backend for GcsBackend {
             .part(
                 "media",
                 multipart::Part::stream(Body::wrap_stream(stream.boxed()))
-                    .mime_str(&metadata.content_type)
-                    .context(ErrorKind::InvalidMetadata, "encoding GCS content type")?,
+                    // Ensure the content type goes into headers unchanged including case
+                    // sensitivity, as required by GCS. This means we cannot use `mime_str`.
+                    .headers(HeaderMap::from_iter([(header::CONTENT_TYPE, content_type)])),
             );
 
         // GCS requires a multipart/related request. Its body looks identical to
