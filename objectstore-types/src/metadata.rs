@@ -314,7 +314,8 @@ pub struct Metadata {
 
     /// IANA media type of the object (header: `Content-Type`).
     ///
-    /// Defaults to [`DEFAULT_CONTENT_TYPE`] (`application/octet-stream`).
+    /// Parsing a header canonicalizes this, so a value read back may differ in case from the one
+    /// a client sent. Defaults to [`DEFAULT_CONTENT_TYPE`] (`application/octet-stream`).
     pub content_type: Cow<'static, str>,
 
     /// The compression algorithm used for this object (header: `Content-Encoding`).
@@ -439,9 +440,7 @@ impl Metadata {
             match *name {
                 // standard HTTP headers
                 header::CONTENT_TYPE => {
-                    let content_type = value.to_str()?;
-                    validate_content_type(content_type)?;
-                    metadata.content_type = content_type.to_owned().into();
+                    metadata.content_type = normalize_content_type(value.to_str()?)?;
                 }
                 header::CONTENT_ENCODING => {
                     let compression = value.to_str()?;
@@ -557,11 +556,14 @@ impl Metadata {
     }
 }
 
-/// Validates that `content_type` is a valid [IANA Media
-/// Type](https://www.iana.org/assignments/media-types/media-types.xhtml).
-fn validate_content_type(content_type: &str) -> Result<(), Error> {
-    mediatype::MediaType::parse(content_type)?;
-    Ok(())
+/// Validates `content_type` as an IANA Media Type and returns its canonicalized form.
+///
+/// Type, subtype, suffix and parameter names are lowercased. Parameter values are left
+/// as sent because their case-sensitivity depends on the parameter (e.g. a multipart
+/// `boundary` is, a `charset` is not).
+fn normalize_content_type(content_type: &str) -> Result<Cow<'static, str>, Error> {
+    let media_type = mediatype::MediaTypeBuf::from_string(content_type.to_owned())?;
+    Ok(media_type.canonicalize().to_string().into())
 }
 
 impl Default for Metadata {
