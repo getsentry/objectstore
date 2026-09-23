@@ -35,9 +35,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bigtable_rs::bigtable::{BigTableConnection, Error as BigTableError, RowCell};
-use bigtable_rs::google::bigtable::v2::{self, mutation};
 use bytes::Bytes;
 use futures_util::TryStreamExt;
+use googleapis_tonic_google_bigtable_v2::google::bigtable::v2::{self, mutation};
 use objectstore_types::metadata::Metadata;
 use objectstore_types::range::{ByteRange, ContentRange};
 use objectstore_types::time::Timestamp;
@@ -814,6 +814,7 @@ impl BigTableBackend {
     ///
     /// Pass an `endpoint` in the config to connect to a local emulator; omit it to use real GCP
     /// credentials. `connections` controls the gRPC connection pool size (defaults to 1).
+    /// Connections to GCP send a PingAndWarm request every 10 seconds.
     pub async fn new(
         config: BigTableConfig,
         streams: &ChangeStreamFactory,
@@ -835,6 +836,7 @@ impl BigTableBackend {
                 &project_id,
                 &instance_name,
                 false, // is_read_only
+                connections.unwrap_or(1),
                 Some(rpc_timeout),
             )?
         } else {
@@ -849,6 +851,7 @@ impl BigTableBackend {
                 true, // prime_channels
                 None, // app_profile_id
                 MAX_CHANNEL_AGE,
+                Some(Duration::from_secs(10)), // periodic PingAndWarm
             )
             .await?
         };
