@@ -67,7 +67,7 @@ impl Session {
     ///
     /// An already-sufficient deadline succeeds without being shortened. Relative
     /// targets are resolved by the server, not added to the existing deadline.
-    /// This requires object-write permission and a server supporting expiry updates.
+    /// This requires object-write permission.
     ///
     /// Returns [`ExtendExpiryResponse`] to distinguish a satisfied request, an
     /// absent or expired object, and a rejected extension. Other HTTP and transport
