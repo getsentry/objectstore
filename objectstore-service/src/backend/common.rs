@@ -11,7 +11,7 @@ use objectstore_types::time::Timestamp;
 
 use bytes::Bytes;
 
-use crate::error::{ErrorKind, Result};
+use crate::error::{Error, ErrorKind, Result};
 use crate::id::ObjectId;
 use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
@@ -81,6 +81,54 @@ impl ExpiryTarget {
     }
 }
 
+/// An expiry target and optional limit on the remaining lifetime it requests.
+///
+/// The limit is measured from the operation's `access_time`, regardless of the target's
+/// anchor. It does not change the stored policy or shorten existing deadlines.
+/// Repeated updates can therefore keep an object alive indefinitely.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExpiryUpdate {
+    /// The requested minimum deadline.
+    pub target: ExpiryTarget,
+    /// Maximum remaining lifetime. `None` means no limit.
+    pub max: Option<Duration>,
+}
+
+impl From<ExpiryTarget> for ExpiryUpdate {
+    fn from(target: ExpiryTarget) -> Self {
+        Self { target, max: None }
+    }
+}
+
+impl ExpiryUpdate {
+    /// Resolves and validates the requested deadline using the stored object metadata.
+    ///
+    /// Returns `None` if the creation-time anchor is required but unavailable.
+    ///
+    /// Returns [`ErrorKind::InvalidMetadata`] if the requested deadline exceeds
+    /// `access_time + max`, even if the existing deadline already satisfies it.
+    /// Timestamp addition rounds up to seconds and saturates at the supported maximum.
+    pub fn resolve(
+        self,
+        time_created: Option<Timestamp>,
+        access_time: Timestamp,
+    ) -> Result<Option<Timestamp>> {
+        let Some(deadline) = self.target.resolve(time_created) else {
+            return Ok(None);
+        };
+
+        if let Some(max) = self.max
+            && deadline > access_time.saturating_add(max)
+        {
+            return Err(Error::new(
+                ErrorKind::InvalidMetadata,
+                "requested expiry exceeds maximum remaining lifetime",
+            ));
+        }
+        Ok(Some(deadline))
+    }
+}
+
 /// Trait implemented by all storage backends.
 ///
 /// Object operations take `access_time`, the timestamp of the caller's operation.
@@ -131,11 +179,12 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// Returns [`SetExpiryResponse::Satisfied`] when extended or already satisfied,
     /// [`SetExpiryResponse::NotFound`] when observed absent or expired, or
     /// [`SetExpiryResponse::Rejected`] when ineligible or conflicting.
-    /// Backend failures are returned as errors.
+    /// Limit violations return [`ErrorKind::InvalidMetadata`]; backend failures also
+    /// return errors. Limits are checked before reporting an already-satisfied request.
     async fn set_expiry(
         &self,
         id: &ObjectId,
-        target: ExpiryTarget,
+        target: ExpiryUpdate,
         access_time: Timestamp,
     ) -> Result<SetExpiryResponse>;
 
@@ -467,7 +516,7 @@ impl TieredWrite {
 #[derive(Clone, Debug)]
 pub enum TieredUpdate {
     /// Extend the deadline while preserving all other stored data.
-    SetExpiry(ExpiryTarget),
+    SetExpiry(ExpiryUpdate),
 }
 
 /// Creates a reqwest client with required defaults.
@@ -510,5 +559,31 @@ mod tests {
             ExpiryTarget::FromCreation(Duration::from_secs(1)).resolve(Some(max)),
             Some(max)
         );
+
+        // The cap is measured from access time, not creation.
+        let deadline = created + Duration::from_hours(3);
+        let access_time = created + Duration::from_hours(1);
+        for target in [
+            ExpiryTarget::At(deadline),
+            ExpiryTarget::FromCreation(Duration::from_hours(3)),
+        ] {
+            let update = ExpiryUpdate {
+                target,
+                max: Some(Duration::from_hours(1)),
+            };
+            assert_eq!(
+                update
+                    .resolve(Some(created), access_time)
+                    .unwrap_err()
+                    .kind(),
+                ErrorKind::InvalidMetadata
+            );
+            assert_eq!(
+                update
+                    .resolve(Some(created), access_time + Duration::from_hours(1))
+                    .unwrap(),
+                Some(deadline)
+            );
+        }
     }
 }

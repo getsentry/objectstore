@@ -47,7 +47,7 @@ use objectstore_types::range::ByteRange;
 use objectstore_types::resumable::UploadProgress;
 
 use crate::backend::common::{
-    Backend, DeleteResponse, ExpiryTarget, GetResponse, HighVolumeBackend, MetadataResponse,
+    Backend, DeleteResponse, ExpiryUpdate, GetResponse, HighVolumeBackend, MetadataResponse,
     MultipartUploadBackend, PutResponse, SetExpiryResponse, TieredGet, TieredMetadata,
     TieredUpdate, TieredWrite, Tombstone,
 };
@@ -116,7 +116,7 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         &self,
         inner: &InMemoryBackend,
         id: &ObjectId,
-        target: ExpiryTarget,
+        target: ExpiryUpdate,
         access_time: Timestamp,
     ) -> Result<SetExpiryResponse> {
         inner.set_expiry(id, target, access_time).await
@@ -417,7 +417,7 @@ impl<H: Hooks> Backend for TestBackend<H> {
     async fn set_expiry(
         &self,
         id: &ObjectId,
-        target: ExpiryTarget,
+        target: ExpiryUpdate,
         access_time: Timestamp,
     ) -> Result<SetExpiryResponse> {
         self.hooks

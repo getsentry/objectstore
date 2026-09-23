@@ -276,9 +276,10 @@ checked during request extraction, before the handler runs.
 
 The `usecases` config block configures per-use-case properties. Use cases
 not present in the map are unconstrained. Currently this covers expiration
-policy constraints: which policies are permitted and their maximum durations.
+policy constraints: which policies are permitted and a shared maximum duration.
 Writes that violate the constraints are rejected with HTTP 400. Validation
 applies to all insert paths: single-object `POST` and `PUT` endpoints and
-batch `INSERT` operations.
+batch `INSERT` operations. Explicit expiry extensions through `PATCH` also enforce
+the maximum duration, measured from request time.
 
 See [`usecases`] for the full configuration schema and YAML examples.

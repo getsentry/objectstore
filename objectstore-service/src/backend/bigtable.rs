@@ -46,7 +46,7 @@ use tonic::Code;
 use tracing::Instrument;
 
 use crate::backend::common::{
-    Backend, DeleteResponse, ExpiryTarget, GetResponse, HighVolumeBackend, MetadataResponse,
+    Backend, DeleteResponse, ExpiryUpdate, GetResponse, HighVolumeBackend, MetadataResponse,
     PutResponse, SetExpiryResponse, TieredGet, TieredMetadata, TieredUpdate, TieredWrite,
     Tombstone,
 };
@@ -1036,7 +1036,7 @@ impl Backend for BigTableBackend {
     async fn set_expiry(
         &self,
         id: &ObjectId,
-        target: ExpiryTarget,
+        target: ExpiryUpdate,
         access_time: Timestamp,
     ) -> Result<SetExpiryResponse> {
         self.compare_and_update(id, None, TieredUpdate::SetExpiry(target), access_time)
@@ -1242,7 +1242,8 @@ impl HighVolumeBackend for BigTableBackend {
                 if old_expiry < access_time {
                     return Ok(SetExpiryResponse::NotFound); // already expired
                 }
-                let Some(expire_at) = expiry_target.resolve(metadata.time_created) else {
+                let Some(expire_at) = expiry_target.resolve(metadata.time_created, access_time)?
+                else {
                     return Ok(SetExpiryResponse::Rejected);
                 };
                 if old_expiry >= expire_at {
@@ -1277,7 +1278,7 @@ impl HighVolumeBackend for BigTableBackend {
                 if redirect_target != *expected {
                     return Ok(SetExpiryResponse::Rejected); // wrong target
                 }
-                let Some(expire_at) = expiry_target.resolve(None) else {
+                let Some(expire_at) = expiry_target.resolve(None, access_time)? else {
                     return Ok(SetExpiryResponse::Rejected);
                 };
                 if old_expiry >= expire_at {
@@ -1528,14 +1529,12 @@ mod tests {
 
     use anyhow::Result;
     #[cfg(feature = "storage-cogs")]
-    use objectstore_inventory_tracker::OpType;
-    #[cfg(feature = "storage-cogs")]
-    use objectstore_inventory_tracker::test_utils::DummyProducer;
-
+    use objectstore_inventory_tracker::{OpType, test_utils::DummyProducer};
     use objectstore_types::metadata::ExpirationPolicy;
     use objectstore_types::scope::{Scope, Scopes};
 
     use super::*;
+    use crate::backend::common::ExpiryTarget;
     use crate::id::ObjectContext;
     use crate::stream;
 
@@ -1853,7 +1852,9 @@ mod tests {
             ExpiryTarget::FromCreation(tti + tti),
         ] {
             assert_eq!(
-                backend.set_expiry(&id, target, Timestamp::now()).await?,
+                backend
+                    .set_expiry(&id, target.into(), Timestamp::now())
+                    .await?,
                 SetExpiryResponse::Satisfied(requested)
             );
         }
@@ -1898,7 +1899,7 @@ mod tests {
                 backend
                     .set_expiry(
                         &id,
-                        ExpiryTarget::FromCreation(Duration::from_hours(2)),
+                        ExpiryTarget::FromCreation(Duration::from_hours(2)).into(),
                         access_time
                     )
                     .await?,
@@ -1916,7 +1917,7 @@ mod tests {
             backend
                 .set_expiry(
                     &missing,
-                    ExpiryTarget::At(Timestamp::now() + Duration::from_hours(2)),
+                    ExpiryTarget::At(Timestamp::now() + Duration::from_hours(2)).into(),
                     Timestamp::now()
                 )
                 .await?,
@@ -1988,7 +1989,7 @@ mod tests {
                 .compare_and_update(
                     &id,
                     Some(&wrong_target),
-                    TieredUpdate::SetExpiry(ExpiryTarget::At(later)),
+                    TieredUpdate::SetExpiry(ExpiryTarget::At(later).into()),
                     Timestamp::now(),
                 )
                 .await?,
@@ -1999,7 +2000,7 @@ mod tests {
                 .compare_and_update(
                     &id,
                     Some(&target),
-                    TieredUpdate::SetExpiry(ExpiryTarget::At(later)),
+                    TieredUpdate::SetExpiry(ExpiryTarget::At(later).into()),
                     Timestamp::now()
                 )
                 .await?,
@@ -2011,7 +2012,7 @@ mod tests {
                 .compare_and_update(
                     &id,
                     Some(&target),
-                    TieredUpdate::SetExpiry(ExpiryTarget::At(requested)),
+                    TieredUpdate::SetExpiry(ExpiryTarget::At(requested).into()),
                     Timestamp::now(),
                 )
                 .await?,
@@ -2626,7 +2627,7 @@ mod tests {
                 .compare_and_update(
                     &id,
                     Some(&id),
-                    TieredUpdate::SetExpiry(ExpiryTarget::At(requested)),
+                    TieredUpdate::SetExpiry(ExpiryTarget::At(requested).into()),
                     Timestamp::now()
                 )
                 .await?,
@@ -3091,7 +3092,7 @@ mod tests {
         backend
             .set_expiry(
                 &id,
-                ExpiryTarget::At(Timestamp::now() + Duration::from_secs(3600)),
+                ExpiryTarget::At(Timestamp::now() + Duration::from_secs(3600)).into(),
                 Timestamp::now(),
             )
             .await?;
