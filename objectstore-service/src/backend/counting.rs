@@ -23,7 +23,8 @@ use objectstore_types::resumable::UploadProgress;
 use objectstore_types::time::Timestamp;
 
 use crate::backend::common::{
-    Backend, DeleteResponse, GetResponse, MetadataResponse, MultipartUploadBackend, PutResponse,
+    Backend, DeleteResponse, ExpiryTarget, GetResponse, MetadataResponse, MultipartUploadBackend,
+    PutResponse, SetExpiryResponse,
 };
 use crate::error::Result;
 use crate::id::ObjectId;
@@ -105,11 +106,11 @@ impl Backend for CountingBackend {
     async fn set_expiry(
         &self,
         id: &ObjectId,
-        expire_at: Timestamp,
+        target: ExpiryTarget,
         access_time: Timestamp,
-    ) -> Result<bool> {
+    ) -> Result<SetExpiryResponse> {
         count(&id.context.usecase);
-        self.inner.set_expiry(id, expire_at, access_time).await
+        self.inner.set_expiry(id, target, access_time).await
     }
 
     async fn delete_object(&self, id: &ObjectId, access_time: Timestamp) -> Result<DeleteResponse> {

@@ -14,7 +14,7 @@ use std::time::Duration;
 use objectstore_types::time::Timestamp;
 use tokio::sync::{Notify, mpsc};
 
-use crate::backend::common::Backend;
+use crate::backend::common::{Backend, ExpiryTarget, SetExpiryResponse};
 use crate::concurrency::ConcurrencyLimiter;
 use crate::error::ErrorKind;
 use crate::id::ObjectId;
@@ -137,12 +137,15 @@ impl RenewalWorker {
         crate::concurrency::spawn_metered("set_expiry", (pending, permit), async move {
             // Queueing must not let a stale read time authorize an expired object.
             let access_time = Timestamp::now();
-            match backend.set_expiry(&id, expire_at, access_time).await {
-                Ok(true) => {
+            match backend
+                .set_expiry(&id, ExpiryTarget::At(expire_at), access_time)
+                .await
+            {
+                Ok(SetExpiryResponse::Satisfied(_)) => {
                     objectstore_metrics::count!("service.expiry_renewal", outcome = "applied");
                     Ok(())
                 }
-                Ok(false) => {
+                Ok(SetExpiryResponse::NotFound | SetExpiryResponse::Rejected) => {
                     objectstore_metrics::count!(
                         "service.expiry_renewal",
                         outcome = "skipped",

@@ -19,7 +19,7 @@ use objectstore_types::range::{ByteRange, ContentRange};
 use objectstore_types::resumable::{SessionToken as EncryptedSessionToken, UploadProgress};
 use objectstore_types::time::Timestamp;
 
-use crate::backend::common::Backend;
+use crate::backend::common::{Backend, ExpiryTarget, SetExpiryResponse};
 use crate::backend::counting::CountingBackend;
 use crate::background::RenewalScheduler;
 use crate::concurrency::ConcurrencyLimiter;
@@ -303,15 +303,18 @@ impl StorageService {
     }
 
     /// Extends an existing TTL or TTI object's deadline.
+    ///
+    /// Returns whether the request was satisfied, the object was absent or expired,
+    /// or the update was rejected. See [`SetExpiryResponse`] for details.
     pub async fn set_expiry(
         &self,
         id: ObjectId,
-        expire_at: Timestamp,
+        target: ExpiryTarget,
         access_time: Timestamp,
-    ) -> Result<bool> {
+    ) -> Result<SetExpiryResponse> {
         let inner = Arc::clone(&self.inner);
         self.spawn("set_expiry", async move {
-            inner.set_expiry(&id, expire_at, access_time).await
+            inner.set_expiry(&id, target, access_time).await
         })
         .await
     }
@@ -864,11 +867,12 @@ mod tests {
             .unwrap();
         let requested = old_expiry + Duration::from_hours(1);
 
-        assert!(
+        assert_eq!(
             service
-                .set_expiry(id.clone(), requested, Timestamp::now())
+                .set_expiry(id.clone(), ExpiryTarget::At(requested), Timestamp::now())
                 .await
-                .unwrap()
+                .unwrap(),
+            SetExpiryResponse::Satisfied(requested)
         );
         assert_eq!(
             service
@@ -932,14 +936,14 @@ mod tests {
             &self,
             inner: &InMemoryBackend,
             id: &ObjectId,
-            expire_at: Timestamp,
+            target: ExpiryTarget,
             access_time: Timestamp,
-        ) -> Result<bool> {
+        ) -> Result<SetExpiryResponse> {
             *self.access_time.lock().unwrap() = Some(access_time);
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.started.notify_one();
             self.resume.notified().await;
-            inner.set_expiry(id, expire_at, access_time).await
+            inner.set_expiry(id, target, access_time).await
         }
     }
 
@@ -1114,14 +1118,14 @@ mod tests {
             &self,
             inner: &InMemoryBackend,
             id: &ObjectId,
-            expire_at: Timestamp,
+            target: ExpiryTarget,
             access_time: Timestamp,
-        ) -> Result<bool> {
+        ) -> Result<SetExpiryResponse> {
             if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 assert!(!self.panic, "intentional renewal panic");
                 return Err(ErrorKind::BackendFailure.into());
             }
-            inner.set_expiry(id, expire_at, access_time).await
+            inner.set_expiry(id, target, access_time).await
         }
     }
 

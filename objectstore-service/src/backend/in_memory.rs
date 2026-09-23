@@ -18,8 +18,9 @@ use futures_util::TryStreamExt;
 use objectstore_types::metadata::Metadata;
 
 use super::common::{
-    DeleteResponse, GetResponse, HighVolumeBackend, MultipartUploadBackend, PutResponse, TieredGet,
-    TieredMetadata, TieredUpdate, TieredWrite, Tombstone,
+    DeleteResponse, ExpiryTarget, GetResponse, HighVolumeBackend, MultipartUploadBackend,
+    PutResponse, SetExpiryResponse, TieredGet, TieredMetadata, TieredUpdate, TieredWrite,
+    Tombstone,
 };
 use crate::change_stream::{ChangeStream, NoopStream, flush_change_stream};
 use crate::error::{Error, ErrorKind, Result};
@@ -220,24 +221,29 @@ impl super::common::Backend for InMemoryBackend {
     async fn set_expiry(
         &self,
         id: &ObjectId,
-        expire_at: Timestamp,
+        target: ExpiryTarget,
         access_time: Timestamp,
-    ) -> Result<bool> {
+    ) -> Result<SetExpiryResponse> {
         let outcome = {
             let mut store = self.store.lock().unwrap();
             match store.get_mut(id) {
-                Some(StoreEntry::Object(metadata, _)) => {
-                    extend_expiry(&mut metadata.time_expires, expire_at, access_time)
-                }
+                None => ExpiryOutcome::NotFound,
+                Some(entry) if entry.is_expired(access_time) => ExpiryOutcome::NotFound,
+                Some(StoreEntry::Object(metadata, _)) => extend_expiry(
+                    &mut metadata.time_expires,
+                    target,
+                    metadata.time_created,
+                    access_time,
+                ),
                 _ => ExpiryOutcome::Rejected,
             }
         };
 
-        if outcome == ExpiryOutcome::Extended {
+        if let ExpiryOutcome::Extended(expire_at) = outcome {
             self.change_stream.update(id, Some(expire_at));
         }
 
-        Ok(outcome.is_satisfied())
+        Ok(outcome.response())
     }
 
     async fn delete_object(
@@ -446,26 +452,34 @@ impl HighVolumeBackend for InMemoryBackend {
         current: Option<&ObjectId>,
         update: TieredUpdate,
         access_time: Timestamp,
-    ) -> Result<bool> {
-        let TieredUpdate::SetExpiry(expire_at) = update;
+    ) -> Result<SetExpiryResponse> {
+        let TieredUpdate::SetExpiry(expiry_target) = update;
         let outcome = {
             let mut store = self.store.lock().unwrap();
             match (store.get_mut(id), current) {
+                (None, _) => ExpiryOutcome::NotFound,
+                (Some(entry), _) if entry.is_expired(access_time) => ExpiryOutcome::NotFound,
                 (Some(StoreEntry::Object(metadata, _)), None) => {
-                    extend_expiry(&mut metadata.time_expires, expire_at, access_time)
+                    let time_created = metadata.time_created;
+                    extend_expiry(
+                        &mut metadata.time_expires,
+                        expiry_target,
+                        time_created,
+                        access_time,
+                    )
                 }
                 (Some(StoreEntry::Tombstone(t)), Some(target)) if t.target == *target => {
-                    extend_expiry(&mut t.time_expires, expire_at, access_time)
+                    extend_expiry(&mut t.time_expires, expiry_target, None, access_time)
                 }
                 _ => ExpiryOutcome::Rejected,
             }
         };
 
-        if outcome == ExpiryOutcome::Extended {
+        if let ExpiryOutcome::Extended(expire_at) = outcome {
             self.change_stream.update(id, Some(expire_at));
         }
 
-        Ok(outcome.is_satisfied())
+        Ok(outcome.response())
     }
 
     async fn compare_and_write(
@@ -725,38 +739,54 @@ fn matches_redirect(
 /// [`ChangeStream`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ExpiryOutcome {
-    /// The deadline could not be extended. None is set, or it has already passed.
+    /// The entry is absent or expired.
+    NotFound,
+    /// The entry was not eligible or the target could not be resolved.
     Rejected,
     /// The stored deadline already covered `expire_at`. Nothing was written.
-    AlreadySatisfied,
+    AlreadySatisfied(Timestamp),
     /// The stored deadline moved out to `expire_at`.
-    Extended,
+    Extended(Timestamp),
 }
 
 impl ExpiryOutcome {
-    /// Whether the entry now expires no earlier than the requested deadline.
-    fn is_satisfied(self) -> bool {
-        !matches!(self, Self::Rejected)
+    /// Converts the internal mutation outcome to the backend response.
+    fn response(self) -> SetExpiryResponse {
+        match self {
+            Self::NotFound => SetExpiryResponse::NotFound,
+            Self::Rejected => SetExpiryResponse::Rejected,
+            Self::AlreadySatisfied(deadline) | Self::Extended(deadline) => {
+                SetExpiryResponse::Satisfied(deadline)
+            }
+        }
     }
 }
 
-/// Extends an active expiry time to `expire_at` where valid.
+/// Resolves `target` and extends an active expiry time where valid.
+///
+/// Eligibility is checked before target resolution.
 fn extend_expiry(
     field: &mut Option<Timestamp>,
-    expire_at: Timestamp,
-    now: Timestamp,
+    target: ExpiryTarget,
+    time_created: Option<Timestamp>,
+    access_time: Timestamp,
 ) -> ExpiryOutcome {
     let Some(time_expires) = *field else {
         return ExpiryOutcome::Rejected; // entries without a deadline cannot be extended
     };
 
-    if time_expires < now {
-        ExpiryOutcome::Rejected // already expired
-    } else if time_expires >= expire_at {
-        ExpiryOutcome::AlreadySatisfied
+    if time_expires < access_time {
+        return ExpiryOutcome::NotFound; // already expired
+    }
+
+    let Some(expire_at) = target.resolve(time_created) else {
+        return ExpiryOutcome::Rejected;
+    };
+    if time_expires >= expire_at {
+        ExpiryOutcome::AlreadySatisfied(expire_at)
     } else {
         *field = Some(expire_at);
-        ExpiryOutcome::Extended
+        ExpiryOutcome::Extended(expire_at)
     }
 }
 
@@ -1047,43 +1077,49 @@ mod tests {
             ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
             ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
         ] {
-            let backend = InMemoryBackend::new("test");
-            let id = make_id();
             let original_expiry = access_time + Duration::from_hours(1);
-            let metadata = Metadata {
-                expiration_policy: policy,
-                time_expires: Some(original_expiry),
-                custom: [("preserved".into(), "yes".into())].into(),
-                ..Default::default()
-            };
-            backend
-                .put_object(&id, &metadata, stream::single("payload"), access_time)
-                .await
-                .unwrap();
-
             let requested = original_expiry + Duration::from_hours(1) + Duration::from_nanos(999);
-            assert!(
+            for target in [
+                ExpiryTarget::At(requested),
+                ExpiryTarget::FromCreation(Duration::from_hours(2) + Duration::from_nanos(999)),
+            ] {
+                let backend = InMemoryBackend::new("test");
+                let id = make_id();
+                let metadata = Metadata {
+                    expiration_policy: policy,
+                    time_created: Some(access_time),
+                    time_expires: Some(original_expiry),
+                    custom: [("preserved".into(), "yes".into())].into(),
+                    ..Default::default()
+                };
                 backend
-                    .set_expiry(&id, requested, access_time)
+                    .put_object(&id, &metadata, stream::single("payload"), access_time)
                     .await
-                    .unwrap()
-            );
-            let (updated, payload) = backend.get(&id).expect_object();
-            assert_eq!(updated.expiration_policy, policy);
-            assert_eq!(updated.custom, metadata.custom);
-            assert_eq!(payload, Bytes::from_static(b"payload"));
-            assert_eq!(updated.time_expires, Some(requested));
+                    .unwrap();
 
-            assert!(
-                backend
-                    .set_expiry(&id, original_expiry, access_time)
-                    .await
-                    .unwrap()
-            );
-            assert_eq!(
-                backend.get(&id).expect_object().0.time_expires,
-                updated.time_expires
-            );
+                assert_eq!(
+                    backend.set_expiry(&id, target, access_time).await.unwrap(),
+                    SetExpiryResponse::Satisfied(requested)
+                );
+                let (updated, payload) = backend.get(&id).expect_object();
+                assert_eq!(updated.expiration_policy, policy);
+                assert_eq!(updated.time_created, metadata.time_created);
+                assert_eq!(updated.custom, metadata.custom);
+                assert_eq!(payload, Bytes::from_static(b"payload"));
+                assert_eq!(updated.time_expires, Some(requested));
+
+                assert_eq!(
+                    backend
+                        .set_expiry(&id, ExpiryTarget::At(original_expiry), access_time)
+                        .await
+                        .unwrap(),
+                    SetExpiryResponse::Satisfied(original_expiry)
+                );
+                assert_eq!(
+                    backend.get(&id).expect_object().0.time_expires,
+                    updated.time_expires
+                );
+            }
         }
     }
 
@@ -1092,11 +1128,51 @@ mod tests {
         let access_time = Timestamp::from_unix_secs(1_700_000_000).unwrap();
         let backend = InMemoryBackend::new("test");
         let absent = make_id();
-        assert!(
-            !backend
-                .set_expiry(&absent, access_time + Duration::from_hours(1), access_time)
+        assert_eq!(
+            backend
+                .set_expiry(
+                    &absent,
+                    ExpiryTarget::At(access_time + Duration::from_hours(1)),
+                    access_time,
+                )
                 .await
-                .unwrap()
+                .unwrap(),
+            SetExpiryResponse::NotFound
+        );
+
+        let missing_creation = make_id();
+        let original_expiry = access_time + Duration::from_hours(1);
+        backend
+            .put_object(
+                &missing_creation,
+                &Metadata {
+                    expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
+                    time_expires: Some(original_expiry),
+                    ..Default::default()
+                },
+                stream::single("legacy"),
+                access_time,
+            )
+            .await
+            .unwrap();
+        let absolute = original_expiry + Duration::from_hours(1);
+        assert_eq!(
+            backend
+                .set_expiry(&missing_creation, ExpiryTarget::At(absolute), access_time)
+                .await
+                .unwrap(),
+            SetExpiryResponse::Satisfied(absolute)
+        );
+        assert_eq!(
+            backend
+                .set_expiry(
+                    &missing_creation,
+                    ExpiryTarget::FromCreation(Duration::ZERO),
+                    access_time,
+                )
+                .await
+                .unwrap(),
+            SetExpiryResponse::Rejected
         );
 
         let manual = make_id();
@@ -1109,11 +1185,16 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(
-            !backend
-                .set_expiry(&manual, access_time + Duration::from_hours(1), access_time)
+        assert_eq!(
+            backend
+                .set_expiry(
+                    &manual,
+                    ExpiryTarget::At(access_time + Duration::from_hours(1)),
+                    access_time,
+                )
                 .await
-                .unwrap()
+                .unwrap(),
+            SetExpiryResponse::Rejected
         );
 
         let expired = make_id();
@@ -1143,11 +1224,16 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert!(
-            !backend
-                .set_expiry(&expired, access_time + Duration::from_hours(1), access_time)
+        assert_eq!(
+            backend
+                .set_expiry(
+                    &expired,
+                    ExpiryTarget::At(access_time + Duration::from_hours(1)),
+                    access_time,
+                )
                 .await
-                .unwrap()
+                .unwrap(),
+            SetExpiryResponse::NotFound
         );
     }
 
@@ -1186,31 +1272,45 @@ mod tests {
         );
 
         let new_expiry = old_expiry + Duration::from_hours(1);
-        assert!(
-            !backend
+        assert_eq!(
+            backend
                 .compare_and_update(
                     &id,
                     Some(&other),
-                    TieredUpdate::SetExpiry(new_expiry),
+                    TieredUpdate::SetExpiry(ExpiryTarget::At(new_expiry)),
                     access_time,
                 )
                 .await
-                .unwrap()
+                .unwrap(),
+            SetExpiryResponse::Rejected
         );
         assert_eq!(
             backend.get(&id).expect_tombstone().time_expires,
             Some(old_expiry)
         );
-        assert!(
+        assert_eq!(
             backend
                 .compare_and_update(
                     &id,
                     Some(&target),
-                    TieredUpdate::SetExpiry(new_expiry),
+                    TieredUpdate::SetExpiry(ExpiryTarget::FromCreation(Duration::from_hours(2))),
+                    access_time,
+                )
+                .await
+                .unwrap(),
+            SetExpiryResponse::Rejected
+        );
+        assert_eq!(
+            backend
+                .compare_and_update(
+                    &id,
+                    Some(&target),
+                    TieredUpdate::SetExpiry(ExpiryTarget::At(new_expiry)),
                     access_time
                 )
                 .await
-                .unwrap()
+                .unwrap(),
+            SetExpiryResponse::Satisfied(new_expiry)
         );
         assert_eq!(
             backend.get(&id).expect_tombstone().time_expires,
@@ -1621,11 +1721,12 @@ mod tests {
         producer.clear();
 
         let extended = expires + Duration::from_secs(3600);
-        assert!(
+        assert_eq!(
             backend
-                .set_expiry(&id, extended, access_time)
+                .set_expiry(&id, ExpiryTarget::At(extended), access_time)
                 .await
-                .unwrap()
+                .unwrap(),
+            SetExpiryResponse::Satisfied(extended)
         );
 
         let records = producer.records();
@@ -1634,11 +1735,13 @@ mod tests {
 
         // A deadline that already covers the request writes nothing, so it reports nothing.
         producer.clear();
-        assert!(
+        let requested = expires + Duration::from_secs(60);
+        assert_eq!(
             backend
-                .set_expiry(&id, expires + Duration::from_secs(60), access_time)
+                .set_expiry(&id, ExpiryTarget::At(requested), access_time)
                 .await
-                .unwrap()
+                .unwrap(),
+            SetExpiryResponse::Satisfied(requested)
         );
         assert!(producer.records().is_empty());
     }
@@ -1667,16 +1770,17 @@ mod tests {
         producer.clear();
 
         let extended = expires + Duration::from_secs(3600);
-        assert!(
+        assert_eq!(
             backend
                 .compare_and_update(
                     &id,
                     Some(&target),
-                    TieredUpdate::SetExpiry(extended),
+                    TieredUpdate::SetExpiry(ExpiryTarget::At(extended)),
                     access_time,
                 )
                 .await
-                .unwrap()
+                .unwrap(),
+            SetExpiryResponse::Satisfied(extended)
         );
 
         let records = producer.records();

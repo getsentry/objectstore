@@ -38,7 +38,8 @@ use tokio_util::io::{ReaderStream, StreamReader};
 use uuid::Uuid;
 
 use crate::backend::common::{
-    Backend, DeleteResponse, GetResponse, MultipartUploadBackend, PutResponse,
+    Backend, DeleteResponse, ExpiryTarget, GetResponse, MultipartUploadBackend, PutResponse,
+    SetExpiryResponse,
 };
 use crate::change_stream::{
     ChangeStream, ChangeStreamFactory, CostTrackerStreamConfig, flush_change_stream,
@@ -241,14 +242,14 @@ impl Backend for LocalFsBackend {
     async fn set_expiry(
         &self,
         id: &ObjectId,
-        expire_at: Timestamp,
+        target: ExpiryTarget,
         access_time: Timestamp,
-    ) -> Result<bool> {
+    ) -> Result<SetExpiryResponse> {
         let _guard = self.locks.acquire(id).await?;
 
         let path = self.path(id);
         let Some(object) = ObjectFile::try_open(&path, access_time).await? else {
-            return Ok(false);
+            return Ok(SetExpiryResponse::NotFound);
         };
         let ObjectFile {
             mut metadata,
@@ -257,10 +258,13 @@ impl Backend for LocalFsBackend {
         } = object;
 
         let Some(current_expiry) = metadata.time_expires else {
-            return Ok(false);
+            return Ok(SetExpiryResponse::Rejected);
+        };
+        let Some(expire_at) = target.resolve(metadata.time_created) else {
+            return Ok(SetExpiryResponse::Rejected);
         };
         if current_expiry >= expire_at {
-            return Ok(true); // already satisfied
+            return Ok(SetExpiryResponse::Satisfied(expire_at)); // already satisfied
         }
         metadata.time_expires = Some(expire_at);
 
@@ -275,7 +279,7 @@ impl Backend for LocalFsBackend {
 
         self.change_stream.update(id, Some(expire_at));
 
-        Ok(true)
+        Ok(SetExpiryResponse::Satisfied(expire_at))
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
@@ -1444,15 +1448,16 @@ mod tests {
     async fn missing_object_expiry_does_not_block_descendant() {
         let (_tempdir, backend) = make_backend();
         let id = ObjectId::from_parts("testing".into(), Scopes::empty(), "foo".into());
-        assert!(
-            !backend
+        assert_eq!(
+            backend
                 .set_expiry(
                     &id,
-                    Timestamp::now() + Duration::from_hours(1),
+                    ExpiryTarget::At(Timestamp::now() + Duration::from_hours(1)),
                     Timestamp::now()
                 )
                 .await
-                .unwrap()
+                .unwrap(),
+            SetExpiryResponse::NotFound
         );
         let descendant = ObjectId::new(id.context.clone(), "foo/bar".into());
         backend
@@ -1570,9 +1575,11 @@ mod tests {
     async fn set_expiry() {
         let (_tempdir, backend) = make_backend();
         let id = make_id();
-        let old_expiry = Timestamp::now() + Duration::from_hours(1);
+        let created = Timestamp::now();
+        let old_expiry = created + Duration::from_hours(1);
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
+            time_created: Some(created),
             time_expires: Some(old_expiry),
             custom: [("preserved".into(), "yes".into())].into(),
             ..Default::default()
@@ -1582,19 +1589,27 @@ mod tests {
             .await
             .unwrap();
 
-        let requested = old_expiry + Duration::from_hours(1) + Duration::from_nanos(999);
-        assert!(
-            backend
-                .set_expiry(&id, requested, Timestamp::now())
-                .await
-                .unwrap()
-        );
+        let duration = Duration::from_hours(2) + Duration::from_nanos(999);
+        let requested = created + duration;
+        for target in [
+            ExpiryTarget::At(requested),
+            ExpiryTarget::FromCreation(duration),
+        ] {
+            assert_eq!(
+                backend
+                    .set_expiry(&id, target, Timestamp::now())
+                    .await
+                    .unwrap(),
+                SetExpiryResponse::Satisfied(requested)
+            );
+        }
         let (updated, _, payload) = backend
             .get_object(&id, Timestamp::now(), None)
             .await
             .unwrap()
             .unwrap();
         assert_eq!(updated.expiration_policy, metadata.expiration_policy);
+        assert_eq!(updated.time_created, metadata.time_created);
         assert_eq!(updated.custom, metadata.custom);
         assert_eq!(updated.time_expires, Some(requested));
         assert_eq!(stream::read_to_vec(payload).await.unwrap(), b"payload");
@@ -1623,15 +1638,16 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert!(
-            !backend
+        assert_eq!(
+            backend
                 .set_expiry(
                     &id,
-                    Timestamp::now() + Duration::from_hours(1),
+                    ExpiryTarget::At(Timestamp::now() + Duration::from_hours(1)),
                     Timestamp::now()
                 )
                 .await
-                .unwrap()
+                .unwrap(),
+            SetExpiryResponse::NotFound
         );
     }
 
