@@ -301,7 +301,7 @@ def test_extend_expiry(server_url: str) -> None:
     metadata = session.head(key)
     assert metadata is not None and metadata.time_created is not None
     assert metadata.time_expires == metadata.time_created + timedelta(days=3)
-    assert metadata.expiration_policy == policy
+    assert metadata.expiration_policy == TimeToLive(timedelta(days=3))
 
     session.extend_expiry(key, from_creation=timedelta(days=2))
     assert session.head(key) == metadata

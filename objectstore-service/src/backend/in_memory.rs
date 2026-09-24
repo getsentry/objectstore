@@ -17,8 +17,8 @@ use bytes::{Bytes, BytesMut};
 use futures_util::TryStreamExt;
 use objectstore_types::metadata::Metadata;
 
-use super::common::{
-    DeleteResponse, ExpiryUpdate, GetResponse, HighVolumeBackend, MultipartUploadBackend,
+use crate::backend::common::{
+    self, DeleteResponse, ExpiryUpdate, GetResponse, HighVolumeBackend, MultipartUploadBackend,
     PutResponse, SetExpiryResponse, TieredGet, TieredMetadata, TieredUpdate, TieredWrite,
     Tombstone,
 };
@@ -229,12 +229,9 @@ impl super::common::Backend for InMemoryBackend {
             match store.get_mut(id) {
                 None => ExpiryOutcome::NotFound,
                 Some(entry) if entry.is_expired(access_time) => ExpiryOutcome::NotFound,
-                Some(StoreEntry::Object(metadata, _)) => extend_expiry(
-                    &mut metadata.time_expires,
-                    target,
-                    metadata.time_created,
-                    access_time,
-                )?,
+                Some(StoreEntry::Object(metadata, _)) => {
+                    extend_object_expiry(metadata, target, access_time)?
+                }
                 _ => ExpiryOutcome::Rejected,
             }
         };
@@ -460,13 +457,7 @@ impl HighVolumeBackend for InMemoryBackend {
                 (None, _) => ExpiryOutcome::NotFound,
                 (Some(entry), _) if entry.is_expired(access_time) => ExpiryOutcome::NotFound,
                 (Some(StoreEntry::Object(metadata, _)), None) => {
-                    let time_created = metadata.time_created;
-                    extend_expiry(
-                        &mut metadata.time_expires,
-                        expiry_target,
-                        time_created,
-                        access_time,
-                    )?
+                    extend_object_expiry(metadata, expiry_target, access_time)?
                 }
                 (Some(StoreEntry::Tombstone(t)), Some(target)) if t.target == *target => {
                     extend_expiry(&mut t.time_expires, expiry_target, None, access_time)?
@@ -760,6 +751,40 @@ impl ExpiryOutcome {
             }
         }
     }
+}
+
+/// Extends an object's deadline and TTL together, leaving metadata intact on error.
+fn extend_object_expiry(
+    metadata: &mut Metadata,
+    target: ExpiryUpdate,
+    access_time: Timestamp,
+) -> Result<ExpiryOutcome> {
+    let Some(original_expires) = metadata.time_expires else {
+        return Ok(ExpiryOutcome::Rejected); // entry without a deadline
+    };
+
+    // Only write `updated_expires` back if `extended_expiration_policy` also succeeds
+    let mut updated_expires = Some(original_expires);
+    let outcome = extend_expiry(
+        &mut updated_expires,
+        target,
+        metadata.time_created,
+        access_time,
+    )?;
+
+    if let ExpiryOutcome::Extended(expire_at) = outcome {
+        let updated_policy = common::extended_expiration_policy(
+            metadata.expiration_policy,
+            metadata.time_created,
+            original_expires,
+            expire_at,
+        )?;
+
+        metadata.time_expires = updated_expires;
+        metadata.expiration_policy = updated_policy;
+    }
+
+    Ok(outcome)
 }
 
 /// Resolves `target` and extends an active expiry time where valid.
@@ -1123,7 +1148,13 @@ mod tests {
                     ErrorKind::InvalidMetadata,
                 );
                 let (updated, payload) = backend.get(&id).expect_object();
-                assert_eq!(updated.expiration_policy, policy);
+                let expected_policy = match policy {
+                    ExpirationPolicy::TimeToLive(_) => {
+                        ExpirationPolicy::TimeToLive(Duration::from_hours(2))
+                    }
+                    other => other,
+                };
+                assert_eq!(updated.expiration_policy, expected_policy);
                 assert_eq!(updated.time_created, metadata.time_created);
                 assert_eq!(updated.custom, metadata.custom);
                 assert_eq!(payload, Bytes::from_static(b"payload"));
@@ -1136,10 +1167,42 @@ mod tests {
                         .unwrap(),
                     SetExpiryResponse::Satisfied(original_expiry)
                 );
+                assert_eq!(backend.get(&id).expect_object().0, updated);
+            }
+        }
+    }
+
+    #[test]
+    fn extend_object_expiry_preserves_metadata_on_error() {
+        let access_time = Timestamp::from_unix_secs(1_700_000_000).unwrap();
+        let original_expiry = access_time + Duration::from_hours(1);
+        let requested = original_expiry + Duration::from_hours(1);
+        for (time_created, ttl) in [
+            (
+                Some(requested + Duration::from_secs(1)),
+                Duration::from_hours(1),
+            ),
+            (None, Duration::MAX),
+        ] {
+            let original = Metadata {
+                expiration_policy: ExpirationPolicy::TimeToLive(ttl),
+                time_created,
+                time_expires: Some(original_expiry),
+                ..Default::default()
+            };
+            let mut metadata = original.clone();
+            for _ in 0..2 {
                 assert_eq!(
-                    backend.get(&id).expect_object().0.time_expires,
-                    updated.time_expires
+                    extend_object_expiry(
+                        &mut metadata,
+                        ExpiryTarget::At(requested).into(),
+                        access_time,
+                    )
+                    .unwrap_err()
+                    .kind(),
+                    ErrorKind::CorruptData
                 );
+                assert_eq!(metadata, original);
             }
         }
     }
@@ -1188,6 +1251,12 @@ mod tests {
                 .unwrap(),
             SetExpiryResponse::Satisfied(absolute)
         );
+        let updated = backend.get(&missing_creation).expect_object().0;
+        assert_eq!(
+            updated.expiration_policy,
+            ExpirationPolicy::TimeToLive(Duration::from_hours(2))
+        );
+        assert_eq!(updated.time_created, None);
         assert_eq!(
             backend
                 .set_expiry(

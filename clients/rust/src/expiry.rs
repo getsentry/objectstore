@@ -7,7 +7,7 @@ use reqwest::StatusCode;
 use crate::response::ResponseExt as _;
 use crate::{ObjectKey, Session};
 
-/// A requested minimum expiration deadline, without changing the expiration policy.
+/// A requested minimum expiration deadline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExpiryExtension {
     /// An absolute deadline, rounded upward to a whole second.
@@ -63,11 +63,14 @@ pub enum ExtendExpiryResponse {
 }
 
 impl Session {
-    /// Extends an object's expiration deadline without changing its policy or payload.
+    /// Extends an object's expiration deadline while preserving its payload.
     ///
     /// An already-sufficient deadline succeeds without being shortened. Relative
     /// targets are resolved by the server, not added to the existing deadline.
     /// This requires object-write permission.
+    ///
+    /// Actual extensions adjust TTL duration to approximately match the total lifetime
+    /// since creation; TTI duration remains unchanged.
     ///
     /// Returns [`ExtendExpiryResponse`] to distinguish a satisfied request, an
     /// absent or expired object, and a rejected extension. Other HTTP and transport

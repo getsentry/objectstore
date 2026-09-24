@@ -277,7 +277,8 @@ defaults to 1,000 and is configurable by the server through
 Apart from the expiration policy, metadata during object creation must carry a
 `time_expires` field with the correct initial expiration timestamp. This is
 ensured during metadata creation by the server. Explicit deadline extensions
-can later increase `time_expires` without changing the policy or its duration.
+can later increase `time_expires`. For TTL objects, this operation
+also updates the policy's duration.
 
 # Backpressure
 

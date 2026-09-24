@@ -64,8 +64,7 @@ usecase = Usecase("attachments", expiration_policy=TimeToIdle(timedelta(days=30)
 session.put(b"payload", expiration_policy=TimeToLive(timedelta(hours=1)))
 ```
 
-Use `Session.extend_expiry` to keep an existing object longer without changing its
-TTL/TTI policy:
+Use `Session.extend_expiry` to keep an existing object longer.
 
 ```python
 from objectstore_client import ExpiryExtensionRejected

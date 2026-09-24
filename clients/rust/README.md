@@ -78,8 +78,7 @@ session.put("payload")
     .send().await?;
 ```
 
-Use [`Session::extend_expiry`] to keep an existing object longer without changing its
-TTL/TTI policy:
+Use [`Session::extend_expiry`] to keep an existing object longer.
 
 ```rust,no_run
 # async fn example(session: objectstore_client::Session) -> objectstore_client::Result<()> {

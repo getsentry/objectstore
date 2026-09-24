@@ -932,7 +932,10 @@ async fn extends_expiry() {
         metadata.time_expires,
         Some(metadata.time_created.unwrap() + Duration::from_secs(3 * 86400))
     );
-    assert_eq!(metadata.expiration_policy, policy);
+    assert_eq!(
+        metadata.expiration_policy,
+        ExpirationPolicy::TimeToLive(Duration::from_secs(3 * 86400))
+    );
 
     let outcome = session
         .extend_expiry(
