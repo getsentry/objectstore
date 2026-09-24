@@ -1087,6 +1087,62 @@ async fn test_resumable_upload() {
 
 #[cfg(feature = "resumable-upload-api")]
 #[tokio::test]
+async fn test_resumable_upload_streaming() {
+    let server = test_server().await;
+    let session = common::test_session(&server);
+
+    let compressed = zstd::encode_all(&b"abcdef"[..], 0).unwrap();
+    let second_piece_start = compressed.len() / 2;
+    let first_piece_len = second_piece_start / 2;
+    let upload = session
+        .create_upload(compressed.len() as u64)
+        .key("resumable-streaming-client")
+        .compression(Compression::Zstd)
+        .send()
+        .await
+        .unwrap()
+        .unwrap();
+
+    let chunk = futures_util::stream::iter([
+        Ok::<_, std::io::Error>(bytes::Bytes::copy_from_slice(
+            &compressed[..first_piece_len],
+        )),
+        Ok(bytes::Bytes::copy_from_slice(
+            &compressed[first_piece_len..second_piece_start],
+        )),
+    ])
+    .boxed();
+    assert_eq!(
+        upload
+            .put_stream(0, second_piece_start as u64, chunk)
+            .send()
+            .await
+            .unwrap(),
+        UploadProgress::Incomplete {
+            offset: second_piece_start as u64
+        }
+    );
+
+    let reader = std::io::Cursor::new(compressed[second_piece_start..].to_vec());
+    assert_eq!(
+        upload
+            .put_read(
+                second_piece_start as u64,
+                (compressed.len() - second_piece_start) as u64,
+                reader
+            )
+            .send()
+            .await
+            .unwrap(),
+        UploadProgress::Complete
+    );
+
+    let response = session.get(upload.key()).send().await.unwrap().unwrap();
+    assert_eq!(response.payload().await.unwrap(), "abcdef");
+}
+
+#[cfg(feature = "resumable-upload-api")]
+#[tokio::test]
 async fn test_resumable_upload_cancel() {
     let server = test_server().await;
     let session = common::test_session(&server);
