@@ -479,7 +479,7 @@ dependencies = [
 [[package]]
 name = "bigtable_rs"
 version = "0.4.1"
-source = "git+https://github.com/getsentry/bigtable_rs.git?rev=10cac8b4ae800ca092382eb12ecd638c181f38c6#10cac8b4ae800ca092382eb12ecd638c181f38c6"
+source = "git+https://github.com/getsentry/bigtable_rs.git?rev=56c310a5c8518d52ae7c7db53825beb078e326b5#56c310a5c8518d52ae7c7db53825beb078e326b5"
 dependencies = [
  "futures-util",
  "gcp_auth",
@@ -2945,7 +2945,6 @@ dependencies = [
  "futures",
  "futures-util",
  "gcp_auth",
- "googleapis-tonic-google-bigtable-v2",
  "humantime",
  "humantime-serde",
  "objectstore-inventory-tracker",

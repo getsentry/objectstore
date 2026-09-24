@@ -43,7 +43,7 @@ async-trait = "0.1.89"
 axum = "0.8.9"
 axum-extra = { version = "0.12.6", default-features = false }
 base64 = "0.22.1"
-bigtable_rs = { git = "https://github.com/getsentry/bigtable_rs.git", rev = "10cac8b4ae800ca092382eb12ecd638c181f38c6", default-features = false, features = ["gcp-auth-ring", "tonic-tls-ring"] }
+bigtable_rs = { git = "https://github.com/getsentry/bigtable_rs.git", rev = "56c310a5c8518d52ae7c7db53825beb078e326b5", default-features = false, features = ["gcp-auth-ring", "tonic-tls-ring"] }
 blake3 = "1.8.5"
 bytes = "1.12.0"
 bytesize = "2.4.0"
@@ -56,7 +56,6 @@ futures = "0.3.32"
 futures-util = "0.3.32"
 gcp_auth = "0.12.6"
 globset = "0.4.18"
-googleapis-tonic-google-bigtable-v2 = "0.39.0"
 http = "1.4.2"
 http-body = "1.0.1"
 http-body-util = "0.1.3"

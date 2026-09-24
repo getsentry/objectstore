@@ -35,9 +35,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bigtable_rs::bigtable::{BigTableConnection, Error as BigTableError, RowCell};
+use bigtable_rs::google::bigtable::v2::{self, mutation};
 use bytes::Bytes;
 use futures_util::TryStreamExt;
-use googleapis_tonic_google_bigtable_v2::google::bigtable::v2::{self, mutation};
 use objectstore_types::metadata::Metadata;
 use objectstore_types::range::{ByteRange, ContentRange};
 use objectstore_types::time::Timestamp;
