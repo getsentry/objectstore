@@ -311,7 +311,7 @@ impl fmt::Debug for PutChunkBuilder {
         f.debug_struct("PutChunkBuilder")
             .field("upload", &self.upload)
             .field("offset", &self.offset)
-            .field("content_length", &self.length)
+            .field("length", &self.length)
             .finish()
     }
 }
