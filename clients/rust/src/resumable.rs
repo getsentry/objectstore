@@ -141,11 +141,11 @@ impl ResumableUpload {
         self.put_body(offset, length, Body::wrap_stream(ReaderStream::new(reader)))
     }
 
-    fn put_body(&self, offset: u64, content_length: u64, body: Body) -> PutChunkBuilder {
+    fn put_body(&self, offset: u64, length: u64, body: Body) -> PutChunkBuilder {
         PutChunkBuilder {
             upload: self.clone(),
             offset,
-            length: content_length,
+            length,
             body,
         }
     }
