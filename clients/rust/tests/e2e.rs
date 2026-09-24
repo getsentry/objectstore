@@ -1025,7 +1025,7 @@ async fn test_resumable_upload_streaming() {
     .boxed();
     assert_eq!(
         upload
-            .put_stream(0, chunk, second_piece_start as u64)
+            .put_stream(0, second_piece_start as u64, chunk)
             .send()
             .await
             .unwrap(),
@@ -1039,8 +1039,8 @@ async fn test_resumable_upload_streaming() {
         upload
             .put_read(
                 second_piece_start as u64,
-                reader,
-                (compressed.len() - second_piece_start) as u64
+                (compressed.len() - second_piece_start) as u64,
+                reader
             )
             .send()
             .await

@@ -126,7 +126,7 @@ impl ResumableUpload {
     ///
     /// The stream must yield exactly `length` bytes. If this upload records compression,
     /// those bytes must come from the object after it has been compressed in full.
-    pub fn put_stream(&self, offset: u64, stream: ClientStream, length: u64) -> PutChunkBuilder {
+    pub fn put_stream(&self, offset: u64, length: u64, stream: ClientStream) -> PutChunkBuilder {
         self.put_body(offset, length, Body::wrap_stream(stream))
     }
 
@@ -134,7 +134,7 @@ impl ResumableUpload {
     ///
     /// The reader must produce exactly `length` bytes. If this upload records compression,
     /// those bytes must come from the object after it has been compressed in full.
-    pub fn put_read<R>(&self, offset: u64, reader: R, length: u64) -> PutChunkBuilder
+    pub fn put_read<R>(&self, offset: u64, length: u64, reader: R) -> PutChunkBuilder
     where
         R: AsyncRead + Send + Sync + 'static,
     {
