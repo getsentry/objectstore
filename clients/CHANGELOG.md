@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.7
+
+### New Features ✨
+
+- (clients) Add lifetime extensions for Python and Rust by @jan-auer in [#639](https://github.com/getsentry/objectstore/pull/639)
+- (local-fs) Support resumable uploads by @lcian in [#640](https://github.com/getsentry/objectstore/pull/640)
+- (rust-client) Add streaming versions of `put_chunk` by @lcian in [#649](https://github.com/getsentry/objectstore/pull/649)
+
+### Bug Fixes 🐛
+
+- Update TTL durations on expiry extensions by @jan-auer in [#646](https://github.com/getsentry/objectstore/pull/646)
+
 ## 0.2.6
 
 ### New Features ✨
