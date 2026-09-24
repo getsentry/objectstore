@@ -16,14 +16,12 @@
 //!     expiration:
 //!       manual:
 //!         allowed: false
-//!       ttl:
-//!         max: "90d"
 //!       tti:
 //!         allowed: false
+//!       max: "90d"
 //!   debug-files:
 //!     expiration:
-//!       tti:
-//!         max: "90d"
+//!       max: "90d"
 //! ```
 
 use std::collections::HashMap;
@@ -52,6 +50,13 @@ impl UseCases {
         }
         Ok(())
     }
+
+    /// Returns the maximum allowed expiration duration for the given use case, if configured.
+    ///
+    /// Applies to both TTL and TTI expiration policies. `None` means no limit.
+    pub fn get_max_expiry(&self, usecase: &str) -> Option<Duration> {
+        self.0.get(usecase).and_then(|config| config.expiration.max)
+    }
 }
 
 /// Configuration for a single use case.
@@ -64,49 +69,28 @@ pub struct UseCaseConfig {
 
 impl UseCaseConfig {
     fn validate(&self, usecase: &str, metadata: &Metadata) -> Result<(), UseCaseError> {
-        match metadata.expiration_policy {
-            ExpirationPolicy::Manual => {
-                if !self.expiration.manual.allowed {
-                    return Err(UseCaseError::PolicyNotAllowed {
-                        usecase: usecase.to_owned(),
-                        policy: metadata.expiration_policy,
-                    });
-                }
-            }
-            ExpirationPolicy::TimeToLive(duration) => {
-                if !self.expiration.ttl.allowed {
-                    return Err(UseCaseError::PolicyNotAllowed {
-                        usecase: usecase.to_owned(),
-                        policy: metadata.expiration_policy,
-                    });
-                }
-                if let Some(max) = self.expiration.ttl.max
-                    && duration > max
-                {
-                    return Err(UseCaseError::DurationExceeded {
-                        usecase: usecase.to_owned(),
-                        duration: format_duration(duration).to_string(),
-                        max: format_duration(max).to_string(),
-                    });
-                }
-            }
-            ExpirationPolicy::TimeToIdle(duration) => {
-                if !self.expiration.tti.allowed {
-                    return Err(UseCaseError::PolicyNotAllowed {
-                        usecase: usecase.to_owned(),
-                        policy: metadata.expiration_policy,
-                    });
-                }
-                if let Some(max) = self.expiration.tti.max
-                    && duration > max
-                {
-                    return Err(UseCaseError::DurationExceeded {
-                        usecase: usecase.to_owned(),
-                        duration: format_duration(duration).to_string(),
-                        max: format_duration(max).to_string(),
-                    });
-                }
-            }
+        let policy = metadata.expiration_policy;
+        let allowed = match policy {
+            ExpirationPolicy::Manual => self.expiration.manual.allowed,
+            ExpirationPolicy::TimeToLive(_) => self.expiration.ttl.allowed,
+            ExpirationPolicy::TimeToIdle(_) => self.expiration.tti.allowed,
+        };
+        if !allowed {
+            return Err(UseCaseError::PolicyNotAllowed {
+                usecase: usecase.to_owned(),
+                policy,
+            });
+        }
+
+        if let Some(max) = self.expiration.max
+            && let Some(duration) = policy.expires_in()
+            && duration > max
+        {
+            return Err(UseCaseError::DurationExceeded {
+                usecase: usecase.to_owned(),
+                duration: format_duration(duration).to_string(),
+                max: format_duration(max).to_string(),
+            });
         }
         Ok(())
     }
@@ -117,44 +101,30 @@ impl UseCaseConfig {
 #[serde(default)]
 pub struct ExpirationConfig {
     /// Configuration for the [`ExpirationPolicy::Manual`] policy.
-    pub manual: ManualPolicyConfig,
+    pub manual: PolicyConfig,
     /// Configuration for the [`ExpirationPolicy::TimeToLive`] policy.
-    pub ttl: DurationPolicyConfig,
+    pub ttl: PolicyConfig,
     /// Configuration for the [`ExpirationPolicy::TimeToIdle`] policy.
-    pub tti: DurationPolicyConfig,
-}
-
-/// Configuration for the [`ExpirationPolicy::Manual`] policy.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(default)]
-pub struct ManualPolicyConfig {
-    /// Whether the manual expiration policy is allowed. Defaults to `true`.
-    pub allowed: bool,
-}
-
-impl Default for ManualPolicyConfig {
-    fn default() -> Self {
-        Self { allowed: true }
-    }
-}
-
-/// Configuration for a duration-based expiration policy (TTL or TTI).
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(default)]
-pub struct DurationPolicyConfig {
-    /// Whether this expiration policy is allowed. Defaults to `true`.
-    pub allowed: bool,
-    /// Maximum allowed duration. `None` means no limit.
+    pub tti: PolicyConfig,
+    /// Maximum allowed duration for TTL and TTI policies. `None` means no limit.
+    ///
+    /// When extending the lifetime of an existing object, this limit applies
+    /// from the request time regardless of the object's creation time.
     #[serde(default, with = "humantime_serde")]
     pub max: Option<Duration>,
 }
 
-impl Default for DurationPolicyConfig {
+/// Configuration for an expiration policy.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct PolicyConfig {
+    /// Whether this expiration policy is allowed. Defaults to `true`.
+    pub allowed: bool,
+}
+
+impl Default for PolicyConfig {
     fn default() -> Self {
-        Self {
-            allowed: true,
-            max: None,
-        }
+        Self { allowed: true }
     }
 }
 
@@ -232,7 +202,7 @@ mod tests {
     fn manual_disallowed_rejects() {
         let usecases = usecases_from(UseCaseConfig {
             expiration: ExpirationConfig {
-                manual: ManualPolicyConfig { allowed: false },
+                manual: PolicyConfig { allowed: false },
                 ..ExpirationConfig::default()
             },
         });
@@ -246,7 +216,8 @@ mod tests {
     fn manual_allowed_passes() {
         let usecases = usecases_from(UseCaseConfig {
             expiration: ExpirationConfig {
-                manual: ManualPolicyConfig { allowed: true },
+                manual: PolicyConfig { allowed: true },
+                max: Some(Duration::ZERO),
                 ..ExpirationConfig::default()
             },
         });
@@ -261,10 +232,7 @@ mod tests {
     fn ttl_disallowed_rejects() {
         let usecases = usecases_from(UseCaseConfig {
             expiration: ExpirationConfig {
-                ttl: DurationPolicyConfig {
-                    allowed: false,
-                    max: None,
-                },
+                ttl: PolicyConfig { allowed: false },
                 ..ExpirationConfig::default()
             },
         });
@@ -278,10 +246,7 @@ mod tests {
     fn ttl_within_max_passes() {
         let usecases = usecases_from(UseCaseConfig {
             expiration: ExpirationConfig {
-                ttl: DurationPolicyConfig {
-                    allowed: true,
-                    max: Some(Duration::from_hours(2)),
-                },
+                max: Some(Duration::from_hours(2)),
                 ..ExpirationConfig::default()
             },
         });
@@ -294,10 +259,7 @@ mod tests {
     fn ttl_at_max_passes() {
         let usecases = usecases_from(UseCaseConfig {
             expiration: ExpirationConfig {
-                ttl: DurationPolicyConfig {
-                    allowed: true,
-                    max: Some(Duration::from_hours(1)),
-                },
+                max: Some(Duration::from_hours(1)),
                 ..ExpirationConfig::default()
             },
         });
@@ -310,10 +272,7 @@ mod tests {
     fn ttl_exceeds_max_rejects() {
         let usecases = usecases_from(UseCaseConfig {
             expiration: ExpirationConfig {
-                ttl: DurationPolicyConfig {
-                    allowed: true,
-                    max: Some(Duration::from_hours(1)),
-                },
+                max: Some(Duration::from_hours(1)),
                 ..ExpirationConfig::default()
             },
         });
@@ -329,10 +288,7 @@ mod tests {
     fn tti_disallowed_rejects() {
         let usecases = usecases_from(UseCaseConfig {
             expiration: ExpirationConfig {
-                tti: DurationPolicyConfig {
-                    allowed: false,
-                    max: None,
-                },
+                tti: PolicyConfig { allowed: false },
                 ..ExpirationConfig::default()
             },
         });
@@ -346,10 +302,7 @@ mod tests {
     fn tti_within_max_passes() {
         let usecases = usecases_from(UseCaseConfig {
             expiration: ExpirationConfig {
-                tti: DurationPolicyConfig {
-                    allowed: true,
-                    max: Some(Duration::from_hours(2)),
-                },
+                max: Some(Duration::from_hours(2)),
                 ..ExpirationConfig::default()
             },
         });
@@ -362,10 +315,7 @@ mod tests {
     fn tti_exceeds_max_rejects() {
         let usecases = usecases_from(UseCaseConfig {
             expiration: ExpirationConfig {
-                tti: DurationPolicyConfig {
-                    allowed: true,
-                    max: Some(Duration::from_hours(1)),
-                },
+                max: Some(Duration::from_hours(1)),
                 ..ExpirationConfig::default()
             },
         });
@@ -381,10 +331,7 @@ mod tests {
     fn other_policies_unaffected_when_only_tti_restricted() {
         let usecases = usecases_from(UseCaseConfig {
             expiration: ExpirationConfig {
-                tti: DurationPolicyConfig {
-                    allowed: false,
-                    max: None,
-                },
+                tti: PolicyConfig { allowed: false },
                 ..ExpirationConfig::default()
             },
         });

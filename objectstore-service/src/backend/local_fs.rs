@@ -38,7 +38,7 @@ use tokio_util::io::{ReaderStream, StreamReader};
 use uuid::Uuid;
 
 use crate::backend::common::{
-    Backend, DeleteResponse, ExpiryTarget, GetResponse, MultipartUploadBackend, PutResponse,
+    Backend, DeleteResponse, ExpiryUpdate, GetResponse, MultipartUploadBackend, PutResponse,
     SetExpiryResponse,
 };
 use crate::change_stream::{
@@ -242,7 +242,7 @@ impl Backend for LocalFsBackend {
     async fn set_expiry(
         &self,
         id: &ObjectId,
-        target: ExpiryTarget,
+        target: ExpiryUpdate,
         access_time: Timestamp,
     ) -> Result<SetExpiryResponse> {
         let _guard = self.locks.acquire(id).await?;
@@ -260,7 +260,7 @@ impl Backend for LocalFsBackend {
         let Some(current_expiry) = metadata.time_expires else {
             return Ok(SetExpiryResponse::Rejected);
         };
-        let Some(expire_at) = target.resolve(metadata.time_created) else {
+        let Some(expire_at) = target.resolve(metadata.time_created, access_time)? else {
             return Ok(SetExpiryResponse::Rejected);
         };
         if current_expiry >= expire_at {
@@ -1138,6 +1138,7 @@ mod tests {
     use objectstore_inventory_tracker::test_utils::DummyProducer;
 
     use super::*;
+    use crate::backend::common::ExpiryTarget;
     use crate::id::ObjectContext;
     use crate::stream;
 
@@ -1452,7 +1453,7 @@ mod tests {
             backend
                 .set_expiry(
                     &id,
-                    ExpiryTarget::At(Timestamp::now() + Duration::from_hours(1)),
+                    ExpiryTarget::At(Timestamp::now() + Duration::from_hours(1)).into(),
                     Timestamp::now()
                 )
                 .await
@@ -1597,7 +1598,7 @@ mod tests {
         ] {
             assert_eq!(
                 backend
-                    .set_expiry(&id, target, Timestamp::now())
+                    .set_expiry(&id, target.into(), Timestamp::now())
                     .await
                     .unwrap(),
                 SetExpiryResponse::Satisfied(requested)
@@ -1642,7 +1643,7 @@ mod tests {
             backend
                 .set_expiry(
                     &id,
-                    ExpiryTarget::At(Timestamp::now() + Duration::from_hours(1)),
+                    ExpiryTarget::At(Timestamp::now() + Duration::from_hours(1)).into(),
                     Timestamp::now()
                 )
                 .await

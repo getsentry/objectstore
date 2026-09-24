@@ -12,9 +12,7 @@ use objectstore_server::killswitches::{Killswitch, Killswitches};
 use objectstore_server::rate_limits::{
     BandwidthLimits, RateLimits, ThroughputLimits, ThroughputRule,
 };
-use objectstore_server::usecases::{
-    DurationPolicyConfig, ExpirationConfig, ManualPolicyConfig, UseCaseConfig, UseCases,
-};
+use objectstore_server::usecases::{ExpirationConfig, PolicyConfig, UseCaseConfig, UseCases};
 use objectstore_test::server::TestServer;
 
 #[tokio::test]
@@ -689,15 +687,10 @@ async fn test_usecase_expiration_policy() -> Result<()> {
                 "attachments".to_owned(),
                 UseCaseConfig {
                     expiration: ExpirationConfig {
-                        manual: ManualPolicyConfig { allowed: false },
-                        ttl: DurationPolicyConfig {
-                            allowed: true,
-                            max: Some(Duration::from_hours(90 * 24)),
-                        },
-                        tti: DurationPolicyConfig {
-                            allowed: false,
-                            max: None,
-                        },
+                        manual: PolicyConfig { allowed: false },
+                        ttl: PolicyConfig { allowed: true },
+                        max: Some(Duration::from_hours(90 * 24)),
+                        tti: PolicyConfig { allowed: false },
                     },
                 },
             ),
@@ -705,15 +698,10 @@ async fn test_usecase_expiration_policy() -> Result<()> {
                 "debug-files".to_owned(),
                 UseCaseConfig {
                     expiration: ExpirationConfig {
-                        manual: ManualPolicyConfig { allowed: false },
-                        ttl: DurationPolicyConfig {
-                            allowed: false,
-                            max: None,
-                        },
-                        tti: DurationPolicyConfig {
-                            allowed: true,
-                            max: Some(Duration::from_hours(90 * 24)),
-                        },
+                        manual: PolicyConfig { allowed: false },
+                        ttl: PolicyConfig { allowed: false },
+                        tti: PolicyConfig { allowed: true },
+                        max: Some(Duration::from_hours(90 * 24)),
                     },
                 },
             ),
@@ -721,15 +709,10 @@ async fn test_usecase_expiration_policy() -> Result<()> {
                 "avatars".to_owned(),
                 UseCaseConfig {
                     expiration: ExpirationConfig {
-                        manual: ManualPolicyConfig { allowed: true },
-                        ttl: DurationPolicyConfig {
-                            allowed: false,
-                            max: None,
-                        },
-                        tti: DurationPolicyConfig {
-                            allowed: false,
-                            max: None,
-                        },
+                        manual: PolicyConfig { allowed: true },
+                        max: None,
+                        ttl: PolicyConfig { allowed: false },
+                        tti: PolicyConfig { allowed: false },
                     },
                 },
             ),

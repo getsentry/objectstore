@@ -137,10 +137,9 @@ impl RenewalWorker {
         crate::concurrency::spawn_metered("set_expiry", (pending, permit), async move {
             // Queueing must not let a stale read time authorize an expired object.
             let access_time = Timestamp::now();
-            match backend
-                .set_expiry(&id, ExpiryTarget::At(expire_at), access_time)
-                .await
-            {
+            // NB: into() skips usecase validation. This is OK for TTI bumps of existing objects.
+            let target = ExpiryTarget::At(expire_at).into();
+            match backend.set_expiry(&id, target, access_time).await {
                 Ok(SetExpiryResponse::Satisfied(_)) => {
                     objectstore_metrics::count!("service.expiry_renewal", outcome = "applied");
                     Ok(())

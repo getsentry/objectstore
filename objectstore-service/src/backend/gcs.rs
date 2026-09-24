@@ -19,7 +19,7 @@ use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode, Url, header, mu
 use serde::{Deserialize, Serialize};
 
 use crate::backend::common::{
-    self, Backend, DeleteResponse, ExpiryTarget, GetResponse, MetadataResponse,
+    self, Backend, DeleteResponse, ExpiryUpdate, GetResponse, MetadataResponse,
     MultipartUploadBackend, PutResponse, SetExpiryResponse,
 };
 use crate::backend::extensions::{ReqwestResultExt, ResponseExt, SendTraced};
@@ -1079,7 +1079,7 @@ impl Backend for GcsBackend {
     async fn set_expiry(
         &self,
         id: &ObjectId,
-        target: ExpiryTarget,
+        target: ExpiryUpdate,
         access_time: Timestamp,
     ) -> Result<SetExpiryResponse> {
         let object_url = self.object_url(id)?;
@@ -1089,8 +1089,8 @@ impl Backend for GcsBackend {
         let Some(current_expiry) = object.custom_time else {
             return Ok(SetExpiryResponse::Rejected);
         };
-        let Some(expire_at) = target.resolve(object.time_created.map(Rfc3339Timestamp::into_inner))
-        else {
+        let time_created = object.time_created.map(Rfc3339Timestamp::into_inner);
+        let Some(expire_at) = target.resolve(time_created, access_time)? else {
             return Ok(SetExpiryResponse::Rejected);
         };
         if current_expiry.into_inner() >= expire_at {
@@ -1694,21 +1694,18 @@ mod tests {
     use std::time::Duration;
 
     use anyhow::Result;
+    #[cfg(feature = "storage-cogs")]
+    use objectstore_inventory_tracker::{OpType, test_utils::DummyProducer};
     use objectstore_types::scope::{Scope, Scopes};
     use reqwest::header::{HeaderMap, HeaderValue};
 
-    #[cfg(feature = "storage-cogs")]
-    use objectstore_inventory_tracker::OpType;
-    #[cfg(feature = "storage-cogs")]
-    use objectstore_inventory_tracker::test_utils::DummyProducer;
-
-    #[cfg(feature = "storage-cogs")]
-    use crate::stream::ClientError;
-
     use super::*;
+    use crate::backend::common::ExpiryTarget;
     use crate::id::ObjectContext;
     use crate::multipart::CompletedPart;
     use crate::stream;
+    #[cfg(feature = "storage-cogs")]
+    use crate::stream::ClientError;
 
     impl GcsBackend {
         async fn create_upload_session(
@@ -2615,7 +2612,9 @@ mod tests {
         let requested = created + tti;
         for target in [ExpiryTarget::At(requested), ExpiryTarget::FromCreation(tti)] {
             assert_eq!(
-                backend.set_expiry(&id, target, Timestamp::now()).await?,
+                backend
+                    .set_expiry(&id, target.into(), Timestamp::now())
+                    .await?,
                 SetExpiryResponse::Satisfied(requested)
             );
         }
@@ -3380,7 +3379,7 @@ mod tests {
         backend
             .set_expiry(
                 &id,
-                ExpiryTarget::At(Timestamp::now() + Duration::from_secs(3600)),
+                ExpiryTarget::At(Timestamp::now() + Duration::from_secs(3600)).into(),
                 Timestamp::now(),
             )
             .await?;

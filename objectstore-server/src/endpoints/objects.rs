@@ -21,7 +21,8 @@
 //! A satisfied request returns 204, including an already-sufficient deadline. An object
 //! observed absent or expired returns 404. Ineligible or conflicting updates return 409;
 //! backend failures use the normal service error responses. Invalid timestamp or duration
-//! strings are rejected by JSON deserialization with 422.
+//! strings are rejected by JSON deserialization with 422. Requests exceeding the
+//! usecase's `expiration.max`, measured from request time, return 400.
 
 use std::fmt::Write as _;
 
@@ -32,7 +33,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing;
 use axum::{Json, Router};
-use objectstore_service::backend::common::{ExpiryTarget, SetExpiryResponse};
+use objectstore_service::backend::common::{ExpiryTarget, ExpiryUpdate, SetExpiryResponse};
 use objectstore_service::error::ErrorKind;
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_types::headers::ExtValue;
@@ -105,6 +106,7 @@ async fn dispatch_object_delete(
 
 async fn object_patch(
     service: AuthAwareService,
+    State(state): State<ServiceState>,
     Xt(id): Xt<ObjectId>,
     RequestTime(access_time): RequestTime,
     Json(update): Json<MetadataUpdate>,
@@ -126,7 +128,10 @@ async fn object_patch(
         } => ExpiryTarget::FromCreation(after),
     };
 
-    match service.set_expiry(id, target, access_time).await? {
+    let max = state.config.usecases.get_max_expiry(id.usecase());
+    let update = ExpiryUpdate { target, max };
+
+    match service.set_expiry(id, update, access_time).await? {
         SetExpiryResponse::Satisfied(_) => Ok(StatusCode::NO_CONTENT),
         SetExpiryResponse::NotFound => Ok(StatusCode::NOT_FOUND),
         SetExpiryResponse::Rejected => Err(ApiError::conflict(
@@ -350,6 +355,7 @@ async fn delete_object(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::Duration;
 
     use objectstore_service::StorageService;
@@ -364,7 +370,26 @@ mod tests {
     use objectstore_types::time::Timestamp;
 
     use super::*;
-    use crate::auth::AuthContext;
+    use crate::auth::{AuthContext, PublicKeyDirectory};
+    use crate::config::Config;
+    use crate::rate_limits::RateLimiter;
+    use crate::state::Services;
+    use crate::web::RequestCounter;
+
+    fn test_state() -> State<ServiceState> {
+        State(Arc::new(Services {
+            config: Config::default(),
+            service: StorageService::new(
+                Box::new(InMemoryBackend::new("state")),
+                Cipher::ephemeral().unwrap(),
+            ),
+            key_directory: Arc::new(PublicKeyDirectory {
+                keys: Default::default(),
+            }),
+            rate_limiter: RateLimiter::new(Default::default()),
+            request_counter: RequestCounter::new(100),
+        }))
+    }
 
     fn object_id(key: &str) -> ObjectId {
         ObjectId::new(
@@ -411,6 +436,7 @@ mod tests {
             let service = AuthAwareService::new(storage, AuthContext::Disabled, true);
             let response = object_patch(
                 service,
+                test_state(),
                 Xt(id),
                 RequestTime(access_time),
                 Json(MetadataUpdate {
@@ -461,6 +487,7 @@ mod tests {
 
         let error = object_patch(
             service,
+            test_state(),
             Xt(id),
             RequestTime(access_time),
             Json(MetadataUpdate {
@@ -528,6 +555,7 @@ mod tests {
                 let service = AuthAwareService::new(storage.clone(), AuthContext::Disabled, true);
                 let status = object_patch(
                     service,
+                    test_state(),
                     Xt(id),
                     RequestTime(access_time),
                     Json(MetadataUpdate {
@@ -572,6 +600,7 @@ mod tests {
 
         let error = object_patch(
             service,
+            test_state(),
             Xt(id),
             RequestTime(access_time),
             Json(MetadataUpdate {

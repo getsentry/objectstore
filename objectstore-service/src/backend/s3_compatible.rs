@@ -15,7 +15,7 @@ use reqwest::{Body, IntoUrl, Method, RequestBuilder, Response, StatusCode};
 
 use super::extensions::{ResponseExt, SendTraced};
 use crate::backend::common::{
-    self, Backend, DeleteResponse, ExpiryTarget, GetResponse, MetadataResponse, PutResponse,
+    self, Backend, DeleteResponse, ExpiryUpdate, GetResponse, MetadataResponse, PutResponse,
     SetExpiryResponse,
 };
 use crate::backend::extensions::ReqwestResultExt;
@@ -443,7 +443,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
     async fn set_expiry(
         &self,
         id: &ObjectId,
-        target: ExpiryTarget,
+        target: ExpiryUpdate,
         access_time: Timestamp,
     ) -> Result<SetExpiryResponse> {
         let Some((mut metadata, _, response)) = self
@@ -452,21 +452,20 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         else {
             return Ok(SetExpiryResponse::NotFound);
         };
-        let Some(current_expiry) = metadata.time_expires else {
-            response.drain_body().await;
-            return Ok(SetExpiryResponse::Rejected);
-        };
-        let Some(expire_at) = target.resolve(metadata.time_created) else {
-            response.drain_body().await;
-            return Ok(SetExpiryResponse::Rejected);
-        };
-        if current_expiry >= expire_at {
-            response.drain_body().await;
-            return Ok(SetExpiryResponse::Satisfied(expire_at)); // already satisfied
-        }
 
         let etag = response.headers().get(reqwest::header::ETAG).cloned();
         response.drain_body().await;
+
+        let Some(current_expiry) = metadata.time_expires else {
+            return Ok(SetExpiryResponse::Rejected);
+        };
+        let Some(expire_at) = target.resolve(metadata.time_created, access_time)? else {
+            return Ok(SetExpiryResponse::Rejected);
+        };
+        if current_expiry >= expire_at {
+            return Ok(SetExpiryResponse::Satisfied(expire_at)); // already satisfied
+        }
+
         let etag = etag.ok_or_else(|| {
             Error::new(ErrorKind::BackendFailure, "S3 HEAD response missing ETag")
         })?;
