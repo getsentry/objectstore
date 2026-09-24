@@ -814,6 +814,8 @@ impl BigTableBackend {
     ///
     /// Pass an `endpoint` in the config to connect to a local emulator; omit it to use real GCP
     /// credentials. `connections` controls the gRPC connection pool size (defaults to 1).
+    /// A `PingAndWarm` request is sent through the pool every 10 seconds in an effort
+    /// to keep the connections active.
     pub async fn new(
         config: BigTableConfig,
         streams: &ChangeStreamFactory,
@@ -835,6 +837,7 @@ impl BigTableBackend {
                 &project_id,
                 &instance_name,
                 false, // is_read_only
+                connections.unwrap_or(1),
                 Some(rpc_timeout),
             )?
         } else {
@@ -849,6 +852,7 @@ impl BigTableBackend {
                 true, // prime_channels
                 None, // app_profile_id
                 MAX_CHANNEL_AGE,
+                Some(Duration::from_secs(10)), // periodic PingAndWarm
             )
             .await?
         };
