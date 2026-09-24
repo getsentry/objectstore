@@ -17,13 +17,15 @@ use objectstore_types::resumable::{
     CompleteUploadResponse, CreateSessionResponse, HEADER_UPLOAD_LENGTH, HEADER_UPLOAD_OFFSET,
     UploadOffset,
 };
-use reqwest::{Method, Response, StatusCode};
+use reqwest::{Body, Method, Response, StatusCode};
 use serde::Serialize;
+use tokio::io::AsyncRead;
+use tokio_util::io::ReaderStream;
 
 pub use objectstore_types::resumable::{SessionToken, UploadProgress};
 
 use crate::response::ResponseExt as _;
-use crate::{Compression, Error, ExpirationPolicy, ObjectKey, Session};
+use crate::{ClientStream, Compression, Error, ExpirationPolicy, ObjectKey, Session};
 
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -116,10 +118,35 @@ impl ResumableUpload {
     /// The returned progress contains the authoritative server offset, which should be used for
     /// subsequent requests.
     pub fn put(&self, offset: u64, chunk: impl Into<Bytes>) -> PutChunkBuilder {
+        let chunk = chunk.into();
+        self.put_body(offset, chunk.len() as u64, chunk.into())
+    }
+
+    /// Builds a request to write a streaming chunk of `length` bytes at `offset`.
+    ///
+    /// The stream must yield exactly `length` bytes. If this upload records compression,
+    /// those bytes must come from the object after it has been compressed in full.
+    pub fn put_stream(&self, offset: u64, stream: ClientStream, length: u64) -> PutChunkBuilder {
+        self.put_body(offset, length, Body::wrap_stream(stream))
+    }
+
+    /// Builds a request to write an [`AsyncRead`] chunk of `length` bytes at `offset`.
+    ///
+    /// The reader must produce exactly `length` bytes. If this upload records compression,
+    /// those bytes must come from the object after it has been compressed in full.
+    pub fn put_read<R>(&self, offset: u64, reader: R, length: u64) -> PutChunkBuilder
+    where
+        R: AsyncRead + Send + Sync + 'static,
+    {
+        self.put_body(offset, length, Body::wrap_stream(ReaderStream::new(reader)))
+    }
+
+    fn put_body(&self, offset: u64, content_length: u64, body: Body) -> PutChunkBuilder {
         PutChunkBuilder {
             upload: self.clone(),
             offset,
-            chunk: chunk.into(),
+            length: content_length,
+            body,
         }
     }
 
@@ -270,11 +297,13 @@ impl UploadProgressBuilder {
     }
 }
 
-/// A builder for [`ResumableUpload::put`].
+/// A builder for [`ResumableUpload::put`], [`ResumableUpload::put_stream`], or
+/// [`ResumableUpload::put_read`].
 pub struct PutChunkBuilder {
     upload: ResumableUpload,
     offset: u64,
-    chunk: Bytes,
+    length: u64,
+    body: Body,
 }
 
 impl fmt::Debug for PutChunkBuilder {
@@ -282,7 +311,7 @@ impl fmt::Debug for PutChunkBuilder {
         f.debug_struct("PutChunkBuilder")
             .field("upload", &self.upload)
             .field("offset", &self.offset)
-            .field("content_length", &self.chunk.len())
+            .field("content_length", &self.length)
             .finish()
     }
 }
@@ -307,13 +336,12 @@ impl PutChunkBuilder {
     /// };
     /// ```
     pub async fn send(self) -> crate::Result<UploadProgress> {
-        let content_length = self.chunk.len();
         let response = self
             .upload
             .request(Method::PUT)?
             .header(HEADER_UPLOAD_OFFSET, self.offset.to_string())
-            .header(reqwest::header::CONTENT_LENGTH, content_length)
-            .body(self.chunk)
+            .header(reqwest::header::CONTENT_LENGTH, self.length)
+            .body(self.body)
             .send()
             .await?;
         parse_progress_response(response).await
