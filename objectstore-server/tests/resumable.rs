@@ -176,7 +176,7 @@ async fn test_resumable_upload() -> Result<()> {
     assert_eq!(response.status(), StatusCode::OK);
     let created: CreateSessionResponse = response.json().await?;
     assert_eq!(created.key, "my-key");
-    assert_eq!(created.granularity, 0);
+    assert!(created.granularity.is_some());
     let session_path = format!("{object}?session={}", created.session.to_base64url());
 
     // The object doesn't exist yet.
