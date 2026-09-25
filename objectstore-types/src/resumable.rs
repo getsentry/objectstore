@@ -3,6 +3,7 @@
 //! A resumable upload writes one object across multiple requests. The client first creates a
 //! session, declaring the object's complete size with [`HEADER_UPLOAD_LENGTH`]. The server returns
 //! a [`CreateSessionResponse`] containing an opaque [`SessionToken`] that identifies the upload.
+//! The response also reports the upload granularity. A reconstructed client does not know it.
 //!
 //! The client then sends chunks with [`HEADER_UPLOAD_OFFSET`] set to the byte position at which
 //! each chunk starts. If an upload is interrupted, the client can send the wildcard offset
@@ -184,6 +185,8 @@ pub struct CreateSessionResponse {
     pub key: String,
     /// The opaque session token that identifies the session.
     pub session: SessionToken,
+    /// This upload's granularity in bytes.
+    pub granularity: u64,
 }
 
 /// Response from the request that completes the upload.
@@ -205,11 +208,12 @@ mod tests {
         let response = CreateSessionResponse {
             key: "key".into(),
             session: SessionToken::new(b"../opaque +? \xc3\xbc"),
+            granularity: 262_144,
         };
 
         assert_eq!(
             serde_json::to_string(&response)?,
-            r#"{"key":"key","session":"Li4vb3BhcXVlICs_IMO8"}"#
+            r#"{"key":"key","session":"Li4vb3BhcXVlICs_IMO8","granularity":262144}"#
         );
         Ok(())
     }

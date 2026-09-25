@@ -410,6 +410,10 @@ impl Backend for TieredStorage {
         "tiered"
     }
 
+    fn upload_granularity(&self) -> u64 {
+        self.inner.long_term.upload_granularity()
+    }
+
     fn as_multipart_upload_backend(&self) -> Result<&dyn MultipartUploadBackend> {
         Ok(self)
     }
@@ -468,6 +472,14 @@ impl Backend for TieredStorage {
                 content_length,
                 upload_length: session.total_length,
             })?;
+        let granularity = self.upload_granularity();
+        if content_length > 0 && content_length < granularity && end != session.total_length {
+            return Err(ErrorKind::ChunkTooSmall {
+                chunk_length: content_length,
+                upload_granularity: granularity,
+            }
+            .into());
+        }
 
         // Non-final request; just forward the chunk.
         if end != session.total_length {
@@ -1308,6 +1320,18 @@ mod tests {
         let payload = vec![b'a'; BACKEND_SIZE_THRESHOLD + 1];
         let token =
             resumable_token(&storage, &id, &Metadata::default(), payload.len() as u64).await;
+
+        let error = storage
+            .put_chunk(&id, &token, 0, 1, stream::single("a"))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.kind(),
+            ErrorKind::ChunkTooSmall {
+                chunk_length: 1,
+                upload_granularity: 256 * 1024,
+            }
+        );
 
         // A completed upload creates a logical object.
         assert_eq!(
