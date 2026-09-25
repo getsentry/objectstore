@@ -194,8 +194,7 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     ///
     /// A value of zero means these uploads have no granularity. A positive value means that a
     /// non-final chunk can persist only a multiple of this value. Implementations must reject a
-    /// non-empty, non-final chunk shorter than one unit with [`ErrorKind::ChunkTooSmall`]. Final
-    /// chunks and zero-byte offset probes are exempt.
+    /// non-empty, non-final chunk shorter than one unit with [`ErrorKind::ChunkTooSmall`].
     fn upload_granularity(&self) -> u64 {
         0
     }

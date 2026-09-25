@@ -147,6 +147,7 @@ pub(super) async fn continue_session(
     MeteredBody(body): MeteredBody,
 ) -> ApiResult<Response> {
     let key = id.key().to_owned();
+
     let progress = match offset {
         UploadOffset::At(offset) => {
             let content_length = content_length
@@ -185,15 +186,8 @@ pub(super) async fn cancel_session(
 
 /// Turns an [`UploadProgress`] outcome into the response shared by chunks and offset queries.
 fn progress_response(progress: ApiResult<UploadProgress>, key: String) -> ApiResult<Response> {
-    let response = match progress {
-        Ok(UploadProgress::Incomplete { offset }) => (
-            StatusCode::NO_CONTENT,
-            [(HEADER_UPLOAD_OFFSET, http::HeaderValue::from(offset))],
-        )
-            .into_response(),
-        Ok(UploadProgress::Complete) => {
-            (StatusCode::CREATED, Json(CompleteUploadResponse { key })).into_response()
-        }
+    let progress = match progress {
+        Ok(progress) => progress,
         Err(ApiError::Service(error)) => match error.kind() {
             ErrorKind::UploadOffsetMismatch { offset } => {
                 let error = ApiError::Service(error);
@@ -201,12 +195,24 @@ fn progress_response(progress: ApiResult<UploadProgress>, key: String) -> ApiRes
                 response
                     .headers_mut()
                     .insert(HEADER_UPLOAD_OFFSET, http::HeaderValue::from(offset));
-                response
+                return Ok(response);
             }
             _ => return Err(ApiError::Service(error)),
         },
         Err(error) => return Err(error),
     };
+
+    let response = match progress {
+        UploadProgress::Incomplete { offset } => (
+            StatusCode::NO_CONTENT,
+            [(HEADER_UPLOAD_OFFSET, http::HeaderValue::from(offset))],
+        )
+            .into_response(),
+        UploadProgress::Complete => {
+            (StatusCode::CREATED, Json(CompleteUploadResponse { key })).into_response()
+        }
+    };
+
     Ok(response)
 }
 
@@ -214,13 +220,14 @@ fn progress_response(progress: ApiResult<UploadProgress>, key: String) -> ApiRes
 mod tests {
     use super::*;
 
-    /// Reads a response's status, offset header, and body.
+    /// Reads a response's status, `Upload-Offset` header, and body.
     async fn parts_of(response: Response) -> (StatusCode, Option<String>, String) {
         let status = response.status();
         let offset = response
             .headers()
             .get(HEADER_UPLOAD_OFFSET)
             .map(|v| v.to_str().unwrap().to_owned());
+
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
