@@ -87,7 +87,7 @@ async fn create_session_path(
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
     let created: CreateSessionResponse = response.json().await?;
-    assert_eq!(created.granularity, 0);
+    assert!(created.granularity.is_some());
     Ok(format!(
         "{OBJECT_PATH}?session={}",
         created.session.to_base64url()
