@@ -17,7 +17,7 @@
 //!
 //! ## Revision Keys
 //!
-//! Every large-object write stores its payload at a **revision key** in the
+//! Every long-term write stores its payload at a **revision key** in the
 //! long-term backend: `{original_key}/{uuid}`. The UUID suffix is random (no
 //! monotonicity is guaranteed), so each write targets a distinct LT path
 //! regardless of whether another write to the same logical key is in progress.
@@ -99,18 +99,11 @@
 //!
 //! # Resumable Uploads
 //!
-//! TODO: Update this section when tiered storage implements resumable uploads.
-//!
-//! Not implemented here yet, so [`TieredStorage`] inherits the unsupported defaults from
-//! [`Backend`] and every session creation returns [`ErrorKind::Unsupported`]. A resumable upload
-//! will be a regular
-//! long-term write whose payload arrives across several requests, reusing the revision keys,
-//! changelog phases and compare-and-write commit described above: session creation decides
-//! the tier from the declared total length and returns [`ErrorKind::Unsupported`] if that tier
-//! cannot support it,
-//! non-final chunks pass straight through to the upstream session, and the final chunk runs
-//! the long-term write sequence.
+//! Resumable uploads are accepted only when their declared size exceeds 1 MiB and are
+//! written to the long-term backend. A resumable upload remains inaccessible until
+//! the long-term backend completes and a high-volume tombstone is committed.
 
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime};
@@ -120,6 +113,7 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use objectstore_types::metadata::Metadata;
 use objectstore_types::range::ByteRange;
+use objectstore_types::resumable::UploadProgress;
 use objectstore_types::time::Timestamp;
 use sentry::{Hub, SentryFutureExt};
 use serde::{Deserialize, Serialize};
@@ -137,6 +131,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
+use crate::resumable::BackendToken;
 use crate::stream::{ClientStream, SizedPeek, counting_stream};
 
 /// The threshold up until which we will go to the "high volume" backend.
@@ -207,6 +202,7 @@ pub struct TieredStorageConfig {
 ///   and writes of small objects (e.g. BigTable).
 /// - Objects **> 1 MiB** go to the `long_term` backend — optimized for cost-efficient
 ///   storage of large objects (e.g. GCS).
+/// - Resumable uploads at or below 1 MiB are declined; larger uploads go to `long_term`.
 ///
 /// # Redirect Tombstones
 ///
@@ -392,6 +388,22 @@ impl TieredStorage {
     }
 }
 
+type LongTermBackendToken = BackendToken;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct TieredResumableToken {
+    inner: LongTermBackendToken,
+    revision: String,
+    total_length: u64,
+    time_expires: Option<Timestamp>,
+}
+
+impl TieredResumableToken {
+    fn decode(token: &BackendToken) -> Result<Self> {
+        serde_json::from_str(token).map_err(|_| ErrorKind::UnknownUploadSession.into())
+    }
+}
+
 #[async_trait::async_trait]
 impl Backend for TieredStorage {
     fn name(&self) -> &'static str {
@@ -400,6 +412,178 @@ impl Backend for TieredStorage {
 
     fn as_multipart_upload_backend(&self) -> Result<&dyn MultipartUploadBackend> {
         Ok(self)
+    }
+
+    #[tracing::instrument(level = "debug", fields(?id, total_length), skip_all)]
+    async fn create_upload_session(
+        &self,
+        id: &ObjectId,
+        metadata: &Metadata,
+        total_length: NonZeroU64,
+    ) -> Result<Option<BackendToken>> {
+        if total_length.get() <= BACKEND_SIZE_THRESHOLD as u64 {
+            return Ok(None);
+        }
+
+        let revision = new_long_term_revision(id);
+        let Some(inner) = self
+            .inner
+            .long_term
+            .create_upload_session(&revision, metadata, total_length)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let token = TieredResumableToken {
+            revision: revision.key,
+            inner,
+            total_length: total_length.get(),
+            time_expires: metadata.time_expires,
+        };
+        Ok(Some(serde_json::to_string(&token).context(
+            ErrorKind::Internal,
+            "encoding tiered resumable session",
+        )?))
+    }
+
+    #[tracing::instrument(level = "debug", fields(?id, offset, content_length), skip_all)]
+    async fn put_chunk(
+        &self,
+        id: &ObjectId,
+        token: &BackendToken,
+        offset: u64,
+        content_length: u64,
+        stream: ClientStream,
+    ) -> Result<UploadProgress> {
+        let session = TieredResumableToken::decode(token)?;
+        let revision = ObjectId {
+            context: id.context.clone(),
+            key: session.revision.clone(),
+        };
+        let end = offset
+            .checked_add(content_length)
+            .filter(|end| *end <= session.total_length)
+            .ok_or(ErrorKind::ChunkExceedsUploadLength {
+                offset,
+                content_length,
+                upload_length: session.total_length,
+            })?;
+
+        // Non-final request; just forward the chunk.
+        if end != session.total_length {
+            let progress = self
+                .inner
+                .long_term
+                .put_chunk(&revision, &session.inner, offset, content_length, stream)
+                .await?;
+            return match progress {
+                UploadProgress::Incomplete { .. } => Ok(progress),
+                UploadProgress::Complete => Err(ErrorKind::UploadSessionGone.into()),
+            };
+        }
+
+        // Verify that this is indeed the final request before proceeding
+        // (i.e. that the client is not sending us a premature offset).
+        // GCS returns `Complete` when the upload was completed successfully, even if the underlying
+        // blob has been subsequently deleted, so the intention here is to prevent the creation of a
+        // dangling tombstone in such cases.
+        match self.upload_offset(id, token).await? {
+            UploadProgress::Complete => return Ok(UploadProgress::Complete),
+            UploadProgress::Incomplete { offset: actual } if actual < offset => {
+                return Err(ErrorKind::UploadOffsetMismatch { offset: actual }.into());
+            }
+            UploadProgress::Incomplete { .. } => {}
+        }
+
+        // 1. Read the current HV revision before the final chunk.
+        let current = match self
+            .inner
+            .high_volume
+            .get_tiered_metadata(id, Timestamp::now())
+            .await?
+        {
+            TieredMetadata::Tombstone(t) if t.target == revision => {
+                return Ok(UploadProgress::Complete);
+            }
+            TieredMetadata::Tombstone(t) => Some(t.target),
+            _ => None,
+        };
+
+        // FIXME(consistency): It's possible that 2 concurrent `put_chunk` requests A and B
+        // reach this point simultaneously.
+        // If a PUT/DELETE on this key is executed between A and B, B will (attempt to) create a
+        // dangling tombstone.
+        //
+        // FIXME(consistency): The next statement potentially creates an orphan in LT.
+        // (using `ChangeGuard::Assembling` would not solve the problem, but rather introduce more
+        // subtle race scenarios).
+        //
+        // Other consistency issues may exist within the current implementation.
+
+        // 2. Complete the upload in LT.
+        let progress = self
+            .inner
+            .long_term
+            .put_chunk(&revision, &session.inner, offset, content_length, stream)
+            .await?;
+        if progress != UploadProgress::Complete {
+            return Ok(progress);
+        }
+
+        // 3. Track cleanup of the old revision only.
+        // Another attempt may still publish the new revision, so a failed attempt must not delete it.
+        let mut guard = self
+            .record_change(Change {
+                id: id.clone(),
+                new: None,
+                old: current.clone(),
+                cleanup_after: None,
+            })
+            .await?;
+        guard.advance(ChangePhase::Written);
+
+        // 4. Publish the tombstone.
+        let written = self
+            .inner
+            .high_volume
+            .compare_and_write(
+                id,
+                current.as_ref(),
+                TieredWrite::Tombstone(Tombstone {
+                    target: revision,
+                    time_expires: session.time_expires,
+                }),
+                Timestamp::now(),
+            )
+            .await?;
+        guard.advance(ChangePhase::compare_and_write(written));
+        Ok(UploadProgress::Complete)
+    }
+
+    #[tracing::instrument(level = "debug", fields(?id), skip_all)]
+    async fn upload_offset(&self, id: &ObjectId, token: &BackendToken) -> Result<UploadProgress> {
+        let session = TieredResumableToken::decode(token)?;
+        let revision = ObjectId {
+            context: id.context.clone(),
+            key: session.revision.clone(),
+        };
+        self.inner
+            .long_term
+            .upload_offset(&revision, &session.inner)
+            .await
+    }
+
+    #[tracing::instrument(level = "debug", fields(?id), skip_all)]
+    async fn cancel_upload(&self, id: &ObjectId, token: &BackendToken) -> Result<()> {
+        let session = TieredResumableToken::decode(token)?;
+        let revision = ObjectId {
+            context: id.context.clone(),
+            key: session.revision.clone(),
+        };
+        self.inner
+            .long_term
+            .cancel_upload(&revision, &session.inner)
+            .await
     }
 
     #[tracing::instrument(level = "debug", fields(?id), skip_all)]
@@ -1001,7 +1185,7 @@ impl MultipartUploadBackend for TieredStorage {
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU32;
+    use std::num::{NonZeroU32, NonZeroU64};
     use std::sync::Mutex as StdMutex;
 
     use futures::lock::Mutex;
@@ -1009,9 +1193,12 @@ mod tests {
     use objectstore_types::scope::{Scope, Scopes};
 
     use super::*;
+    use crate::backend::bigtable::{BigTableBackend, BigTableConfig};
     use crate::backend::changelog::{InMemoryChangeLog, NoopChangeLog};
+    use crate::backend::gcs::{GcsBackend, GcsConfig};
     use crate::backend::in_memory::InMemoryBackend;
     use crate::backend::testing::{Hooks, TestBackend};
+    use crate::change_stream::ChangeStreamFactory;
     use crate::error::Error;
     use crate::id::ObjectContext;
     use crate::stream::{self, ClientStream};
@@ -1042,6 +1229,161 @@ mod tests {
             Box::new(changelog.clone()),
         );
         (storage, hv, lt, changelog)
+    }
+
+    async fn resumable_token(
+        storage: &TieredStorage,
+        id: &ObjectId,
+        metadata: &Metadata,
+        length: u64,
+    ) -> BackendToken {
+        storage
+            .create_upload_session(id, metadata, NonZeroU64::new(length).unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn resumable_inmemory() -> anyhow::Result<()> {
+        let (storage, _, _, _) = make_tiered_storage();
+        let id = make_id("tiered-resumable-inmemory");
+        let payload = vec![b'a'; BACKEND_SIZE_THRESHOLD + 1];
+        let token =
+            resumable_token(&storage, &id, &Metadata::default(), payload.len() as u64).await;
+
+        // A completed upload creates a logical object.
+        assert_eq!(
+            storage
+                .put_chunk(
+                    &id,
+                    &token,
+                    0,
+                    payload.len() as u64,
+                    stream::single(payload.clone())
+                )
+                .await?,
+            UploadProgress::Complete
+        );
+        // InMemory consumes the session immediately.
+        assert_eq!(
+            storage.upload_offset(&id, &token).await.unwrap_err().kind(),
+            ErrorKind::UnknownUploadSession
+        );
+        let (_, _, body) = storage
+            .get_object(&id, Timestamp::now(), None)
+            .await?
+            .unwrap();
+        assert_eq!(stream::read_to_vec(body).await?, payload);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn resumable_bigtable_and_gcs() -> anyhow::Result<()> {
+        let streams = ChangeStreamFactory::default();
+        let lt = GcsBackend::new(
+            GcsConfig {
+                endpoint: Some("http://localhost:8087".into()),
+                bucket: "test-bucket".into(),
+                cogs: None,
+            },
+            &streams,
+        )
+        .await?;
+        let hv = BigTableBackend::new(
+            BigTableConfig {
+                endpoint: Some("localhost:8086".into()),
+                project_id: "testing".into(),
+                instance_name: "objectstore".into(),
+                table_name: "objectstore".into(),
+                connections: None,
+                rpc_timeout: Duration::from_secs(2),
+                cogs: None,
+            },
+            &streams,
+        )
+        .await?;
+        let storage = TieredStorage::new(Box::new(hv), Box::new(lt), Box::new(NoopChangeLog));
+        let id = make_id(&format!("tiered-resumable-{}", uuid::Uuid::now_v7()));
+        let payload = vec![b'a'; BACKEND_SIZE_THRESHOLD + 1];
+        let token =
+            resumable_token(&storage, &id, &Metadata::default(), payload.len() as u64).await;
+
+        // A completed upload creates a logical object.
+        assert_eq!(
+            storage
+                .put_chunk(
+                    &id,
+                    &token,
+                    0,
+                    payload.len() as u64,
+                    stream::single(payload.clone())
+                )
+                .await?,
+            UploadProgress::Complete
+        );
+        // GCS still reports completion.
+        assert_eq!(
+            storage.upload_offset(&id, &token).await?,
+            UploadProgress::Complete
+        );
+        let (_, _, body) = storage
+            .get_object(&id, Timestamp::now(), None)
+            .await?
+            .unwrap();
+        assert_eq!(stream::read_to_vec(body).await?, payload);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn resumable_invalid_chunks() {
+        let (storage, _, _, _) = make_tiered_storage();
+        let id = make_id("resumable-invalid");
+        let length = BACKEND_SIZE_THRESHOLD as u64 + 1;
+        let token = resumable_token(&storage, &id, &Metadata::default(), length).await;
+
+        // Overflow and future offsets are rejected.
+        assert_eq!(
+            storage
+                .put_chunk(&id, &token, u64::MAX, 1, stream::single("x"))
+                .await
+                .unwrap_err()
+                .kind(),
+            ErrorKind::ChunkExceedsUploadLength {
+                offset: u64::MAX,
+                content_length: 1,
+                upload_length: length
+            }
+        );
+        assert_eq!(
+            storage
+                .put_chunk(&id, &token, length - 1, 1, stream::single("x"))
+                .await
+                .unwrap_err()
+                .kind(),
+            ErrorKind::UploadOffsetMismatch { offset: 0 }
+        );
+    }
+
+    #[tokio::test]
+    async fn resumable_cancel() {
+        let (storage, hv, _, _) = make_tiered_storage();
+        let id = make_id("resumable-invalid");
+        let token = resumable_token(
+            &storage,
+            &id,
+            &Metadata::default(),
+            BACKEND_SIZE_THRESHOLD as u64 + 1,
+        )
+        .await;
+
+        // Cancellation removes the open long-term session.
+        storage.cancel_upload(&id, &token).await.unwrap();
+        assert_eq!(
+            storage.upload_offset(&id, &token).await.unwrap_err().kind(),
+            ErrorKind::UnknownUploadSession
+        );
+        assert!(!hv.contains(&id));
     }
 
     #[derive(Clone, Debug)]
@@ -1780,7 +2122,7 @@ mod tests {
 
     // --- CAS conflicts ---
 
-    #[derive(Debug)]
+    #[derive(Debug, Copy, Clone)]
     struct CasConflict;
 
     #[async_trait::async_trait]
