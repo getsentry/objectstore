@@ -334,10 +334,13 @@ Not all backends support resumable uploads. A backend returns no session when it
 particular upload; this is a routine outcome rather than an error. Acceptance can depend on the
 declared size, the metadata, or whether resuming is possible in principle.
 
-The offset returned by every chunk response is authoritative. A backend may accept the full
-request body but persist only a prefix (for example, up to an internal alignment boundary), so a
-client must not advance by the submitted `Content-Length` on its own. It continues from the
-preceding response's offset, or performs an explicit offset query after an ambiguous failure.
+The offset returned by every chunk response is authoritative. Each upload reports its granularity
+in bytes, or zero when it imposes none. For a positive granularity, a backend may accept
+the full request body but persist only the largest aligned prefix, so a client must not advance by
+the submitted `Content-Length` on its own. Non-empty, non-final chunks shorter than one granularity
+unit are rejected; the final chunk is exempt. Clients should use
+granularity-sized multiples and continue from the preceding response's offset, or perform an
+explicit offset query after an ambiguous failure.
 
 ## Multipart Uploads
 

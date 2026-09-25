@@ -218,6 +218,11 @@ impl AuthAwareService {
 
     // --- Resumable upload operations ---
 
+    /// Returns the upload granularity currently reported for new sessions, in bytes.
+    pub fn upload_granularity(&self) -> u64 {
+        self.service.upload_granularity()
+    }
+
     /// Auth-aware wrapper around [`StorageService::create_upload_session`].
     pub async fn create_upload_session(
         &self,

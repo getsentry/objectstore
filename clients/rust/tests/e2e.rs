@@ -1053,6 +1053,7 @@ async fn test_resumable_upload() {
         .unwrap()
         .unwrap();
     assert_eq!(upload.key(), "resumable-client");
+    assert_eq!(upload.granularity(), Some(0));
     assert_eq!(
         upload.progress().send().await.unwrap(),
         UploadProgress::Incomplete { offset: 0 }
@@ -1064,10 +1065,12 @@ async fn test_resumable_upload() {
 
     // Resume the session and finish the upload.
     let resumed = session.resume_upload(upload.key(), upload.token().clone());
+    assert_eq!(resumed.granularity(), None);
     assert_eq!(
         resumed.progress().send().await.unwrap(),
         UploadProgress::Incomplete { offset: 3 }
     );
+    assert_eq!(resumed.granularity(), Some(0));
     assert_eq!(
         resumed.put(0, "bad").send().await.unwrap(),
         UploadProgress::Incomplete { offset: 3 }

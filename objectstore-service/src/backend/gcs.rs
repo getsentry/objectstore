@@ -902,6 +902,10 @@ impl Backend for GcsBackend {
         "gcs"
     }
 
+    fn upload_granularity(&self) -> u64 {
+        256 * 1024
+    }
+
     fn as_multipart_upload_backend(&self) -> Result<&dyn MultipartUploadBackend> {
         Ok(self)
     }
@@ -1266,6 +1270,14 @@ impl Backend for GcsBackend {
                 content_length,
                 upload_length: session.total_length.get(),
             })?;
+        let granularity = self.upload_granularity();
+        if content_length > 0 && content_length < granularity && end != session.total_length.get() {
+            return Err(ErrorKind::ChunkTooSmall {
+                chunk_length: content_length,
+                upload_granularity: granularity,
+            }
+            .into());
+        }
 
         let content_range = match content_length {
             // An empty chunk is equivalent to an offset query.
@@ -1965,8 +1977,9 @@ mod tests {
     async fn test_resumable_empty_chunk_reports_offset_without_writing() -> Result<()> {
         let backend = create_test_backend().await?;
         let id = make_id_with_key("resumable-empty-chunk");
+        let total_length = 2 * (RESUMABLE_CHUNK_SIZE + 2);
         let token = backend
-            .create_upload_session(&id, &Metadata::default(), nonzero(4))
+            .create_upload_session(&id, &Metadata::default(), nonzero(total_length as u64))
             .await?;
 
         // An empty chunk cannot advance a session that still expects bytes. It reports the
@@ -1977,19 +1990,34 @@ mod tests {
                 .await?,
             UploadProgress::Incomplete { offset: 0 }
         );
+        // The backend rejects undersized non-final chunks, so use an unaligned chunk larger
+        // than one granularity unit to exercise the emulator's alignment behavior.
+        let chunk_length = RESUMABLE_CHUNK_SIZE + 2;
         let after_write = backend
-            .put_chunk(&id, &token, 0, 2, stream::single(b"ab".to_vec()))
+            .put_chunk(
+                &id,
+                &token,
+                0,
+                chunk_length as u64,
+                stream::single(vec![b'a'; chunk_length]),
+            )
             .await?;
         assert!(matches!(after_write, UploadProgress::Incomplete { .. }));
 
         // Whichever prefix GCS acknowledged, an empty chunk reports that same position rather
         // than moving it. GCS documents that a chunk "should be a multiple of 256 KiB ... unless
         // it's the last chunk", and that a client "should not assume that the server received all
-        // bytes sent in any given request". The emulator acknowledges any length, so the position
-        // itself is not asserted here.
+        // bytes sent in any given request". The emulator acknowledges the unaligned tail, so the
+        // position itself is not asserted here.
         assert_eq!(
             backend
-                .put_chunk(&id, &token, 2, 0, stream::single(Vec::new()))
+                .put_chunk(
+                    &id,
+                    &token,
+                    chunk_length as u64,
+                    0,
+                    stream::single(Vec::new()),
+                )
                 .await?,
             after_write
         );
@@ -2041,6 +2069,17 @@ mod tests {
         assert_eq!(
             backend.upload_offset(&multi_id, &token).await?,
             UploadProgress::Incomplete { offset: 0 }
+        );
+        let error = backend
+            .put_chunk(&multi_id, &token, 0, 1, stream::single(b"a".to_vec()))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.kind(),
+            ErrorKind::ChunkTooSmall {
+                chunk_length: 1,
+                upload_granularity: RESUMABLE_CHUNK_SIZE as u64,
+            }
         );
         assert_eq!(
             backend

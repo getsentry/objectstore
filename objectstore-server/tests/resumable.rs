@@ -8,7 +8,7 @@ use anyhow::Result;
 use objectstore_server::config::{AuthZ, Config, EncryptionConfig, Service};
 use objectstore_test::server::TestServer;
 use objectstore_types::resumable::{
-    CreateSessionResponse, HEADER_UPLOAD_LENGTH, HEADER_UPLOAD_OFFSET,
+    CreateSessionResponse, HEADER_UPLOAD_GRANULARITY, HEADER_UPLOAD_LENGTH, HEADER_UPLOAD_OFFSET,
 };
 use reqwest::StatusCode;
 
@@ -87,6 +87,7 @@ async fn create_session_path(
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
     let created: CreateSessionResponse = response.json().await?;
+    assert_eq!(created.granularity, 0);
     Ok(format!(
         "{OBJECT_PATH}?session={}",
         created.session.to_base64url()
@@ -175,6 +176,7 @@ async fn test_resumable_upload() -> Result<()> {
     assert_eq!(response.status(), StatusCode::OK);
     let created: CreateSessionResponse = response.json().await?;
     assert_eq!(created.key, "my-key");
+    assert_eq!(created.granularity, 0);
     let session_path = format!("{object}?session={}", created.session.to_base64url());
 
     // The object doesn't exist yet.
@@ -190,6 +192,7 @@ async fn test_resumable_upload() -> Result<()> {
         .await?;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
     assert_eq!(response.headers()[HEADER_UPLOAD_OFFSET], "3");
+    assert_eq!(response.headers()[HEADER_UPLOAD_GRANULARITY], "0");
 
     // Rejected: outdated offset.
     let response = client
@@ -218,6 +221,7 @@ async fn test_resumable_upload() -> Result<()> {
         .await?;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
     assert_eq!(response.headers()[HEADER_UPLOAD_OFFSET], "3");
+    assert_eq!(response.headers()[HEADER_UPLOAD_GRANULARITY], "0");
     let response = client
         .put(server.url(&session_path))
         .header(HEADER_UPLOAD_OFFSET, "3")

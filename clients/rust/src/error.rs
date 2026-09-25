@@ -73,6 +73,17 @@ pub enum Error {
     #[cfg(feature = "resumable-upload-api")]
     #[error("resumable upload session is not available")]
     ResumableUploadUnavailable,
+    /// A non-final resumable chunk is shorter than the upload granularity.
+    #[cfg(feature = "resumable-upload-api")]
+    #[error(
+        "non-final chunk length {chunk_length} is smaller than upload granularity {upload_granularity}"
+    )]
+    ChunkTooSmall {
+        /// The declared length of the chunk.
+        chunk_length: u64,
+        /// The upload granularity in bytes.
+        upload_granularity: u64,
+    },
 }
 
 /// A convenience alias that defaults our [`Error`] type.

@@ -10,12 +10,13 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::{Arc, OnceLock};
 
 use bytes::Bytes;
 use objectstore_types::metadata::Metadata;
 use objectstore_types::resumable::{
-    CompleteUploadResponse, CreateSessionResponse, HEADER_UPLOAD_LENGTH, HEADER_UPLOAD_OFFSET,
-    UploadOffset,
+    CompleteUploadResponse, CreateSessionResponse, HEADER_UPLOAD_GRANULARITY, HEADER_UPLOAD_LENGTH,
+    HEADER_UPLOAD_OFFSET, UploadOffset,
 };
 use reqwest::{Body, Method, Response, StatusCode};
 use serde::Serialize;
@@ -52,6 +53,8 @@ pub struct ResumableUpload {
     session: Session,
     key: ObjectKey,
     token: SessionToken,
+    total_length: Option<u64>,
+    granularity: Arc<OnceLock<u64>>,
 }
 
 impl Session {
@@ -87,6 +90,8 @@ impl Session {
             session: self.clone(),
             key: key.into(),
             token,
+            total_length: None,
+            granularity: Arc::new(OnceLock::new()),
         }
     }
 }
@@ -100,6 +105,14 @@ impl ResumableUpload {
     /// Returns the session token bound to this upload.
     pub fn token(&self) -> &SessionToken {
         &self.token
+    }
+
+    /// Returns this upload's granularity, in bytes.
+    ///
+    /// This is `None` for a reconstructed handle until a server response reports the value.
+    /// Zero means the upload has no granularity.
+    pub fn granularity(&self) -> Option<u64> {
+        self.granularity.get().copied()
     }
 
     /// Builds a request for the server's authoritative upload progress.
@@ -150,6 +163,10 @@ impl ResumableUpload {
         }
     }
 
+    fn validate_chunk_length(&self, offset: u64, chunk_length: u64) -> crate::Result<()> {
+        validate_chunk_length(self.granularity(), self.total_length, offset, chunk_length)
+    }
+
     /// Builds a request to cancel this upload session, discarding any uploaded bytes.
     pub fn cancel(&self) -> CancelUploadBuilder {
         CancelUploadBuilder {
@@ -165,6 +182,37 @@ impl ResumableUpload {
                 session: &self.token,
             }))
     }
+}
+
+fn validate_chunk_length(
+    granularity: Option<u64>,
+    total_length: Option<u64>,
+    offset: u64,
+    chunk_length: u64,
+) -> crate::Result<()> {
+    let Some(granularity) = granularity else {
+        return Ok(());
+    };
+    if granularity == 0 || chunk_length == 0 || chunk_length >= granularity {
+        return Ok(());
+    }
+
+    let Some(total_length) = total_length else {
+        // A reconstructed handle does not know whether this is the final chunk. The server
+        // retains the authoritative total length and performs the same validation.
+        return Ok(());
+    };
+    if !offset
+        .checked_add(chunk_length)
+        .is_some_and(|end| end < total_length)
+    {
+        return Ok(());
+    }
+
+    Err(Error::ChunkTooSmall {
+        chunk_length,
+        upload_granularity: granularity,
+    })
 }
 
 /// A builder for [`Session::create_upload`].
@@ -267,9 +315,14 @@ impl CreateResumableUploadBuilder {
         }
 
         let response: CreateSessionResponse = response.json().await?;
-        Ok(Some(
-            self.session.resume_upload(response.key, response.session),
-        ))
+        let upload = ResumableUpload {
+            session: self.session,
+            key: response.key,
+            token: response.session,
+            total_length: Some(self.total_length),
+            granularity: Arc::new(OnceLock::from(response.granularity)),
+        };
+        Ok(Some(upload))
     }
 }
 
@@ -293,7 +346,7 @@ impl UploadProgressBuilder {
             .header(HEADER_UPLOAD_OFFSET, "*")
             .send()
             .await?;
-        parse_progress_response(response).await
+        parse_progress_response(response, &self.upload).await
     }
 }
 
@@ -326,6 +379,8 @@ impl PutChunkBuilder {
     ///
     /// Returns [`Error::ResumableUploadUnavailable`] when the session expired, was canceled, or
     /// could not be found. The upload must be restarted with a new session in that case.
+    /// Returns [`Error::ChunkTooSmall`] before sending the request when this is known to be a
+    /// non-final chunk shorter than the upload granularity.
     ///
     /// ```rust,ignore
     /// let offset = match upload.put(offset, chunk).send().await {
@@ -336,6 +391,8 @@ impl PutChunkBuilder {
     /// };
     /// ```
     pub async fn send(self) -> crate::Result<UploadProgress> {
+        self.upload
+            .validate_chunk_length(self.offset, self.length)?;
         let response = self
             .upload
             .request(Method::PUT)?
@@ -344,7 +401,7 @@ impl PutChunkBuilder {
             .body(self.body)
             .send()
             .await?;
-        parse_progress_response(response).await
+        parse_progress_response(response, &self.upload).await
     }
 }
 
@@ -383,7 +440,19 @@ impl CancelUploadBuilder {
     }
 }
 
-async fn parse_progress_response(response: Response) -> crate::Result<UploadProgress> {
+async fn parse_progress_response(
+    response: Response,
+    upload: &ResumableUpload,
+) -> crate::Result<UploadProgress> {
+    if let Some(granularity) = response
+        .headers()
+        .get(HEADER_UPLOAD_GRANULARITY)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok())
+    {
+        let _ = upload.granularity.set(granularity);
+    }
+
     match response.status() {
         StatusCode::NO_CONTENT | StatusCode::CONFLICT => {
             let offset = parse_offset(&response);
@@ -422,5 +491,21 @@ fn parse_offset(response: &Response) -> Option<u64> {
     match value.parse().ok()? {
         UploadOffset::At(offset) => Some(offset),
         UploadOffset::Unknown => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_chunk_length() {
+        assert!(matches!(
+            validate_chunk_length(Some(4), Some(10), 0, 3),
+            Err(Error::ChunkTooSmall {
+                chunk_length: 3,
+                upload_granularity: 4,
+            })
+        ));
     }
 }

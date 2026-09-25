@@ -51,8 +51,9 @@
 //!
 //! Session creation requires an `Upload-Length` header carrying the total size of the object
 //! in bytes, takes the same metadata headers as a regular upload, and requires an empty body.
-//! It answers `200 OK` with `{"key", "session"}`; the session field is the token to use in
-//! subsequent query parameters. Metadata is fixed at this point and does not change afterwards.
+//! It answers `200 OK` with `{"key", "session", "granularity"}`; the session field is the token
+//! to use in subsequent query parameters. `granularity` is this upload's persistence unit in bytes,
+//! or zero when no unit is imposed. Metadata is fixed at this point and does not change afterwards.
 //!
 //! Chunk uploads and offset queries share one request shape, distinguished by the
 //! `Upload-Offset` header: a byte offset submits the body as the chunk starting there, while
@@ -60,9 +61,13 @@
 //! `204 No Content` with the authoritative `Upload-Offset` while bytes remain, and
 //! `201 Created` with `{"key"}` once the upload is complete and the object is available through
 //! the normal object endpoints. The session is terminal at that point.
+//! These responses also carry `Upload-Granularity`, allowing a client reconstructed from a token
+//! to learn this upload's granularity.
 //! The offset in the response may be lower than the end of the last chunk that was sent.
 //! Backends can e.g. persist only aligned prefixes and discard the remainder, so clients must
 //! always continue from the returned offset.
+//! Non-final chunks shorter than one positive granularity unit are rejected; final chunks are
+//! exempt because they persist the remaining bytes.
 //! Every chunk requires `Content-Length`, even over HTTP/2, while creation and offset queries
 //! must not carry a request body.
 //!
@@ -73,7 +78,7 @@
 //!
 //! | Status | Meaning | Client action |
 //! |--------|---------|---------------|
-//! | `400`  | Malformed session token, missing `Upload-Length`, nonempty offset query, or a chunk exceeding the declared length | Correct the request |
+//! | `400`  | Malformed session token, missing `Upload-Length`, nonempty offset query, chunk exceeding the declared length, or non-final chunk shorter than the granularity | Correct the request |
 //! | `404`  | The upload session is unknown or does not belong to this object | Start a new session or correct the request |
 //! | `409`  | A chunk's offset does not match the authoritative offset | Query the offset and continue from there |
 //! | `410`  | The session expired or was canceled | Start a new session |

@@ -465,6 +465,11 @@ impl StorageService {
 
     // --- Resumable upload operations ---
 
+    /// Returns the upload granularity currently reported for new sessions, in bytes.
+    pub fn upload_granularity(&self) -> u64 {
+        self.inner.upload_granularity()
+    }
+
     /// Opens a resumable upload session for an object of `total_length` bytes.
     ///
     /// Returns `Ok(None)` for zero-length objects or when the backend declines resumable uploads
