@@ -173,7 +173,7 @@ async fn test_resumable_upload() -> Result<()> {
         .header(reqwest::header::CONTENT_TYPE, "text/plain")
         .send()
         .await?;
-    assert!(created.granularity.is_some());
+    assert_eq!(response.status(), StatusCode::OK);
     let created: CreateSessionResponse = response.json().await?;
     assert_eq!(created.key, "my-key");
     assert_eq!(created.granularity, 0);
