@@ -110,15 +110,15 @@ async fn create_session_for_id(
         .usecases
         .validate(&id.context().usecase, &metadata)?;
 
-    let session = service
+    let created = service
         .create_upload_session(id.clone(), metadata, total_length)
         .await?
         .ok_or_else(|| ServiceError::from(ErrorKind::Unsupported))?;
 
     let body = Json(CreateSessionResponse {
         key: id.key().to_owned(),
-        session,
-        granularity: service.upload_granularity(),
+        session: created.session,
+        granularity: created.granularity,
     });
     Ok((StatusCode::OK, body).into_response())
 }

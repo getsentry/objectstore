@@ -4,7 +4,9 @@ use objectstore_service::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
-use objectstore_service::service::{DeleteResponse, GetResponse, InsertResponse, MetadataResponse};
+use objectstore_service::service::{
+    CreatedUploadSession, DeleteResponse, GetResponse, InsertResponse, MetadataResponse,
+};
 
 use objectstore_service::{ClientStream, StorageService};
 use objectstore_types::auth::Permission;
@@ -218,18 +220,13 @@ impl AuthAwareService {
 
     // --- Resumable upload operations ---
 
-    /// Returns the upload granularity currently reported for new sessions, in bytes.
-    pub fn upload_granularity(&self) -> u64 {
-        self.service.upload_granularity()
-    }
-
     /// Auth-aware wrapper around [`StorageService::create_upload_session`].
     pub async fn create_upload_session(
         &self,
         id: ObjectId,
         metadata: Metadata,
         total_length: u64,
-    ) -> ApiResult<Option<SessionToken>> {
+    ) -> ApiResult<Option<CreatedUploadSession>> {
         self.check_permission(Permission::ObjectWrite, id.context())?;
         Ok(self
             .service

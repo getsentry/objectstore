@@ -43,6 +43,15 @@ pub type InsertResponse = ObjectId;
 /// Service response for [`StorageService::delete_object`].
 pub type DeleteResponse = ();
 
+/// A newly opened resumable upload session and its upload granularity.
+#[derive(Debug)]
+pub struct CreatedUploadSession {
+    /// The encrypted token used to continue the upload.
+    pub session: EncryptedSessionToken,
+    /// The upload granularity in bytes, or zero when there is none.
+    pub granularity: u64,
+}
+
 /// Default concurrency limit for [`StorageService`].
 ///
 /// This value is used when no explicit limiter is set via
@@ -465,11 +474,6 @@ impl StorageService {
 
     // --- Resumable upload operations ---
 
-    /// Returns the upload granularity currently reported for new sessions, in bytes.
-    pub fn upload_granularity(&self) -> u64 {
-        self.inner.upload_granularity()
-    }
-
     /// Opens a resumable upload session for an object of `total_length` bytes.
     ///
     /// Returns `Ok(None)` for zero-length objects or when the backend declines resumable uploads
@@ -479,7 +483,7 @@ impl StorageService {
         id: ObjectId,
         metadata: Metadata,
         total_length: u64,
-    ) -> Result<Option<EncryptedSessionToken>> {
+    ) -> Result<Option<CreatedUploadSession>> {
         let Some(total_length) = NonZeroU64::new(total_length) else {
             return Ok(None);
         };
@@ -492,12 +496,16 @@ impl StorageService {
                 .await?;
             session
                 .map(|backend_token| {
-                    cipher
+                    let session = cipher
                         .encrypt(&SessionToken {
                             object_id: id,
                             backend_token,
                         })
-                        .map(EncryptedSessionToken::new)
+                        .map(EncryptedSessionToken::new)?;
+                    Ok(CreatedUploadSession {
+                        session,
+                        granularity: inner.upload_granularity(),
+                    })
                 })
                 .transpose()
         })
@@ -605,6 +613,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Hooks for ResumableTokenHooks {
+        fn upload_granularity(&self, _inner: &InMemoryBackend) -> u64 {
+            256 * 1024
+        }
+
         async fn create_upload_session(
             &self,
             _inner: &InMemoryBackend,
@@ -1400,11 +1412,13 @@ mod tests {
     async fn resumable_round_trip() {
         let service = make_service();
         let id = ObjectId::new(make_context(), "resumable".into());
-        let token = service
+        let created = service
             .create_upload_session(id.clone(), Metadata::default(), 3)
             .await
             .unwrap()
             .unwrap();
+        assert_eq!(created.granularity, 0);
+        let token = created.session;
         assert_eq!(
             service
                 .put_chunk(id.clone(), token.clone(), 0, 1, stream::single("a"))
@@ -1478,10 +1492,12 @@ mod tests {
         );
         let id = ObjectId::new(make_context(), "resumable".into());
 
-        let token = service
+        let created = service
             .create_upload_session(id.clone(), Metadata::default(), 4)
             .await?
             .expect("test backend supports resumable uploads");
+        assert_eq!(created.granularity, 256 * 1024);
+        let token = created.session;
         assert_ne!(token.as_bytes(), b"backend token");
         assert!(matches!(
             service
@@ -1517,7 +1533,8 @@ mod tests {
         let encrypted = service
             .create_upload_session(id.clone(), Metadata::default(), 4)
             .await?
-            .expect("test backend supports resumable uploads");
+            .expect("test backend supports resumable uploads")
+            .session;
         assert_ne!(encrypted.as_bytes(), b"backend token");
         service.upload_offset(id, encrypted).await?;
         assert_eq!(
