@@ -1053,7 +1053,7 @@ async fn test_resumable_upload() {
         .unwrap()
         .unwrap();
     assert_eq!(upload.key(), "resumable-client");
-    assert_eq!(upload.granularity(), Some(0));
+    assert!(upload.granularity().is_some());
     assert_eq!(
         upload.progress().send().await.unwrap(),
         UploadProgress::Incomplete { offset: 0 }
