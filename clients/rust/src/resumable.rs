@@ -366,8 +366,7 @@ impl PutChunkBuilder {
     /// Returns [`Error::ResumableUploadUnavailable`] when the session expired, was canceled, or
     /// could not be found. The upload must be restarted with a new session in that case.
     /// Returns [`Error::ChunkTooSmall`] before sending the request when this is known to be a
-    /// non-final chunk shorter than the upload granularity. Reconstructed handles cannot perform
-    /// this check because they do not know the upload length or granularity.
+    /// non-final chunk shorter than the upload granularity.
     ///
     /// ```rust,ignore
     /// let offset = match upload.put(offset, chunk).send().await {
