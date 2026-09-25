@@ -544,10 +544,10 @@ mod tests {
     use crate::id::ObjectContext;
     use crate::stream;
 
-    // NB: To run these tests, you need to have a MinIO server running. This is done
+    // NB: To run these tests, you need to have SeaweedFS running. This is done
     // automatically in CI.
     //
-    // Refer to the readme for how to set up MinIO via devservices.
+    // Refer to the readme for how to set up SeaweedFS via devservices.
 
     fn create_test_backend() -> S3CompatibleBackend<NoToken> {
         S3CompatibleBackend::without_token(
@@ -743,7 +743,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "MinIO does not support streaming bodies (requires Content-Length)"]
     async fn test_get_metadata_reports_size() -> Result<()> {
         let backend = create_test_backend();
         let id = make_id();
@@ -770,7 +769,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "MinIO does not support streaming bodies (requires Content-Length)"]
+    #[ignore = "SeaweedFS does not enforce expiration from GCS custom-time metadata"]
     async fn test_ttl_immediate() -> Result<()> {
         let backend = create_test_backend();
         let id = make_id();
@@ -799,7 +798,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "MinIO does not support streaming bodies (requires Content-Length)"]
+    #[ignore = "SeaweedFS does not enforce expiration from GCS custom-time metadata"]
     async fn test_tti_immediate() -> Result<()> {
         let backend = create_test_backend();
         let id = make_id();
