@@ -106,10 +106,10 @@ impl ResumableUpload {
         &self.token
     }
 
-    /// Returns this upload's granularity, in bytes.
+    /// Returns this upload's granularity in bytes, if known.
     ///
-    /// This is `None` for a reconstructed handle; only session creation supplies the value.
-    /// Zero means the upload has no granularity.
+    /// The granularity is the persistence unit for non-final chunks: chunks shorter than one
+    /// unit are rejected, and larger chunks may persist only an aligned prefix.
     pub fn granularity(&self) -> Option<u64> {
         self.granularity
     }
