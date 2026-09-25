@@ -113,14 +113,13 @@ jobs:
             -e GOOGLE_CLOUD_CPP_STORAGE_TEST_BUCKET_NAME=test-bucket \
             gcs-emulator-local
 
-      - name: Start MinIO
+      - name: Start SeaweedFS
         run: |
           docker run -d \
-            --name minio \
-            -p 8089:9000 \
-            --entrypoint /run-minio.sh \
-            -v $PWD/devservices/run-minio.sh:/run-minio.sh \
-            quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+            --name seaweedfs \
+            -p 8089:8333 \
+            -e S3_BUCKET=test-bucket \
+            chrislusf/seaweedfs:4.47
 
       - name: Install Rust Toolchain
         run: |
