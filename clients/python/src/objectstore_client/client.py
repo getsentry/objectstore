@@ -17,7 +17,12 @@ from urllib3.connectionpool import HTTPConnectionPool
 
 from objectstore_client import presign, utils
 from objectstore_client.auth import Permission, SecretKey, TokenProvider
-from objectstore_client.errors import raise_for_status
+from objectstore_client.errors import (
+    ExpiryExtensionRejected,
+    ObjectNotFound,
+    RequestError,
+    raise_for_status,
+)
 from objectstore_client.metadata import (
     HEADER_EXPIRATION,
     HEADER_FILENAME,
@@ -27,6 +32,7 @@ from objectstore_client.metadata import (
     ExpirationPolicy,
     Metadata,
     format_expiration,
+    format_timedelta,
 )
 from objectstore_client.metrics import (
     MetricsBackend,
@@ -670,6 +676,89 @@ class Session:
             raise_for_status(response)
             span.set_attribute("objectstore.found", True)
             return Metadata.from_headers(response.headers)
+
+    def extend_expiry(
+        self,
+        key: str,
+        at: datetime | None = None,
+        from_creation: timedelta | None = None,
+        from_now: timedelta | None = None,
+    ) -> None:
+        """Extend an object's expiration deadline, preserving its payload.
+
+        Supply exactly one target: ``at`` is a timezone-aware absolute datetime;
+        ``from_creation`` is total lifetime since creation or replacement; and
+        ``from_now`` is lifetime from server request start. Relative targets are
+        resolved by the server, not added to the existing deadline. Fractional
+        duration seconds are truncated; absolute deadlines round upward to seconds.
+
+        An already-sufficient deadline succeeds without being shortened. Success
+        returns no value and does not indicate whether the deadline changed.
+        Requires object-write permission.
+
+        Actual extensions adjust TTL duration to approximately match the total
+        lifetime since creation; TTI duration remains unchanged.
+
+        Raises ``ValueError`` for missing or multiple targets, naive datetimes,
+        or negative durations. Zero durations are valid. Objects observed absent
+        or expired raise ``ObjectNotFound``. Rejected extensions raise
+        ``ExpiryExtensionRejected`` for non-expiring or concurrently changed
+        objects, or missing creation metadata needed for a creation-relative
+        target. Both exceptions subclass ``RequestError``. Rejection does not
+        guarantee that the object still exists, since it may be deleted concurrently.
+        Other HTTP errors propagate normally. Retrying ``from_now`` establishes
+        a new server-time anchor and can extend the deadline further.
+
+        Example::
+
+            from objectstore_client import ExpiryExtensionRejected, ObjectNotFound
+
+            try:
+                session.extend_expiry(key, from_now=timedelta(days=30))
+            except ObjectNotFound:
+                print("Object is missing or expired")
+            except ExpiryExtensionRejected:
+                print("Extension was rejected")
+        """
+
+        if sum(value is not None for value in (at, from_creation, from_now)) != 1:
+            raise ValueError("Supply exactly one of at, from_creation, or from_now")
+
+        extension: dict[str, str]
+        if at is not None:
+            if at.utcoffset() is None:
+                raise ValueError("at must be a timezone-aware datetime")
+            extension = {"at": at.astimezone(UTC).isoformat()}
+        else:
+            delta = from_creation if from_creation is not None else from_now
+            assert delta is not None
+            if delta < timedelta(0):
+                raise ValueError("Expiry extension duration must not be negative")
+            extension = {
+                "after": format_timedelta(delta),
+                "from": "creation" if from_creation is not None else "now",
+            }
+
+        headers = self._make_headers()
+        with (
+            storage_span("extend_expiry", self._usecase, self._scope, key=key),
+            measure_storage_operation(
+                self._metrics_backend, "extend_expiry", self._usecase.name
+            ),
+        ):
+            response = self._pool.request(
+                "PATCH",
+                self._make_url(key),
+                headers=headers,
+                json={"extend_expiry": extension},
+                preload_content=True,
+            )
+            error_type: type[RequestError] = RequestError
+            if response.status == 404:
+                error_type = ObjectNotFound
+            elif response.status == 409:
+                error_type = ExpiryExtensionRejected
+            raise_for_status(response, error_type=error_type)
 
     def delete(self, key: str) -> None:
         """

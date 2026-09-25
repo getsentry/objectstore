@@ -7,13 +7,14 @@
 //! The default serde representation preserves the `SystemTime` metadata format. Use
 //! [`Timestamp::as_rfc3339`] for HTTP headers and JSON fields containing RFC3339 strings.
 
+use std::borrow::Cow;
 use std::fmt;
 use std::ops::{Add, Sub};
 use std::str::FromStr;
 use std::time::{Duration, SystemTime};
 
 use humantime::TimestampError;
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 /// A whole-second Unix timestamp used for access time and expiration.
@@ -99,6 +100,11 @@ impl Timestamp {
         Self::from_unix_secs(seconds).ok()
     }
 
+    /// Adds a duration, rounding upward and clamping to the maximum supported timestamp.
+    pub fn saturating_add(self, duration: Duration) -> Self {
+        self.checked_add(duration).unwrap_or(Self(Self::MAX))
+    }
+
     /// Subtracts a duration, rounding upward, or returns `None` if the result precedes the epoch.
     pub fn checked_sub(self, duration: Duration) -> Option<Self> {
         // Ceiling a whole timestamp minus a duration subtracts only the whole seconds.
@@ -164,7 +170,7 @@ impl Serialize for Timestamp {
 
 impl<'de> Deserialize<'de> for Timestamp {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Self::try_from(SystemTime::deserialize(deserializer)?).map_err(de::Error::custom)
+        Self::try_from(SystemTime::deserialize(deserializer)?).map_err(serde::de::Error::custom)
     }
 }
 
@@ -208,8 +214,13 @@ impl Serialize for Rfc3339Timestamp {
 
 impl<'de> Deserialize<'de> for Rfc3339Timestamp {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = String::deserialize(deserializer)?;
-        value.parse().map_err(de::Error::custom)
+        // Plain `Cow::deserialize` always owns; `borrow` enables borrowing from the input.
+        #[derive(Deserialize)]
+        #[serde(transparent)]
+        struct BorrowedStr<'a>(#[serde(borrow)] Cow<'a, str>);
+
+        let BorrowedStr(value) = BorrowedStr::deserialize(deserializer)?;
+        value.parse().map_err(serde::de::Error::custom)
     }
 }
 
@@ -242,6 +253,11 @@ mod tests {
         let max = Timestamp::from_unix_secs(Timestamp::MAX).unwrap();
         assert!(max.checked_add(Duration::from_nanos(1)).is_none());
         assert!(max.checked_add(Duration::MAX).is_none());
+        assert_eq!(max.saturating_add(Duration::from_nanos(1)), max);
+        assert_eq!(
+            time.saturating_add(Duration::from_millis(1500)).as_secs(),
+            12
+        );
         assert_eq!(max.as_rfc3339().to_string(), "9999-12-31T23:59:59Z");
     }
 

@@ -1,3 +1,4 @@
+use objectstore_service::backend::common::{ExpiryUpdate, SetExpiryResponse};
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_service::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
@@ -105,6 +106,17 @@ impl AuthAwareService {
     ) -> ApiResult<MetadataResponse> {
         self.check_permission(Permission::ObjectRead, id.context())?;
         Ok(self.service.get_metadata(id, access_time).await?)
+    }
+
+    /// Auth-aware wrapper around [`StorageService::set_expiry`].
+    pub async fn set_expiry(
+        &self,
+        id: ObjectId,
+        target: ExpiryUpdate,
+        access_time: Timestamp,
+    ) -> ApiResult<SetExpiryResponse> {
+        self.check_permission(Permission::ObjectWrite, id.context())?;
+        Ok(self.service.set_expiry(id, target, access_time).await?)
     }
 
     /// Auth-aware wrapper around [`StorageService::get_object`].

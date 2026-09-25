@@ -31,7 +31,7 @@ objectstore-service = { path = "objectstore-service" }
 objectstore-test = { path = "objectstore-test" }
 objectstore-typed-options = { path = "objectstore-typed-options" }
 objectstore-typed-options-derive = { path = "objectstore-typed-options-derive" }
-objectstore-types = { path = "objectstore-types", version = "0.2.6" }
+objectstore-types = { path = "objectstore-types", version = "0.2.7" }
 stresstest = { path = "stresstest" }
 
 anyhow = "1.0.102"
@@ -43,7 +43,7 @@ async-trait = "0.1.89"
 axum = "0.8.9"
 axum-extra = { version = "0.12.6", default-features = false }
 base64 = "0.22.1"
-bigtable_rs = { git = "https://github.com/getsentry/bigtable_rs.git", rev = "4cb75bc5e5f87204363973f6302107768e64972e" }
+bigtable_rs = { git = "https://github.com/getsentry/bigtable_rs.git", rev = "56c310a5c8518d52ae7c7db53825beb078e326b5", default-features = false, features = ["gcp-auth-ring", "tonic-tls-ring"] }
 blake3 = "1.8.5"
 bytes = "1.12.0"
 bytesize = "2.4.0"

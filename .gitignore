@@ -12,6 +12,7 @@ profile.json.gz
 .claude/settings.local.json
 .claude/plans
 .claude/worktrees
+.codex
 .worktrees
 
 # Build artifacts

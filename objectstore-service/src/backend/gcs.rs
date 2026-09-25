@@ -14,13 +14,13 @@ use objectstore_types::headers;
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use objectstore_types::range::{ByteRange, ContentRange};
 use objectstore_types::time::{Rfc3339Timestamp, Timestamp};
-use reqwest::header::HeaderName;
+use reqwest::header::{HeaderMap, HeaderName};
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode, Url, header, multipart};
 use serde::{Deserialize, Serialize};
 
 use crate::backend::common::{
-    self, Backend, DeleteResponse, GetResponse, MetadataResponse, MultipartUploadBackend,
-    PutResponse,
+    self, Backend, DeleteResponse, ExpiryUpdate, GetResponse, MetadataResponse,
+    MultipartUploadBackend, PutResponse, SetExpiryResponse,
 };
 use crate::backend::extensions::{ReqwestResultExt, ResponseExt, SendTraced};
 use crate::change_stream::{
@@ -714,20 +714,25 @@ impl GcsBackend {
         Ok(Some(gcs_metadata))
     }
 
-    /// Moves an object's `customTime`, which is what its lifecycle expiry is anchored to.
+    /// Moves an object's `customTime` and optionally updates its metadata in the same PATCH.
     ///
-    /// Returns whether the update was actually applied.
+    /// Lifecycle expiry is anchored to `customTime`; TTL updates accompany that deadline.
+    ///
+    /// Returns the expiry update outcome, distinguishing absence from a conflict.
     #[tracing::instrument(level = "debug", fields(%object_url), skip(self))]
     async fn update_custom_time(
         &self,
         object_url: Url,
         custom_time: Timestamp,
         generations: GcsGenerations<'_>,
-    ) -> Result<bool> {
+        metadata: Option<BTreeMap<GcsMetaKey, String>>,
+    ) -> Result<SetExpiryResponse> {
         #[derive(Debug, Serialize)]
         #[serde(rename_all = "camelCase")]
         struct CustomTimeRequest {
             custom_time: Rfc3339Timestamp,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            metadata: Option<BTreeMap<GcsMetaKey, String>>,
         }
 
         let mut object_url = object_url;
@@ -736,24 +741,28 @@ impl GcsBackend {
             .append_pair("ifGenerationMatch", generations.0)
             .append_pair("ifMetagenerationMatch", generations.1);
 
-        let custom_time = custom_time.as_rfc3339();
+        let request = CustomTimeRequest {
+            custom_time: custom_time.as_rfc3339(),
+            metadata,
+        };
+
         self.with_retry("update_custom_time", || async {
             let response = self
                 .request(Method::PATCH, object_url.clone())
                 .await?
-                .json(&CustomTimeRequest { custom_time })
+                .json(&request)
                 .send_traced()
                 .await
                 .reqwest_context("updating GCS custom time")?;
 
-            // A concurrent metadata writer won the CAS race. Leave its update
-            // intact.
-            if matches!(
-                response.status(),
-                StatusCode::NOT_FOUND | StatusCode::PRECONDITION_FAILED
-            ) {
+            let outcome = match response.status() {
+                StatusCode::NOT_FOUND => Some(SetExpiryResponse::NotFound),
+                StatusCode::PRECONDITION_FAILED => Some(SetExpiryResponse::Rejected),
+                _ => None,
+            };
+            if let Some(outcome) = outcome {
                 response.drain_body().await;
-                return Ok(false);
+                return Ok(outcome);
             }
 
             response
@@ -762,7 +771,7 @@ impl GcsBackend {
                 .drain_body()
                 .await;
 
-            Ok(true)
+            Ok(SetExpiryResponse::Satisfied(custom_time))
         })
         .await
     }
@@ -913,6 +922,11 @@ impl Backend for GcsBackend {
         let metadata_json = serde_json::to_string(&gcs_metadata)
             .context(ErrorKind::Internal, "encoding GCS upload metadata")?;
 
+        let content_type = metadata
+            .content_type
+            .parse()
+            .context(ErrorKind::InvalidMetadata, "encoding GCS content type")?;
+
         let multipart = multipart::Form::new()
             .part(
                 "metadata",
@@ -923,8 +937,9 @@ impl Backend for GcsBackend {
             .part(
                 "media",
                 multipart::Part::stream(Body::wrap_stream(stream.boxed()))
-                    .mime_str(&metadata.content_type)
-                    .context(ErrorKind::InvalidMetadata, "encoding GCS content type")?,
+                    // Ensure the content type goes into headers unchanged including case
+                    // sensitivity, as required by GCS. This means we cannot use `mime_str`.
+                    .headers(HeaderMap::from_iter([(header::CONTENT_TYPE, content_type)])),
             );
 
         // GCS requires a multipart/related request. Its body looks identical to
@@ -1072,28 +1087,54 @@ impl Backend for GcsBackend {
     async fn set_expiry(
         &self,
         id: &ObjectId,
-        expire_at: Timestamp,
+        target: ExpiryUpdate,
         access_time: Timestamp,
-    ) -> Result<bool> {
+    ) -> Result<SetExpiryResponse> {
         let object_url = self.object_url(id)?;
         let Some(object) = self.get_gcs_metadata(&object_url, access_time).await? else {
-            return Ok(false);
+            return Ok(SetExpiryResponse::NotFound);
         };
         let Some(current_expiry) = object.custom_time else {
-            return Ok(false);
+            return Ok(SetExpiryResponse::Rejected);
+        };
+        let time_created = object.time_created.map(Rfc3339Timestamp::into_inner);
+        let Some(expire_at) = target.resolve(time_created, access_time)? else {
+            return Ok(SetExpiryResponse::Rejected);
         };
         if current_expiry.into_inner() >= expire_at {
-            return Ok(true); // already satisfied
+            return Ok(SetExpiryResponse::Satisfied(expire_at)); // already satisfied
         }
 
-        let applied = self
-            .update_custom_time(object_url, expire_at, object.generations())
+        let policy = object
+            .metadata
+            .get(&GcsMetaKey::Expiration)
+            .map(|value| value.parse())
+            .transpose()
+            .context(ErrorKind::CorruptData, "decoding GCS expiration policy")?
+            .unwrap_or_default();
+        let updated_policy = common::extended_expiration_policy(
+            policy,
+            time_created,
+            current_expiry.into_inner(),
+            expire_at,
+        )?;
+        let metadata = if updated_policy != policy {
+            Some(BTreeMap::from([(
+                GcsMetaKey::Expiration,
+                updated_policy.to_string(),
+            )]))
+        } else {
+            None
+        };
+
+        let outcome = self
+            .update_custom_time(object_url, expire_at, object.generations(), metadata)
             .await?;
-        if applied {
+        if matches!(outcome, SetExpiryResponse::Satisfied(_)) {
             self.change_stream.update(id, Some(expire_at));
         }
 
-        Ok(applied)
+        Ok(outcome)
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
@@ -1683,21 +1724,18 @@ mod tests {
     use std::time::Duration;
 
     use anyhow::Result;
+    #[cfg(feature = "storage-cogs")]
+    use objectstore_inventory_tracker::{OpType, test_utils::DummyProducer};
     use objectstore_types::scope::{Scope, Scopes};
     use reqwest::header::{HeaderMap, HeaderValue};
 
-    #[cfg(feature = "storage-cogs")]
-    use objectstore_inventory_tracker::OpType;
-    #[cfg(feature = "storage-cogs")]
-    use objectstore_inventory_tracker::test_utils::DummyProducer;
-
-    #[cfg(feature = "storage-cogs")]
-    use crate::stream::ClientError;
-
     use super::*;
+    use crate::backend::common::ExpiryTarget;
     use crate::id::ObjectContext;
     use crate::multipart::CompletedPart;
     use crate::stream;
+    #[cfg(feature = "storage-cogs")]
+    use crate::stream::ClientError;
 
     impl GcsBackend {
         async fn create_upload_session(
@@ -2560,65 +2598,95 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_expiry() -> Result<()> {
-        let backend = create_test_backend().await?;
+        for is_ttl in [false, true] {
+            let backend = create_test_backend().await?;
 
-        let id = make_id();
-        let tti = Duration::from_hours(2 * 24);
-        let metadata = Metadata {
-            content_type: "text/plain".into(),
-            expiration_policy: ExpirationPolicy::TimeToIdle(tti),
-            time_expires: Some(Timestamp::now() + tti),
-            ..Default::default()
-        };
+            let id = make_id();
+            let tti = Duration::from_hours(2 * 24);
+            let metadata = Metadata {
+                content_type: "text/plain".into(),
+                custom: [("preserved".into(), "yes".into())].into(),
+                expiration_policy: if is_ttl {
+                    ExpirationPolicy::TimeToLive(tti)
+                } else {
+                    ExpirationPolicy::TimeToIdle(tti)
+                },
+                time_expires: Some(Timestamp::now() + tti),
+                ..Default::default()
+            };
 
-        backend
-            .put_object(
-                &id,
-                &metadata,
-                stream::single("hello, world"),
-                Timestamp::now(),
-            )
-            .await?;
-
-        // Backdate custom_time while keeping the object live.
-        let object_url = backend.object_url(&id)?;
-        let old_deadline = Timestamp::now() + Duration::from_mins(1);
-        let generations = get_gcs_generations(&backend, object_url.clone()).await?;
-        backend
-            .update_custom_time(object_url, old_deadline, (&generations.0, &generations.1))
-            .await?;
-
-        // Backend reads return the stored deadline without modifying it.
-        let pre_meta = backend.get_metadata(&id, Timestamp::now()).await?.unwrap();
-        let pre_expiry = pre_meta.time_expires.unwrap();
-        assert_eq!(
             backend
-                .get_metadata(&id, Timestamp::now())
-                .await?
-                .unwrap()
-                .time_expires,
-            Some(pre_expiry)
-        );
+                .put_object(
+                    &id,
+                    &metadata,
+                    stream::single("hello, world"),
+                    Timestamp::now(),
+                )
+                .await?;
 
-        let requested = Timestamp::now() + tti;
-        assert!(backend.set_expiry(&id, requested, Timestamp::now()).await?);
-        assert_eq!(
+            // Backdate custom_time while keeping the object live.
+            let object_url = backend.object_url(&id)?;
+            let old_deadline = Timestamp::now() + Duration::from_mins(1);
+            let generations = get_gcs_generations(&backend, object_url.clone()).await?;
             backend
-                .get_metadata(&id, Timestamp::now())
+                .update_custom_time(
+                    object_url,
+                    old_deadline,
+                    (&generations.0, &generations.1),
+                    None,
+                )
+                .await?;
+
+            // Backend reads return the stored deadline without modifying it.
+            let pre_meta = backend.get_metadata(&id, Timestamp::now()).await?.unwrap();
+            let pre_expiry = pre_meta.time_expires.unwrap();
+            let created = pre_meta.time_created.unwrap();
+            assert_eq!(
+                backend
+                    .get_metadata(&id, Timestamp::now())
+                    .await?
+                    .unwrap()
+                    .time_expires,
+                Some(pre_expiry)
+            );
+
+            let requested = created + tti + tti;
+            for target in [
+                ExpiryTarget::At(requested),
+                ExpiryTarget::FromCreation(tti + tti),
+            ] {
+                assert_eq!(
+                    backend
+                        .set_expiry(&id, target.into(), Timestamp::now())
+                        .await?,
+                    SetExpiryResponse::Satisfied(requested)
+                );
+            }
+            assert_eq!(
+                backend
+                    .get_metadata(&id, Timestamp::now())
+                    .await?
+                    .unwrap()
+                    .time_expires,
+                Some(requested)
+            );
+
+            let (updated, _, stream) = backend
+                .get_object(&id, Timestamp::now(), None)
                 .await?
-                .unwrap()
-                .time_expires,
-            Some(requested)
-        );
-
-        // Verify the payload is still intact after extension.
-        let (_, _, stream) = backend
-            .get_object(&id, Timestamp::now(), None)
-            .await?
-            .unwrap();
-        let payload = stream::read_to_vec(stream).await?;
-        assert_eq!(&payload, b"hello, world");
-
+                .unwrap();
+            assert_eq!(
+                updated.expiration_policy,
+                if is_ttl {
+                    ExpirationPolicy::TimeToLive(tti + tti)
+                } else {
+                    ExpirationPolicy::TimeToIdle(tti)
+                }
+            );
+            assert_eq!(updated.custom, metadata.custom);
+            let payload = stream::read_to_vec(stream).await?;
+            assert_eq!(&payload, b"hello, world");
+        }
         Ok(())
     }
 
@@ -2637,34 +2705,41 @@ mod tests {
         let object_url = backend.object_url(&id)?;
         let generations = get_gcs_generations(&backend, object_url.clone()).await?;
 
-        assert!(
+        let deadline = Timestamp::now() + Duration::from_hours(1);
+        assert_eq!(
             backend
                 .update_custom_time(
                     object_url.clone(),
-                    Timestamp::now() + Duration::from_hours(1),
+                    deadline,
                     (&generations.0, &generations.1),
+                    None,
                 )
-                .await?
+                .await?,
+            SetExpiryResponse::Satisfied(deadline)
         );
-        assert!(
-            !backend
+        assert_eq!(
+            backend
                 .update_custom_time(
                     object_url.clone(),
                     Timestamp::now() + Duration::from_hours(2),
                     (&generations.0, &generations.1),
+                    None,
                 )
-                .await?
+                .await?,
+            SetExpiryResponse::Rejected
         );
 
         backend.delete_object(&id, Timestamp::now()).await?;
-        assert!(
-            !backend
+        assert_eq!(
+            backend
                 .update_custom_time(
                     object_url,
                     Timestamp::now() + Duration::from_hours(2),
                     (&generations.0, &generations.1),
+                    None,
                 )
-                .await?
+                .await?,
+            SetExpiryResponse::NotFound
         );
         Ok(())
     }
@@ -3359,7 +3434,7 @@ mod tests {
         backend
             .set_expiry(
                 &id,
-                Timestamp::now() + Duration::from_secs(3600),
+                ExpiryTarget::At(Timestamp::now() + Duration::from_secs(3600)).into(),
                 Timestamp::now(),
             )
             .await?;

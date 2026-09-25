@@ -1,0 +1,182 @@
+use std::time::{Duration, SystemTime};
+
+use objectstore_types::metadata::{self, ExpiryAnchor, MetadataUpdate};
+use objectstore_types::time::Timestamp;
+use reqwest::StatusCode;
+
+use crate::response::ResponseExt as _;
+use crate::{ObjectKey, Session};
+
+/// A requested minimum expiration deadline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExpiryExtension {
+    /// An absolute deadline, rounded upward to a whole second.
+    At(SystemTime),
+    /// Total lifetime since the object's creation or most recent replacement.
+    ///
+    /// Fractional seconds are truncated when sent to the server.
+    FromCreation(Duration),
+    /// Lifetime from the start of this request on the server.
+    ///
+    /// Fractional seconds are truncated. Retrying establishes a new server-time
+    /// anchor and can extend the deadline further.
+    FromNow(Duration),
+}
+
+impl ExpiryExtension {
+    fn into_update(self) -> crate::Result<MetadataUpdate> {
+        let extend_expiry = match self {
+            Self::At(at) => metadata::ExpiryExtension::At {
+                at: Timestamp::try_from(at)
+                    .map_err(metadata::Error::ExpirationTime)?
+                    .as_rfc3339(),
+            },
+            Self::FromCreation(after) => metadata::ExpiryExtension::After {
+                after,
+                from: ExpiryAnchor::Creation,
+            },
+            Self::FromNow(after) => metadata::ExpiryExtension::After {
+                after,
+                from: ExpiryAnchor::Now,
+            },
+        };
+        Ok(MetadataUpdate { extend_expiry })
+    }
+}
+
+/// The outcome of a [`Session::extend_expiry`] call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExtendExpiryResponse {
+    /// The deadline was extended or already satisfied the request.
+    ///
+    /// Does not report whether the deadline changed or its stored value.
+    Satisfied,
+    /// The object was observed to be absent or expired.
+    NotFound,
+    /// The extension could not be satisfied.
+    ///
+    /// The object is non-expiring, lacks creation metadata required by a
+    /// creation-relative target, or conflicts with a conditional update.
+    /// A conflict can result from concurrent deletion, so this does not
+    /// guarantee that the object still exists.
+    Rejected,
+}
+
+impl Session {
+    /// Extends an object's expiration deadline while preserving its payload.
+    ///
+    /// An already-sufficient deadline succeeds without being shortened. Relative
+    /// targets are resolved by the server, not added to the existing deadline.
+    /// This requires object-write permission.
+    ///
+    /// Actual extensions adjust TTL duration to approximately match the total lifetime
+    /// since creation; TTI duration remains unchanged.
+    ///
+    /// Returns [`ExtendExpiryResponse`] to distinguish a satisfied request, an
+    /// absent or expired object, and a rejected extension. Other HTTP and transport
+    /// errors are returned through [`crate::Error::Reqwest`].
+    ///
+    /// ```no_run
+    /// # async fn example(session: objectstore_client::Session) -> objectstore_client::Result<()> {
+    /// use std::time::Duration;
+    /// use objectstore_client::{ExpiryExtension, ExtendExpiryResponse};
+    ///
+    /// match session.extend_expiry("key", ExpiryExtension::FromNow(Duration::from_secs(86400)))
+    ///     .send().await?
+    /// {
+    ///     ExtendExpiryResponse::Satisfied => println!("Deadline satisfied"),
+    ///     ExtendExpiryResponse::NotFound => println!("Object is missing or expired"),
+    ///     ExtendExpiryResponse::Rejected => println!("Extension was rejected"),
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn extend_expiry(&self, key: &str, target: ExpiryExtension) -> ExtendExpiryBuilder {
+        ExtendExpiryBuilder {
+            session: self.clone(),
+            key: key.to_owned(),
+            target,
+        }
+    }
+}
+
+/// A [`Session::extend_expiry`] request builder.
+#[derive(Debug)]
+pub struct ExtendExpiryBuilder {
+    session: Session,
+    key: ObjectKey,
+    target: ExpiryExtension,
+}
+
+impl ExtendExpiryBuilder {
+    /// Sends the extension request, failing locally for an out-of-range timestamp.
+    pub async fn send(self) -> crate::Result<ExtendExpiryResponse> {
+        let update = self.target.into_update()?;
+        let response = self
+            .session
+            .request(reqwest::Method::PATCH, &self.key)?
+            .json(&update)
+            .send()
+            .await?;
+        let outcome = match response.status() {
+            StatusCode::NOT_FOUND => ExtendExpiryResponse::NotFound,
+            StatusCode::CONFLICT => ExtendExpiryResponse::Rejected,
+            _ => {
+                response
+                    .error_for_status_and_drain()
+                    .await?
+                    .drain_body()
+                    .await;
+                return Ok(ExtendExpiryResponse::Satisfied);
+            }
+        };
+        response.drain_body().await;
+        Ok(outcome)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wire_targets() {
+        for (target, expected) in [
+            (
+                ExpiryExtension::At(SystemTime::UNIX_EPOCH + Duration::from_millis(1500)),
+                metadata::ExpiryExtension::At {
+                    at: "1970-01-01T00:00:02Z".parse().unwrap(),
+                },
+            ),
+            (
+                ExpiryExtension::FromCreation(Duration::from_millis(1500)),
+                metadata::ExpiryExtension::After {
+                    after: Duration::from_millis(1500),
+                    from: ExpiryAnchor::Creation,
+                },
+            ),
+            (
+                ExpiryExtension::FromNow(Duration::ZERO),
+                metadata::ExpiryExtension::After {
+                    after: Duration::ZERO,
+                    from: ExpiryAnchor::Now,
+                },
+            ),
+        ] {
+            assert_eq!(target.into_update().unwrap().extend_expiry, expected);
+        }
+    }
+
+    #[test]
+    fn rejects_out_of_range_timestamps() {
+        for at in [
+            SystemTime::UNIX_EPOCH - Duration::from_secs(1),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(253_402_300_800),
+        ] {
+            assert!(matches!(
+                ExpiryExtension::At(at).into_update(),
+                Err(crate::Error::Metadata(metadata::Error::ExpirationTime(_)))
+            ));
+        }
+    }
+}

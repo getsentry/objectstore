@@ -2,15 +2,16 @@
 
 use std::fmt;
 use std::num::NonZeroU64;
+use std::time::Duration;
 
-use objectstore_types::metadata::Metadata;
+use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use objectstore_types::range::{ByteRange, ContentRange};
 use objectstore_types::resumable::UploadProgress;
 use objectstore_types::time::Timestamp;
 
 use bytes::Bytes;
 
-use crate::error::{ErrorKind, Result};
+use crate::error::{Error, ErrorKind, Result};
 use crate::id::ObjectId;
 use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
@@ -32,6 +33,150 @@ pub type GetResponse = Option<(Metadata, Option<ContentRange>, PayloadStream)>;
 pub type MetadataResponse = Option<Metadata>;
 /// Backend response for delete operations.
 pub type DeleteResponse = ();
+
+/// The outcome of an expiry update.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SetExpiryResponse {
+    /// The deadline was extended or already satisfied the request.
+    ///
+    /// Contains the resolved requested deadline, not necessarily the stored deadline.
+    Satisfied(Timestamp),
+    /// The object or redirect was observed to be absent or expired.
+    NotFound,
+    /// The update could not be satisfied.
+    ///
+    /// The entry is non-expiring, lacks required creation metadata, or conflicts
+    /// with the conditional update. A failed conditional write does not establish
+    /// absence, even if a concurrent deletion caused it to fail.
+    Rejected,
+}
+
+/// The requested minimum deadline for an expiry update.
+///
+/// [`ExpiryTarget::At`] is already resolved. [`ExpiryTarget::FromCreation`]
+/// is resolved by the backend from the creation time read by the update
+/// operation itself. Zero durations and resolved deadlines in the past remain
+/// valid minimum-deadline requests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExpiryTarget {
+    /// An absolute deadline.
+    At(Timestamp),
+    /// A deadline relative to the object's creation time.
+    FromCreation(Duration),
+}
+
+impl ExpiryTarget {
+    /// Resolves this target against an optional creation time.
+    ///
+    /// Returns `None` when a creation-relative target has no creation time.
+    /// Creation-relative deadlines use the timestamp's existing rounding and
+    /// clamp to its maximum value on overflow.
+    pub fn resolve(self, time_created: Option<Timestamp>) -> Option<Timestamp> {
+        match self {
+            Self::At(deadline) => Some(deadline),
+            Self::FromCreation(duration) => {
+                time_created.map(|created| created.saturating_add(duration))
+            }
+        }
+    }
+}
+
+/// An expiry target and optional limit on the remaining lifetime it requests.
+///
+/// The limit is measured from the operation's `access_time`, regardless of the target's
+/// anchor. It does not change the policy kind or shorten existing deadlines.
+/// Repeated updates can therefore keep an object alive indefinitely.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExpiryUpdate {
+    /// The requested minimum deadline.
+    pub target: ExpiryTarget,
+    /// Maximum remaining lifetime. `None` means no limit.
+    pub max: Option<Duration>,
+}
+
+impl From<ExpiryTarget> for ExpiryUpdate {
+    fn from(target: ExpiryTarget) -> Self {
+        Self { target, max: None }
+    }
+}
+
+impl ExpiryUpdate {
+    /// Resolves and validates the requested deadline using the stored object metadata.
+    ///
+    /// Returns `None` if the creation-time anchor is required but unavailable.
+    ///
+    /// Returns [`ErrorKind::InvalidMetadata`] if the requested deadline exceeds
+    /// `access_time + max`, even if the existing deadline already satisfies it.
+    /// Timestamp addition rounds up to seconds and saturates at the supported maximum.
+    pub fn resolve(
+        self,
+        time_created: Option<Timestamp>,
+        access_time: Timestamp,
+    ) -> Result<Option<Timestamp>> {
+        let Some(deadline) = self.target.resolve(time_created) else {
+            return Ok(None);
+        };
+
+        if let Some(max) = self.max
+            && deadline > access_time.saturating_add(max)
+        {
+            return Err(Error::new(
+                ErrorKind::InvalidMetadata,
+                "requested expiry exceeds maximum remaining lifetime",
+            ));
+        }
+        Ok(Some(deadline))
+    }
+}
+
+/// Derives a TTL matching an extended deadline, leaving other policies unchanged.
+///
+/// Uses creation time when available, otherwise infers the original lifetime from
+/// the previous deadline and TTL. The inferred creation time is not persisted.
+/// Rounds to the coarsest whole day, hour, or minute within 1% of the duration,
+/// falling back to whole seconds. The deadline itself must remain exact.
+///
+/// Returns corrupt-data errors for inconsistent creation times or duration overflow.
+pub(super) fn extended_expiration_policy(
+    policy: ExpirationPolicy,
+    time_created: Option<Timestamp>,
+    old_expiry: Timestamp,
+    new_expiry: Timestamp,
+) -> Result<ExpirationPolicy> {
+    let ExpirationPolicy::TimeToLive(ttl) = policy else {
+        return Ok(policy);
+    };
+
+    let duration_opt = match time_created {
+        Some(created) => new_expiry.checked_duration_since(created),
+        None => new_expiry
+            .checked_duration_since(old_expiry)
+            .and_then(|extension| ttl.checked_add(extension)),
+    };
+
+    let duration = duration_opt
+        .ok_or_else(|| Error::new(ErrorKind::CorruptData, "invalid TTL expiry metadata"))?;
+    Ok(ExpirationPolicy::TimeToLive(round_duration(duration)))
+}
+
+/// Rounds a duration to the coarsest whole day, hour, or minute within 1%, otherwise seconds.
+fn round_duration(duration: Duration) -> Duration {
+    let mut seconds = duration.as_secs();
+
+    // Match Timestamp's upward rounding for legacy fractional durations.
+    if duration.subsec_nanos() != 0 {
+        seconds = seconds.saturating_add(1);
+    }
+
+    for unit in [86_400, 3_600, 60] {
+        let rounded = seconds.saturating_add(unit / 2) / unit * unit;
+        if rounded.abs_diff(seconds) <= seconds / 100 {
+            return Duration::from_secs(rounded);
+        }
+    }
+
+    Duration::from_secs(seconds)
+}
 
 /// Trait implemented by all storage backends.
 ///
@@ -77,18 +222,20 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
 
     /// Extends the deadline of an existing object with expiration policy.
     ///
-    /// This only changes the stored deadline: the expiration policy, duration,
-    /// payload, and all other metadata remain unchanged.
+    /// Actual extensions also update TTL durations to approximately match the time since
+    /// creation. TTI durations, payload, and other metadata remain unchanged.
     ///
-    /// Returns `true` when the deadline was extended or was already at least as
-    /// late as `expire_at`. Returns `false` when the object is absent, expired,
-    /// manually expired, or changed concurrently.
+    /// Returns [`SetExpiryResponse::Satisfied`] when extended or already satisfied,
+    /// [`SetExpiryResponse::NotFound`] when observed absent or expired, or
+    /// [`SetExpiryResponse::Rejected`] when ineligible or conflicting.
+    /// Limit violations return [`ErrorKind::InvalidMetadata`]; backend failures also
+    /// return errors. Limits are checked before reporting an already-satisfied request.
     async fn set_expiry(
         &self,
         id: &ObjectId,
-        expire_at: Timestamp,
+        target: ExpiryUpdate,
         access_time: Timestamp,
-    ) -> Result<bool>;
+    ) -> Result<SetExpiryResponse>;
 
     /// Deletes the object at the given path.
     async fn delete_object(&self, id: &ObjectId, access_time: Timestamp) -> Result<DeleteResponse>;
@@ -324,16 +471,18 @@ pub trait HighVolumeBackend: Backend {
     /// a live redirect to exactly that target. Updates never authorize creation
     /// of an absent row.
     ///
-    /// Returns `true` when the update was applied or its requested state was
-    /// already satisfied. Returns `false` for an absent, expired, or conflicting
-    /// entry.
+    /// Returns [`SetExpiryResponse::Satisfied`] when applied or already satisfied,
+    /// [`SetExpiryResponse::NotFound`] when observed absent or expired, or
+    /// [`SetExpiryResponse::Rejected`] for an ineligible entry or failed condition.
+    /// Redirects can only resolve absolute targets because tombstones do not store
+    /// creation time. Backend failures are returned as errors.
     async fn compare_and_update(
         &self,
         id: &ObjectId,
         current: Option<&ObjectId>,
         update: TieredUpdate,
         access_time: Timestamp,
-    ) -> Result<bool>;
+    ) -> Result<SetExpiryResponse>;
 }
 
 /// Information about a redirect tombstone in the high-volume backend.
@@ -415,8 +564,8 @@ impl TieredWrite {
 /// The in-place operation performed by [`HighVolumeBackend::compare_and_update`].
 #[derive(Clone, Debug)]
 pub enum TieredUpdate {
-    /// Extend the deadline while preserving all other stored data.
-    SetExpiry(Timestamp),
+    /// Extend the deadline and adjust TTL duration while preserving other stored data.
+    SetExpiry(ExpiryUpdate),
 }
 
 /// Creates a reqwest client with required defaults.
@@ -436,4 +585,172 @@ pub(super) fn reqwest_client() -> reqwest::Client {
         // INVARIANT: Building fails only if the TLS backend cannot be initialized, which
         // is checked at startup when the rustls crypto provider is installed.
         .expect("failed to build backend HTTP client")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extended_ttl_rounding() {
+        let created = Timestamp::from_unix_secs(1_700_000_000).unwrap();
+        let policy = ExpirationPolicy::TimeToLive(Duration::from_hours(1));
+        for (seconds, rounded) in [
+            (0, 0),
+            (59, 59),
+            (61, 61),
+            (119, 120),
+            (121, 120),
+            (3598, 3600),
+            (3602, 3600),
+            (86_398, 86_400),
+            (86_402, 86_400),
+            (90 * 86_400 - 2, 90 * 86_400),
+            (90 * 86_400 + 2, 90 * 86_400),
+            (40_000, 39_600), // Exactly 1% rounds to hours.
+            (40_001, 40_020), // Just outside 1% falls back to minutes.
+        ] {
+            assert_eq!(
+                extended_expiration_policy(
+                    policy,
+                    Some(created),
+                    created,
+                    created + Duration::from_secs(seconds)
+                )
+                .unwrap(),
+                ExpirationPolicy::TimeToLive(Duration::from_secs(rounded)),
+                "{seconds} seconds",
+            );
+        }
+
+        assert_eq!(
+            round_duration(Duration::MAX),
+            Duration::from_secs(u64::MAX - u64::MAX % 86_400),
+        );
+    }
+
+    #[test]
+    fn extended_ttl_without_creation_time() {
+        // The inferred creation time may precede the epoch.
+        let epoch = Timestamp::from_unix_secs(0).unwrap();
+        let policy = ExpirationPolicy::TimeToLive(Duration::from_hours(1));
+        let first_expiry = epoch + Duration::from_hours(1);
+        let extended = extended_expiration_policy(policy, None, epoch, first_expiry).unwrap();
+        assert_eq!(
+            extended,
+            ExpirationPolicy::TimeToLive(Duration::from_hours(2))
+        );
+
+        let next_expiry = first_expiry + Duration::from_hours(1);
+        let extended_again =
+            extended_expiration_policy(extended, None, first_expiry, next_expiry).unwrap();
+        assert_eq!(
+            extended_again,
+            ExpirationPolicy::TimeToLive(Duration::from_hours(3))
+        );
+    }
+
+    #[test]
+    fn extended_ttl_fractional_duration() {
+        let epoch = Timestamp::from_unix_secs(0).unwrap();
+        assert_eq!(
+            extended_expiration_policy(
+                ExpirationPolicy::TimeToLive(Duration::from_millis(1500)),
+                None,
+                epoch,
+                epoch + Duration::from_secs(1)
+            )
+            .unwrap(),
+            ExpirationPolicy::TimeToLive(Duration::from_secs(3)),
+        );
+    }
+
+    #[test]
+    fn extended_ttl_invalid_creation_time() {
+        let expiry = Timestamp::from_unix_secs(1_700_000_000).unwrap();
+        let created = expiry + Duration::from_secs(1);
+        let policy = ExpirationPolicy::TimeToLive(Duration::from_hours(1));
+        assert_eq!(
+            extended_expiration_policy(policy, Some(created), expiry, expiry)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::CorruptData
+        );
+    }
+
+    #[test]
+    fn extended_ttl_duration_overflow() {
+        let epoch = Timestamp::from_unix_secs(0).unwrap();
+        assert_eq!(
+            extended_expiration_policy(
+                ExpirationPolicy::TimeToLive(Duration::MAX),
+                None,
+                epoch,
+                epoch + Duration::from_secs(1),
+            )
+            .unwrap_err()
+            .kind(),
+            ErrorKind::CorruptData
+        );
+    }
+
+    #[test]
+    fn extended_ttl_saturated_deadline() {
+        let max = Timestamp::from_unix_secs(253_402_300_799).unwrap();
+        assert_eq!(
+            extended_expiration_policy(
+                ExpirationPolicy::TimeToLive(Duration::from_hours(3)),
+                Some(max - Duration::from_hours(1)),
+                max - Duration::from_secs(1),
+                max.saturating_add(Duration::from_hours(1))
+            )
+            .unwrap(),
+            ExpirationPolicy::TimeToLive(Duration::from_hours(1))
+        );
+    }
+
+    #[test]
+    fn expiry_target_resolution() {
+        let created = Timestamp::from_unix_secs(1_700_000_000).unwrap();
+        assert_eq!(
+            ExpiryTarget::FromCreation(Duration::ZERO).resolve(Some(created)),
+            Some(created)
+        );
+        assert_eq!(ExpiryTarget::At(created).resolve(None), Some(created));
+        assert_eq!(
+            ExpiryTarget::FromCreation(Duration::ZERO).resolve(None),
+            None
+        );
+        let max = Timestamp::from_unix_secs(253_402_300_799).unwrap();
+        assert_eq!(
+            ExpiryTarget::FromCreation(Duration::from_secs(1)).resolve(Some(max)),
+            Some(max)
+        );
+
+        // The cap is measured from access time, not creation.
+        let deadline = created + Duration::from_hours(3);
+        let access_time = created + Duration::from_hours(1);
+        for target in [
+            ExpiryTarget::At(deadline),
+            ExpiryTarget::FromCreation(Duration::from_hours(3)),
+        ] {
+            let update = ExpiryUpdate {
+                target,
+                max: Some(Duration::from_hours(1)),
+            };
+            assert_eq!(
+                update
+                    .resolve(Some(created), access_time)
+                    .unwrap_err()
+                    .kind(),
+                ErrorKind::InvalidMetadata
+            );
+            assert_eq!(
+                update
+                    .resolve(Some(created), access_time + Duration::from_hours(1))
+                    .unwrap(),
+                Some(deadline)
+            );
+        }
+    }
 }

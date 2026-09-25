@@ -12,10 +12,27 @@ class RequestError(Exception):
         self.response = response
 
 
-def raise_for_status(response: urllib3.BaseHTTPResponse) -> None:
+class ObjectNotFound(RequestError):
+    """The object was observed to be absent or expired."""
+
+
+class ExpiryExtensionRejected(RequestError):
+    """The object's expiration deadline could not be extended.
+
+    The object is non-expiring, lacks required creation metadata, or conflicts
+    with a conditional update. A conflict can result from concurrent deletion,
+    so this does not guarantee that the object still exists.
+    """
+
+
+def raise_for_status(
+    response: urllib3.BaseHTTPResponse,
+    *,
+    error_type: type[RequestError] = RequestError,
+) -> None:
     if response.status >= 400:
         res = (response.data or response.read() or b"").decode("utf-8", "replace")
-        raise RequestError(
+        raise error_type(
             f"Objectstore request failed with status {response.status}",
             response.status,
             res,

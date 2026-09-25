@@ -64,6 +64,19 @@ usecase = Usecase("attachments", expiration_policy=TimeToIdle(timedelta(days=30)
 session.put(b"payload", expiration_policy=TimeToLive(timedelta(hours=1)))
 ```
 
+Use `Session.extend_expiry` to keep an existing object longer.
+
+```python
+from objectstore_client import ExpiryExtensionRejected
+
+try:
+    session.extend_expiry(key, from_now=timedelta(days=30))
+except ExpiryExtensionRejected:
+    print("Object could not be extended")
+```
+
+See the `Session.extend_expiry` docs for target options and error handling.
+
 ### Origin Tracking
 
 We encourage setting the `origin` on every upload to track where the payload was

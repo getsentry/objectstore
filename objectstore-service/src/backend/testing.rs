@@ -47,9 +47,9 @@ use objectstore_types::range::ByteRange;
 use objectstore_types::resumable::UploadProgress;
 
 use crate::backend::common::{
-    Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse,
-    MultipartUploadBackend, PutResponse, TieredGet, TieredMetadata, TieredUpdate, TieredWrite,
-    Tombstone,
+    Backend, DeleteResponse, ExpiryUpdate, GetResponse, HighVolumeBackend, MetadataResponse,
+    MultipartUploadBackend, PutResponse, SetExpiryResponse, TieredGet, TieredMetadata,
+    TieredUpdate, TieredWrite, Tombstone,
 };
 use crate::backend::in_memory::InMemoryBackend;
 use crate::error::Result;
@@ -116,10 +116,10 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         &self,
         inner: &InMemoryBackend,
         id: &ObjectId,
-        expire_at: Timestamp,
+        target: ExpiryUpdate,
         access_time: Timestamp,
-    ) -> Result<bool> {
-        inner.set_expiry(id, expire_at, access_time).await
+    ) -> Result<SetExpiryResponse> {
+        inner.set_expiry(id, target, access_time).await
     }
 
     /// Intercepts [`Backend::delete_object`]. Default delegates to `inner`.
@@ -206,7 +206,7 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         current: Option<&ObjectId>,
         update: TieredUpdate,
         access_time: Timestamp,
-    ) -> Result<bool> {
+    ) -> Result<SetExpiryResponse> {
         inner
             .compare_and_update(id, current, update, access_time)
             .await
@@ -417,11 +417,11 @@ impl<H: Hooks> Backend for TestBackend<H> {
     async fn set_expiry(
         &self,
         id: &ObjectId,
-        expire_at: Timestamp,
+        target: ExpiryUpdate,
         access_time: Timestamp,
-    ) -> Result<bool> {
+    ) -> Result<SetExpiryResponse> {
         self.hooks
-            .set_expiry(&self.inner, id, expire_at, access_time)
+            .set_expiry(&self.inner, id, target, access_time)
             .await
     }
 
@@ -529,7 +529,7 @@ impl<H: Hooks> HighVolumeBackend for TestBackend<H> {
         current: Option<&ObjectId>,
         update: TieredUpdate,
         access_time: Timestamp,
-    ) -> Result<bool> {
+    ) -> Result<SetExpiryResponse> {
         self.hooks
             .compare_and_update(&self.inner, id, current, update, access_time)
             .await

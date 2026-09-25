@@ -15,7 +15,8 @@ use reqwest::{Body, IntoUrl, Method, RequestBuilder, Response, StatusCode};
 
 use super::extensions::{ResponseExt, SendTraced};
 use crate::backend::common::{
-    self, Backend, DeleteResponse, GetResponse, MetadataResponse, PutResponse,
+    self, Backend, DeleteResponse, ExpiryUpdate, GetResponse, MetadataResponse, PutResponse,
+    SetExpiryResponse,
 };
 use crate::backend::extensions::ReqwestResultExt;
 use crate::change_stream::{
@@ -304,8 +305,9 @@ where
         &self,
         id: &ObjectId,
         metadata: &Metadata,
+        deadline: Timestamp,
         etag: &HeaderValue,
-    ) -> Result<bool> {
+    ) -> Result<SetExpiryResponse> {
         // NB: Meta updates require CopyObject + REPLACE along with *all* metadata. See
         // https://docs.aws.amazon.com/AmazonS3/latest/API/API_CopyObject.html
         let request = self
@@ -324,12 +326,16 @@ where
 
         let response = request.send_traced().await;
         let response = response.reqwest_context("updating S3 expiration")?;
-        if matches!(
-            response.status(),
-            StatusCode::NOT_FOUND | StatusCode::CONFLICT | StatusCode::PRECONDITION_FAILED
-        ) {
+        let outcome = match response.status() {
+            StatusCode::NOT_FOUND => Some(SetExpiryResponse::NotFound),
+            StatusCode::CONFLICT | StatusCode::PRECONDITION_FAILED => {
+                Some(SetExpiryResponse::Rejected)
+            }
+            _ => None,
+        };
+        if let Some(outcome) = outcome {
             response.drain_body().await;
-            return Ok(false);
+            return Ok(outcome);
         }
         response
             .check_error("updating S3 expiration")
@@ -337,7 +343,7 @@ where
             .drain_body()
             .await;
 
-        Ok(true)
+        Ok(SetExpiryResponse::Satisfied(deadline))
     }
 }
 
@@ -437,37 +443,48 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
     async fn set_expiry(
         &self,
         id: &ObjectId,
-        expire_at: Timestamp,
+        target: ExpiryUpdate,
         access_time: Timestamp,
-    ) -> Result<bool> {
+    ) -> Result<SetExpiryResponse> {
         let Some((mut metadata, _, response)) = self
             .request_object(Method::HEAD, id, access_time, None)
             .await?
         else {
-            return Ok(false);
+            return Ok(SetExpiryResponse::NotFound);
         };
-        let Some(current_expiry) = metadata.time_expires else {
-            response.drain_body().await;
-            return Ok(false);
-        };
-        if current_expiry >= expire_at {
-            response.drain_body().await;
-            return Ok(true); // already satisfied
-        }
 
         let etag = response.headers().get(reqwest::header::ETAG).cloned();
         response.drain_body().await;
+
+        let Some(current_expiry) = metadata.time_expires else {
+            return Ok(SetExpiryResponse::Rejected);
+        };
+        let Some(expire_at) = target.resolve(metadata.time_created, access_time)? else {
+            return Ok(SetExpiryResponse::Rejected);
+        };
+        if current_expiry >= expire_at {
+            return Ok(SetExpiryResponse::Satisfied(expire_at)); // already satisfied
+        }
+
         let etag = etag.ok_or_else(|| {
             Error::new(ErrorKind::BackendFailure, "S3 HEAD response missing ETag")
         })?;
 
+        metadata.expiration_policy = common::extended_expiration_policy(
+            metadata.expiration_policy,
+            metadata.time_created,
+            current_expiry,
+            expire_at,
+        )?;
         metadata.time_expires = Some(expire_at);
-        let applied = self.update_metadata(id, &metadata, &etag).await?;
-        if applied {
+        let outcome = self
+            .update_metadata(id, &metadata, expire_at, &etag)
+            .await?;
+        if matches!(outcome, SetExpiryResponse::Satisfied(_)) {
             self.change_stream.update(id, Some(expire_at));
         }
 
-        Ok(applied)
+        Ok(outcome)
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
@@ -562,11 +579,23 @@ mod tests {
 
     fn start_copy_server(
         copy_status: &'static str,
+        metadata: Metadata,
     ) -> (String, mpsc::Receiver<String>, thread::JoinHandle<()>) {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let (request_tx, request_rx) = mpsc::channel();
         let server = thread::spawn(move || {
+            let (mut head, _) = listener.accept().unwrap();
+            assert!(read_http_request(&mut head).starts_with("HEAD "));
+            write!(
+                head,
+                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nETag: \"etag\"\r\nConnection: close\r\n"
+            )
+            .unwrap();
+            for (name, value) in metadata.to_headers(GCS_CUSTOM_PREFIX).unwrap().iter() {
+                write!(head, "{name}: {}\r\n", value.to_str().unwrap()).unwrap();
+            }
+            write!(head, "\r\n").unwrap();
             let (mut copy, _) = listener.accept().unwrap();
             request_tx.send(read_http_request(&mut copy)).unwrap();
             write!(
@@ -580,13 +609,24 @@ mod tests {
 
     #[tokio::test]
     async fn update_metadata_uses_conditional_s3_copy() {
+        let created = Timestamp::now();
+        let deadline = created + Duration::from_hours(2);
         for (status, expected) in [
-            ("200 OK", true),
-            ("404 Not Found", false),
-            ("409 Conflict", false),
-            ("412 Precondition Failed", false),
+            ("200 OK", SetExpiryResponse::Satisfied(deadline)),
+            ("404 Not Found", SetExpiryResponse::NotFound),
+            ("409 Conflict", SetExpiryResponse::Rejected),
+            ("412 Precondition Failed", SetExpiryResponse::Rejected),
         ] {
-            let (endpoint, request_rx, server) = start_copy_server(status);
+            let (endpoint, request_rx, server) = start_copy_server(
+                status,
+                Metadata {
+                    expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
+                    time_created: Some(created),
+                    time_expires: Some(created + Duration::from_hours(1)),
+                    custom: [("preserved".into(), "yes".into())].into(),
+                    ..Default::default()
+                },
+            );
             let backend = S3CompatibleBackend::without_token(
                 S3CompatibleConfig {
                     endpoint,
@@ -598,10 +638,10 @@ mod tests {
 
             assert_eq!(
                 backend
-                    .update_metadata(
+                    .set_expiry(
                         &make_id(),
-                        &Metadata::default(),
-                        &HeaderValue::from_static("\"etag\""),
+                        common::ExpiryTarget::At(deadline).into(),
+                        created
                     )
                     .await
                     .unwrap(),
@@ -611,6 +651,20 @@ mod tests {
             assert!(request.contains("x-amz-copy-source: /bucket/"));
             assert!(request.contains("x-amz-metadata-directive: replace"));
             assert!(request.contains("x-amz-copy-source-if-match: \"etag\""));
+            let expected_headers = Metadata {
+                expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(2)),
+                time_created: Some(created),
+                time_expires: Some(deadline),
+                custom: [("preserved".into(), "yes".into())].into(),
+                ..Default::default()
+            }
+            .to_headers(GCS_CUSTOM_PREFIX)
+            .unwrap();
+            for (name, value) in &expected_headers {
+                assert!(request.contains(
+                    &format!("{name}: {}", value.to_str().unwrap()).to_ascii_lowercase()
+                ));
+            }
             server.join().unwrap();
         }
     }

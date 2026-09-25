@@ -53,8 +53,8 @@ class Metadata:
     When using a Time To Idle expiration policy, this value will reflect the expiration
     timestamp present prior to the current access to the object.
 
-    This field is computed by the server, it cannot be set by clients.
-    Use `expiration_policy` to set an expiration policy instead.
+    This field is computed by the server. Use `expiration_policy` to set the
+    policy on upload, or `Session.extend_expiry` to extend an existing deadline.
     """
 
     origin: str | None
