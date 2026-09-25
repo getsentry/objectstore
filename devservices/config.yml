@@ -9,12 +9,12 @@ x-sentry-service-config:
       description: Google Cloud BigTable emulator
     gcs:
       description: Google Cloud Storage emulator
-    minio:
-      description: MinIO server
+    seaweedfs:
+      description: SeaweedFS S3 server
   modes:
     default: []
     containerized: [objectstore]
-    full: [bigtable, gcs, minio]
+    full: [bigtable, gcs, seaweedfs]
 
 x-programs:
   devserver:
@@ -78,18 +78,17 @@ services:
     labels:
       - orchestrator=devservices
     restart: unless-stopped
-  minio:
-    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
-    entrypoint: /run-minio.sh
+  seaweedfs:
+    image: chrislusf/seaweedfs:4.47
+    environment:
+      S3_BUCKET: test-bucket
     healthcheck:
-      test: mc ready local
+      test: ["CMD", "curl", "--fail", "--silent", "--output", "/dev/null", "http://localhost:8333/test-bucket"]
       interval: 5s
       timeout: 1s
-      retries: 5
+      retries: 12
     ports:
-      - 127.0.0.1:8089:9000
-    volumes:
-      - ./run-minio.sh:/run-minio.sh
+      - 127.0.0.1:8089:8333
     networks:
       - devservices
     labels:
