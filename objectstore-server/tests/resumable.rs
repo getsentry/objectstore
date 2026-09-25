@@ -8,7 +8,7 @@ use anyhow::Result;
 use objectstore_server::config::{AuthZ, Config, EncryptionConfig, Service};
 use objectstore_test::server::TestServer;
 use objectstore_types::resumable::{
-    CreateSessionResponse, HEADER_UPLOAD_GRANULARITY, HEADER_UPLOAD_LENGTH, HEADER_UPLOAD_OFFSET,
+    CreateSessionResponse, HEADER_UPLOAD_LENGTH, HEADER_UPLOAD_OFFSET,
 };
 use reqwest::StatusCode;
 
@@ -192,7 +192,6 @@ async fn test_resumable_upload() -> Result<()> {
         .await?;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
     assert_eq!(response.headers()[HEADER_UPLOAD_OFFSET], "3");
-    assert_eq!(response.headers()[HEADER_UPLOAD_GRANULARITY], "0");
 
     // Rejected: outdated offset.
     let response = client
@@ -221,7 +220,6 @@ async fn test_resumable_upload() -> Result<()> {
         .await?;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
     assert_eq!(response.headers()[HEADER_UPLOAD_OFFSET], "3");
-    assert_eq!(response.headers()[HEADER_UPLOAD_GRANULARITY], "0");
     let response = client
         .put(server.url(&session_path))
         .header(HEADER_UPLOAD_OFFSET, "3")

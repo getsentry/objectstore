@@ -8,8 +8,8 @@
 //! |---|---|---|
 //! | Create | `POST /objects/{usecase}/{scopes}/?upload_type=resumable` | `200` + `{"key","session","granularity"}` |
 //! | Create | `PUT /objects/{usecase}/{scopes}/{key}?upload_type=resumable` | `200` + `{"key","session","granularity"}` |
-//! | Chunk | `PUT …/{key}?session=<s>` with `Upload-Offset: <n>` | `204` + progress headers, or `201` + `{"key"}` |
-//! | Offset query | `PUT …/{key}?session=<s>` with `Upload-Offset: *` | `204` + progress headers, or `201` + `{"key"}` |
+//! | Chunk | `PUT …/{key}?session=<s>` with `Upload-Offset: <n>` | `204` + `Upload-Offset`, or `201` + `{"key"}` |
+//! | Offset query | `PUT …/{key}?session=<s>` with `Upload-Offset: *` | `204` + `Upload-Offset`, or `201` + `{"key"}` |
 //! | Cancel | `DELETE …/{key}?session=<s>` | `204` |
 
 #![expect(
@@ -28,8 +28,8 @@ use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_service::stream::ClientStream;
 use objectstore_types::metadata::Metadata;
 use objectstore_types::resumable::{
-    CompleteUploadResponse, CreateSessionResponse, HEADER_UPLOAD_GRANULARITY, HEADER_UPLOAD_OFFSET,
-    UploadOffset, UploadProgress,
+    CompleteUploadResponse, CreateSessionResponse, HEADER_UPLOAD_OFFSET, UploadOffset,
+    UploadProgress,
 };
 use objectstore_types::time::Timestamp;
 
@@ -135,7 +135,7 @@ async fn create_session_for_id(
 ///
 /// Both answer `204 No Content` with the authoritative offset while bytes remain, and
 /// `201 Created` with the key once the upload is complete, the session is terminal, and the object
-/// is available through the normal object endpoints. Both include `Upload-Granularity`.
+/// is available through the normal object endpoints.
 /// The acknowledged offset may be lower than the submitted chunk's end, so clients should continue
 /// from this response (or from a later explicit offset query), never from local byte accounting alone.
 pub(super) async fn continue_session(
@@ -147,8 +147,6 @@ pub(super) async fn continue_session(
     MeteredBody(body): MeteredBody,
 ) -> ApiResult<Response> {
     let key = id.key().to_owned();
-    let granularity = service.upload_granularity();
-
     let progress = match offset {
         UploadOffset::At(offset) => {
             let content_length = content_length
@@ -172,7 +170,7 @@ pub(super) async fn continue_session(
         }
     };
 
-    progress_response(progress, key, granularity)
+    progress_response(progress, key)
 }
 
 /// Cancels a session, discarding whatever was uploaded.
@@ -186,12 +184,8 @@ pub(super) async fn cancel_session(
 }
 
 /// Turns an [`UploadProgress`] outcome into the response shared by chunks and offset queries.
-fn progress_response(
-    progress: ApiResult<UploadProgress>,
-    key: String,
-    granularity: u64,
-) -> ApiResult<Response> {
-    let mut response = match progress {
+fn progress_response(progress: ApiResult<UploadProgress>, key: String) -> ApiResult<Response> {
+    let response = match progress {
         Ok(UploadProgress::Incomplete { offset }) => (
             StatusCode::NO_CONTENT,
             [(HEADER_UPLOAD_OFFSET, http::HeaderValue::from(offset))],
@@ -213,10 +207,6 @@ fn progress_response(
         },
         Err(error) => return Err(error),
     };
-    response.headers_mut().insert(
-        HEADER_UPLOAD_GRANULARITY,
-        http::HeaderValue::from(granularity),
-    );
     Ok(response)
 }
 
@@ -224,51 +214,38 @@ fn progress_response(
 mod tests {
     use super::*;
 
-    /// Reads a response's status, progress headers, and body.
-    async fn parts_of(response: Response) -> (StatusCode, Option<String>, Option<String>, String) {
+    /// Reads a response's status, offset header, and body.
+    async fn parts_of(response: Response) -> (StatusCode, Option<String>, String) {
         let status = response.status();
         let offset = response
             .headers()
             .get(HEADER_UPLOAD_OFFSET)
             .map(|v| v.to_str().unwrap().to_owned());
-        let granularity = response
-            .headers()
-            .get(HEADER_UPLOAD_GRANULARITY)
-            .map(|v| v.to_str().unwrap().to_owned());
-
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
 
-        (
-            status,
-            offset,
-            granularity,
-            String::from_utf8(body.to_vec()).unwrap(),
-        )
+        (status, offset, String::from_utf8(body.to_vec()).unwrap())
     }
 
     #[tokio::test]
     async fn incomplete_progress_answers_no_content_with_the_offset() {
         let progress = Ok(UploadProgress::Incomplete { offset: 262_144 });
-        let response = progress_response(progress, "my-key".into(), 262_144).unwrap();
+        let response = progress_response(progress, "my-key".into()).unwrap();
 
-        let (status, offset, granularity, body) = parts_of(response).await;
+        let (status, offset, body) = parts_of(response).await;
         assert_eq!(status, StatusCode::NO_CONTENT);
         assert_eq!(offset.as_deref(), Some("262144"));
-        assert_eq!(granularity.as_deref(), Some("262144"));
         assert!(body.is_empty(), "204 must not carry a body: {body:?}");
     }
 
     #[tokio::test]
     async fn commit_answers_created_with_the_key() {
-        let response =
-            progress_response(Ok(UploadProgress::Complete), "my-key".into(), 262_144).unwrap();
+        let response = progress_response(Ok(UploadProgress::Complete), "my-key".into()).unwrap();
 
-        let (status, offset, granularity, body) = parts_of(response).await;
+        let (status, offset, body) = parts_of(response).await;
         assert_eq!(status, StatusCode::CREATED);
         assert_eq!(offset, None, "a commit reports no offset");
-        assert_eq!(granularity.as_deref(), Some("262144"));
         assert_eq!(body, r#"{"key":"my-key"}"#);
     }
 
@@ -276,23 +253,22 @@ mod tests {
     async fn offset_mismatch_answers_conflict_with_the_authoritative_offset() {
         let mismatch = ErrorKind::UploadOffsetMismatch { offset: 786_432 }.into();
         let response =
-            progress_response(Err(ApiError::Service(mismatch)), "my-key".into(), 262_144).unwrap();
+            progress_response(Err(ApiError::Service(mismatch)), "my-key".into()).unwrap();
 
-        let (status, offset, granularity, body) = parts_of(response).await;
+        let (status, offset, body) = parts_of(response).await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(
             offset.as_deref(),
             Some("786432"),
             "the client resynchronizes from this header"
         );
-        assert_eq!(granularity.as_deref(), Some("262144"));
         assert!(body.contains("786432"), "{body:?}");
     }
 
     #[tokio::test]
     async fn other_errors_propagate_unchanged() {
         let gone = ApiError::Service(ErrorKind::UploadSessionGone.into());
-        let error = progress_response(Err(gone), "my-key".into(), 262_144).unwrap_err();
+        let error = progress_response(Err(gone), "my-key".into()).unwrap_err();
         assert_eq!(error.status(), StatusCode::GONE);
 
         let oversized =
@@ -301,7 +277,7 @@ mod tests {
                 content_length: 4,
                 upload_length: 10,
             }));
-        let error = progress_response(Err(oversized), "my-key".into(), 262_144).unwrap_err();
+        let error = progress_response(Err(oversized), "my-key".into()).unwrap_err();
         assert_eq!(error.status(), StatusCode::BAD_REQUEST);
 
         let too_small = ApiError::Service(
@@ -311,7 +287,7 @@ mod tests {
             }
             .into(),
         );
-        let error = progress_response(Err(too_small), "my-key".into(), 262_144).unwrap_err();
+        let error = progress_response(Err(too_small), "my-key".into()).unwrap_err();
         assert_eq!(error.status(), StatusCode::BAD_REQUEST);
     }
 }

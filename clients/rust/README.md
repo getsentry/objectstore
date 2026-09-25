@@ -168,7 +168,7 @@ If the request fails midway, it will be possible to resume it from the persisted
 setting only records how the object is encoded; the caller must compress the payload accordingly.
 The object length and all offsets refer to the bytes after compression.
 When manually slicing non-final chunks, use multiples of a positive upload granularity
-(`upload.granularity()`).
+(`upload.granularity()` on a newly created handle). Reconstructed handles do not know this value.
 Shorter chunks are rejected, while a larger unaligned chunk may persist only its aligned prefix.
 
 ```rust,no_run

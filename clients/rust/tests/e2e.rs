@@ -1070,7 +1070,7 @@ async fn test_resumable_upload() {
         resumed.progress().send().await.unwrap(),
         UploadProgress::Incomplete { offset: 3 }
     );
-    assert_eq!(resumed.granularity(), Some(0));
+    assert_eq!(resumed.granularity(), None);
     assert_eq!(
         resumed.put(0, "bad").send().await.unwrap(),
         UploadProgress::Incomplete { offset: 3 }

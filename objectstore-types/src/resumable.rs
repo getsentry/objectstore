@@ -3,8 +3,7 @@
 //! A resumable upload writes one object across multiple requests. The client first creates a
 //! session, declaring the object's complete size with [`HEADER_UPLOAD_LENGTH`]. The server returns
 //! a [`CreateSessionResponse`] containing an opaque [`SessionToken`] that identifies the upload.
-//! The response also reports the upload granularity. Subsequent progress responses
-//! repeat that value in [`HEADER_UPLOAD_GRANULARITY`], so reconstructed clients can learn it.
+//! The response also reports the upload granularity. A reconstructed client does not know it.
 //!
 //! The client then sends chunks with [`HEADER_UPLOAD_OFFSET`] set to the byte position at which
 //! each chunk starts. If an upload is interrupted, the client can send the wildcard offset
@@ -33,13 +32,6 @@ pub const HEADER_UPLOAD_LENGTH: &str = "upload-length";
 /// server's authoritative offset. On a response it is the offset the server has
 /// persisted. See [`UploadOffset`].
 pub const HEADER_UPLOAD_OFFSET: &str = "upload-offset";
-
-/// Response header declaring the upload granularity, in bytes.
-///
-/// A value of zero means the upload has no granularity. For a positive value,
-/// non-final chunks shorter than one granularity unit are rejected, and a backend may persist
-/// only a multiple of this value from a larger non-final chunk.
-pub const HEADER_UPLOAD_GRANULARITY: &str = "upload-granularity";
 
 /// The wildcard [`HEADER_UPLOAD_OFFSET`] value that queries the server's offset.
 const OFFSET_WILDCARD: &str = "*";

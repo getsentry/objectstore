@@ -61,8 +61,6 @@
 //! `204 No Content` with the authoritative `Upload-Offset` while bytes remain, and
 //! `201 Created` with `{"key"}` once the upload is complete and the object is available through
 //! the normal object endpoints. The session is terminal at that point.
-//! These responses also carry `Upload-Granularity`, allowing a client reconstructed from a token
-//! to learn this upload's granularity.
 //! The offset in the response may be lower than the end of the last chunk that was sent.
 //! Backends can e.g. persist only aligned prefixes and discard the remainder, so clients must
 //! always continue from the returned offset.
