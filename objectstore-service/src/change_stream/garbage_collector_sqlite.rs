@@ -1,6 +1,9 @@
 use crate::change_stream::ChangeStream;
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use sqlx::{Connection, SqlitePool};
+use std::fmt;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct SqliteGarbageCollectorConfig {
@@ -39,6 +42,7 @@ impl fmt::Debug for SqliteGarbageCollectorStream {
     }
 }
 
+#[async_trait]
 impl ChangeStream for SqliteGarbageCollectorStream {
     fn write(
         &self,
@@ -154,7 +158,7 @@ impl ChangeStream for SqliteGarbageCollectorStream {
                 return;
             }
 
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }
 }
