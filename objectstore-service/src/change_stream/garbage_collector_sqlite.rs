@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use sqlx::{Connection, SqlitePool};
 use std::fmt;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
@@ -24,15 +25,15 @@ pub struct SqliteGarbageCollectorStream {
 }
 
 impl SqliteGarbageCollectorStream {
-    pub async fn new(config: &SqliteGarbageCollectorConfig) -> Result<Self> {
+    pub async fn new(config: &SqliteGarbageCollectorConfig) -> Result<Self, sqlx::Error> {
         let pool = SqlitePool::connect(&format!("sqlite://{}", &config.path)).await?;
 
         sqlx::migrate!("./../migrations/sqlite").run(&pool).await?;
 
-        Self {
+        Ok(Self {
             pool,
             active_tasks: Arc::new(AtomicUsize::new(0)),
-        }
+        })
     }
 }
 
