@@ -25,7 +25,7 @@ pub struct SqliteGarbageCollectorStream {
 
 impl SqliteGarbageCollectorStream {
     pub async fn new(config: &SqliteGarbageCollectorConfig) -> Result<Self> {
-        let pool = SqlitePool::connect(&config.path).await?;
+        let pool = SqlitePool::connect(&format!("sqlite://{}", &config.path)).await?;
 
         sqlx::migrate!("./../migrations/sqlite").run(&pool).await?;
 
