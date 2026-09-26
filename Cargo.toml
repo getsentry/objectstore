@@ -43,7 +43,10 @@ async-trait = "0.1.89"
 axum = "0.8.9"
 axum-extra = { version = "0.12.6", default-features = false }
 base64 = "0.22.1"
-bigtable_rs = { git = "https://github.com/getsentry/bigtable_rs.git", rev = "56c310a5c8518d52ae7c7db53825beb078e326b5", default-features = false, features = ["gcp-auth-ring", "tonic-tls-ring"] }
+bigtable_rs = { git = "https://github.com/getsentry/bigtable_rs.git", rev = "56c310a5c8518d52ae7c7db53825beb078e326b5", default-features = false, features = [
+    "gcp-auth-ring",
+    "tonic-tls-ring",
+] }
 blake3 = "1.8.5"
 bytes = "1.12.0"
 bytesize = "2.4.0"
@@ -99,12 +102,16 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde-vars = "0.3.1"
 serde_json = "1.0.150"
 serde_yaml = "0.9.34-deprecated"
+sqlx = "0.9.0"
 sketches-ddsketch = "0.3.1"
 tempfile = "3.27.0"
 thiserror = "2.0.18"
 thread_local = "1.1.9"
 jemalloc_pprof = "0.9.0"
-tikv-jemallocator = { version = "0.7.0", features = ["background_threads", "override_allocator_on_supported_platforms"] }
+tikv-jemallocator = { version = "0.7.0", features = [
+    "background_threads",
+    "override_allocator_on_supported_platforms",
+] }
 tikv-jemalloc-ctl = { version = "0.7.0", features = ["stats"] }
 tokio = "1.52.3"
 tokio-util = "0.7.18"
