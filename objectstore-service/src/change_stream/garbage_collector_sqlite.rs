@@ -1,8 +1,11 @@
 use crate::change_stream::ChangeStream;
 use async_trait::async_trait;
+use objectstore_types::time::Timestamp;
 use serde::{Deserialize, Serialize};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode};
 use sqlx::{Connection, SqlitePool};
 use std::fmt;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -26,7 +29,10 @@ pub struct SqliteGarbageCollectorStream {
 
 impl SqliteGarbageCollectorStream {
     pub async fn new(config: &SqliteGarbageCollectorConfig) -> Result<Self, sqlx::Error> {
-        let pool = SqlitePool::connect(&format!("sqlite://{}", &config.path)).await?;
+        let opts = SqliteConnectOptions::from_str(&config.path)?
+            .journal_mode(SqliteJournalMode::Wal)
+            .create_if_missing(true);
+        let pool = SqlitePool::connect_with(opts).await?;
 
         sqlx::migrate!("./../migrations/sqlite").run(&pool).await?;
 
@@ -45,12 +51,7 @@ impl fmt::Debug for SqliteGarbageCollectorStream {
 
 #[async_trait]
 impl ChangeStream for SqliteGarbageCollectorStream {
-    fn write(
-        &self,
-        id: &crate::id::ObjectId,
-        size: u64,
-        expires_at: Option<objectstore_types::time::Timestamp>,
-    ) {
+    fn write(&self, id: &crate::id::ObjectId, _size: u64, expires_at: Option<Timestamp>) {
         let pool = self.pool.clone();
         let id = id.clone();
 
@@ -59,14 +60,14 @@ impl ChangeStream for SqliteGarbageCollectorStream {
         active_tasks.fetch_add(1, Ordering::SeqCst);
 
         tokio::spawn(async move {
-            let result = async {
-                let connection = pool.acquire().await?;
-                let tx_db = connection.begin().await?;
+            let _ = async {
+                let mut connection = pool.acquire().await?;
+                let mut tx_db = connection.begin().await?;
 
                 sqlx::query("INSERT INTO garbage_collector (object_id, expires_at) VALUES (?, ?)")
-                    .bind(id.as_storage_path())
-                    .bind(expires_at.map(|t| t.as_secs()))
-                    .execute(&tx_db)
+                    .bind(id.as_storage_path().to_string())
+                    .bind(expires_at.map(|t| i64::try_from(t.as_secs()).ok()))
+                    .execute(&mut *tx_db)
                     .await?;
 
                 tx_db.commit().await?;
@@ -80,11 +81,7 @@ impl ChangeStream for SqliteGarbageCollectorStream {
         });
     }
 
-    fn update(
-        &self,
-        id: &crate::id::ObjectId,
-        expires_at: Option<objectstore_types::time::Timestamp>,
-    ) {
+    fn update(&self, id: &crate::id::ObjectId, expires_at: Option<Timestamp>) {
         let pool = self.pool.clone();
         let id = id.clone();
 
@@ -93,14 +90,14 @@ impl ChangeStream for SqliteGarbageCollectorStream {
         active_tasks.fetch_add(1, Ordering::SeqCst);
 
         tokio::spawn(async move {
-            let result = async {
-                let connection = pool.acquire().await?;
-                let tx_db = connection.begin().await?;
+            let _ = async {
+                let mut connection = pool.acquire().await?;
+                let mut tx_db = connection.begin().await?;
 
                 sqlx::query("UPDATE garbage_collector SET expires_at = ? WHERE object_id = ?")
-                    .bind(expires_at.map(|t| t.as_secs()))
-                    .bind(id.as_storage_path())
-                    .execute(&tx_db)
+                    .bind(expires_at.map(|t| i64::try_from(t.as_secs()).ok()))
+                    .bind(id.as_storage_path().to_string())
+                    .execute(&mut *tx_db)
                     .await?;
 
                 tx_db.commit().await?;
@@ -122,13 +119,13 @@ impl ChangeStream for SqliteGarbageCollectorStream {
         active_tasks.fetch_add(1, Ordering::SeqCst);
 
         tokio::spawn(async move {
-            let result = async {
-                let connection = pool.acquire().await?;
-                let tx_db = connection.begin().await?;
+            let _ = async {
+                let mut connection = pool.acquire().await?;
+                let mut tx_db = connection.begin().await?;
 
                 sqlx::query("DELETE FROM garbage_collector WHERE object_id = ?")
-                    .bind(id.as_storage_path())
-                    .execute(&tx_db)
+                    .bind(id.as_storage_path().to_string())
+                    .execute(&mut *tx_db)
                     .await?;
 
                 tx_db.commit().await?;
@@ -166,19 +163,29 @@ impl ChangeStream for SqliteGarbageCollectorStream {
 
 #[cfg(test)]
 mod tests {
+    use crate::id::ObjectContext;
+
     use super::*;
+    use objectstore_types::scope::Scopes;
+    use objectstore_types::time::Timestamp;
     use std::time::Duration;
     use tempfile::NamedTempFile;
 
     fn create_test_config() -> SqliteGarbageCollectorConfig {
-        let temp_file = NamedTempFile::new().unwrap();
+        let temp_file = NamedTempFile::with_prefix("objectstore-gc-test").unwrap();
         SqliteGarbageCollectorConfig {
             path: temp_file.path().to_str().unwrap().to_string(),
         }
     }
 
     fn create_test_id(s: &str) -> crate::id::ObjectId {
-        crate::id::ObjectId::new(crate::id::ObjectContext::default(), s.to_string())
+        crate::id::ObjectId::new(
+            ObjectContext {
+                usecase: "test".to_string(),
+                scopes: Scopes::empty(),
+            },
+            s.to_string(),
+        )
     }
 
     #[tokio::test]
@@ -230,7 +237,7 @@ mod tests {
         let stream = SqliteGarbageCollectorStream::new(&config).await.unwrap();
 
         let id = create_test_id("test-object-expiring");
-        let expires_at = Some(objectstore_types::time::Timestamp::from_secs(1234567890));
+        let expires_at = Some(Timestamp::from_unix_secs(1234567890).unwrap());
 
         stream.write(&id, 2048, expires_at);
 
@@ -240,7 +247,7 @@ mod tests {
         // Verify the record was inserted
         let count: (i64,) =
             sqlx::query_as("SELECT COUNT(*) FROM garbage_collector WHERE object_id = ?")
-                .bind(id.as_storage_path())
+                .bind(id.as_storage_path().to_string())
                 .fetch_one(&stream.pool)
                 .await
                 .unwrap();
@@ -254,8 +261,8 @@ mod tests {
         let stream = SqliteGarbageCollectorStream::new(&config).await.unwrap();
 
         let id = create_test_id("test-update-object");
-        let initial_expires = Some(objectstore_types::time::Timestamp::from_secs(1000000));
-        let updated_expires = Some(objectstore_types::time::Timestamp::from_secs(2000000));
+        let initial_expires = Some(Timestamp::from_unix_secs(1000000).unwrap());
+        let updated_expires = Some(Timestamp::from_unix_secs(2000000).unwrap());
 
         // First write the record
         stream.write(&id, 1024, initial_expires);
@@ -268,7 +275,7 @@ mod tests {
         // Verify the update
         let result: (i64,) =
             sqlx::query_as("SELECT expires_at FROM garbage_collector WHERE object_id = ?")
-                .bind(id.as_storage_path())
+                .bind(id.as_storage_path().to_string())
                 .fetch_one(&stream.pool)
                 .await
                 .unwrap();
@@ -290,7 +297,7 @@ mod tests {
         // Verify it exists
         let count: (i64,) =
             sqlx::query_as("SELECT COUNT(*) FROM garbage_collector WHERE object_id = ?")
-                .bind(id.as_storage_path())
+                .bind(id.as_storage_path().to_string())
                 .fetch_one(&stream.pool)
                 .await
                 .unwrap();
@@ -303,7 +310,7 @@ mod tests {
         // Verify it's gone
         let count: (i64,) =
             sqlx::query_as("SELECT COUNT(*) FROM garbage_collector WHERE object_id = ?")
-                .bind(id.as_storage_path())
+                .bind(id.as_storage_path().to_string())
                 .fetch_one(&stream.pool)
                 .await
                 .unwrap();
@@ -325,10 +332,7 @@ mod tests {
         stream.write(&id3, 4096, None);
 
         // Update one
-        stream.update(
-            &id2,
-            Some(objectstore_types::time::Timestamp::from_secs(9999)),
-        );
+        stream.update(&id2, Some(Timestamp::from_unix_secs(9999).unwrap()));
 
         // Delete one
         stream.delete(&id1);
