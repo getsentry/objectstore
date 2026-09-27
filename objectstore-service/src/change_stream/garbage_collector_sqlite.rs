@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[expect(dead_code)]
 pub struct SqliteGarbageCollectorConfig {
     pub path: String,
 }
@@ -22,11 +23,13 @@ impl Default for SqliteGarbageCollectorConfig {
     }
 }
 
+#[expect(dead_code)]
 pub struct SqliteGarbageCollectorStream {
     pool: SqlitePool,
     active_tasks: Arc<AtomicUsize>,
 }
 
+#[expect(dead_code)]
 impl SqliteGarbageCollectorStream {
     pub async fn new(config: &SqliteGarbageCollectorConfig) -> Result<Self, sqlx::Error> {
         let opts = SqliteConnectOptions::from_str(&config.path)?
