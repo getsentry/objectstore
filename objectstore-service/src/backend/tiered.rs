@@ -478,7 +478,7 @@ impl Backend for TieredStorage {
                 .await?;
             return match progress {
                 UploadProgress::Incomplete { .. } => Ok(progress),
-                UploadProgress::Complete => Err(ErrorKind::UploadSessionGone.into()),
+                UploadProgress::Complete => Ok(UploadProgress::Complete),
             };
         }
 
