@@ -80,7 +80,8 @@ and large, infrequently-accessed ones:
 
 The threshold is **1 MiB**. `TieredStorage` routes objects at or below this
 size to the high-volume backend; objects exceeding it go to the long-term
-backend.
+backend. The backend rejects Resumable Upload creation requests when the
+given object size is below this threshold.
 
 See [`backend::StorageConfig`] for available backend implementations.
 
