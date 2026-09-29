@@ -6,8 +6,8 @@
 //!
 //! | Operation | Request | Success |
 //! |---|---|---|
-//! | Create | `POST /objects/{usecase}/{scopes}/?upload_type=resumable` | `200` + `{"key","session"}` |
-//! | Create | `PUT /objects/{usecase}/{scopes}/{key}?upload_type=resumable` | `200` + `{"key","session"}` |
+//! | Create | `POST /objects/{usecase}/{scopes}/?upload_type=resumable` | `200` + `{"key","session","granularity"}` |
+//! | Create | `PUT /objects/{usecase}/{scopes}/{key}?upload_type=resumable` | `200` + `{"key","session","granularity"}` |
 //! | Chunk | `PUT …/{key}?session=<s>` with `Upload-Offset: <n>` | `204` + `Upload-Offset`, or `201` + `{"key"}` |
 //! | Offset query | `PUT …/{key}?session=<s>` with `Upload-Offset: *` | `204` + `Upload-Offset`, or `201` + `{"key"}` |
 //! | Cancel | `DELETE …/{key}?session=<s>` | `204` |
@@ -110,14 +110,15 @@ async fn create_session_for_id(
         .usecases
         .validate(&id.context().usecase, &metadata)?;
 
-    let session = service
+    let created = service
         .create_upload_session(id.clone(), metadata, total_length)
         .await?
         .ok_or_else(|| ServiceError::from(ErrorKind::Unsupported))?;
 
     let body = Json(CreateSessionResponse {
         key: id.key().to_owned(),
-        session,
+        session: created.session,
+        granularity: created.granularity,
     });
     Ok((StatusCode::OK, body).into_response())
 }
@@ -284,6 +285,16 @@ mod tests {
                 upload_length: 10,
             }));
         let error = progress_response(Err(oversized), "my-key".into()).unwrap_err();
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+
+        let too_small = ApiError::Service(
+            ErrorKind::ChunkTooSmall {
+                chunk_length: 1,
+                upload_granularity: 262_144,
+            }
+            .into(),
+        );
+        let error = progress_response(Err(too_small), "my-key".into()).unwrap_err();
         assert_eq!(error.status(), StatusCode::BAD_REQUEST);
     }
 }

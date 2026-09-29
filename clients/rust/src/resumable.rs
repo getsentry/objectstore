@@ -52,6 +52,8 @@ pub struct ResumableUpload {
     session: Session,
     key: ObjectKey,
     token: SessionToken,
+    total_length: Option<u64>,
+    granularity: Option<u64>,
 }
 
 impl Session {
@@ -87,6 +89,8 @@ impl Session {
             session: self.clone(),
             key: key.into(),
             token,
+            total_length: None,
+            granularity: None,
         }
     }
 }
@@ -100,6 +104,14 @@ impl ResumableUpload {
     /// Returns the session token bound to this upload.
     pub fn token(&self) -> &SessionToken {
         &self.token
+    }
+
+    /// Returns this upload's granularity in bytes, if known.
+    ///
+    /// The granularity is the persistence unit for non-final chunks: chunks shorter than one
+    /// unit are rejected, and larger chunks may persist only an aligned prefix.
+    pub fn granularity(&self) -> Option<u64> {
+        self.granularity
     }
 
     /// Builds a request for the server's authoritative upload progress.
@@ -148,6 +160,28 @@ impl ResumableUpload {
             length,
             body,
         }
+    }
+
+    fn validate_chunk_length(&self, offset: u64, chunk_length: u64) -> crate::Result<()> {
+        let (Some(granularity), Some(total_length)) = (self.granularity, self.total_length) else {
+            // A reconstructed handle cannot tell whether this is the final chunk. The backend
+            // retains the authoritative total length and validates the request.
+            return Ok(());
+        };
+        if granularity == 0 || chunk_length == 0 || chunk_length >= granularity {
+            return Ok(());
+        }
+        if !offset
+            .checked_add(chunk_length)
+            .is_some_and(|end| end < total_length)
+        {
+            return Ok(());
+        }
+
+        Err(Error::ChunkTooSmall {
+            chunk_length,
+            upload_granularity: granularity,
+        })
     }
 
     /// Builds a request to cancel this upload session, discarding any uploaded bytes.
@@ -267,9 +301,14 @@ impl CreateResumableUploadBuilder {
         }
 
         let response: CreateSessionResponse = response.json().await?;
-        Ok(Some(
-            self.session.resume_upload(response.key, response.session),
-        ))
+        let upload = ResumableUpload {
+            session: self.session,
+            key: response.key,
+            token: response.session,
+            total_length: Some(self.total_length),
+            granularity: Some(response.granularity),
+        };
+        Ok(Some(upload))
     }
 }
 
@@ -326,6 +365,8 @@ impl PutChunkBuilder {
     ///
     /// Returns [`Error::ResumableUploadUnavailable`] when the session expired, was canceled, or
     /// could not be found. The upload must be restarted with a new session in that case.
+    /// Returns [`Error::ChunkTooSmall`] before sending the request when this is known to be a
+    /// non-final chunk shorter than the upload granularity.
     ///
     /// ```rust,ignore
     /// let offset = match upload.put(offset, chunk).send().await {
@@ -336,6 +377,8 @@ impl PutChunkBuilder {
     /// };
     /// ```
     pub async fn send(self) -> crate::Result<UploadProgress> {
+        self.upload
+            .validate_chunk_length(self.offset, self.length)?;
         let response = self
             .upload
             .request(Method::PUT)?

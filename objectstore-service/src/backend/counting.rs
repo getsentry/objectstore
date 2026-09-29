@@ -71,6 +71,10 @@ impl Backend for CountingBackend {
         self.inner.name()
     }
 
+    fn upload_granularity(&self) -> u64 {
+        self.inner.upload_granularity()
+    }
+
     async fn put_object(
         &self,
         id: &ObjectId,

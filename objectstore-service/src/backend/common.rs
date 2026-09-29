@@ -190,6 +190,15 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// The backend name, used for diagnostics.
     fn name(&self) -> &'static str;
 
+    /// Returns the upload granularity for sessions opened by this backend, in bytes.
+    ///
+    /// A value of zero means these uploads have no granularity. A positive value means that a
+    /// non-final chunk can persist only a multiple of this value. Implementations must reject a
+    /// non-empty, non-final chunk shorter than one unit with [`ErrorKind::ChunkTooSmall`].
+    fn upload_granularity(&self) -> u64 {
+        0
+    }
+
     /// Stores an object at the given path with the given metadata.
     async fn put_object(
         &self,
@@ -296,7 +305,8 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     ///
     /// Returns [`ErrorKind::UnknownUploadSession`] when `token` does not identify an open session,
     /// and [`ErrorKind::ChunkExceedsUploadLength`] when the chunk would exceed the total length
-    /// declared when the session was created.
+    /// declared when the session was created. Returns [`ErrorKind::ChunkTooSmall`] when a non-empty,
+    /// non-final chunk is shorter than the upload granularity.
     async fn put_chunk(
         &self,
         id: &ObjectId,

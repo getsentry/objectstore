@@ -78,6 +78,11 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         "test-backend"
     }
 
+    /// Intercepts [`Backend::upload_granularity`]. Default delegates to `inner`.
+    fn upload_granularity(&self, inner: &InMemoryBackend) -> u64 {
+        inner.upload_granularity()
+    }
+
     /// Intercepts [`Backend::put_object`]. Default delegates to `inner`.
     async fn put_object(
         &self,
@@ -377,6 +382,10 @@ impl<H: Hooks> TestBackend<H> {
 impl<H: Hooks> Backend for TestBackend<H> {
     fn name(&self) -> &'static str {
         self.hooks.name()
+    }
+
+    fn upload_granularity(&self) -> u64 {
+        self.hooks.upload_granularity(&self.inner)
     }
 
     fn as_multipart_upload_backend(&self) -> Result<&dyn MultipartUploadBackend> {
