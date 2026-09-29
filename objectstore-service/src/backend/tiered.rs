@@ -511,12 +511,11 @@ impl Backend for TieredStorage {
 
         // FIXME(consistency): It's possible that 2 concurrent `put_chunk` requests A and B
         // reach this point simultaneously.
-        // If a PUT/DELETE on this key is executed between A and B, B will (attempt to) create a
-        // dangling tombstone.
+        // If a PUT/DELETE on this key is executed between A and B, B will create a dangling
+        // tombstone.
         //
-        // FIXME(consistency): The next statement potentially creates an orphan in LT.
-        // (using `ChangeGuard::Assembling` would not solve the problem, but rather introduce more
-        // subtle race scenarios).
+        // FIXME(consistency): The next statement potentially creates an orphan in LT, as we
+        // perform the `put_chunk` while not under a guard.
         //
         // Other consistency issues may exist within the current implementation.
 
