@@ -45,7 +45,7 @@ pub type DeleteResponse = ();
 
 /// A newly opened resumable upload session and its upload granularity.
 #[derive(Debug)]
-pub struct CreatedUploadSession {
+pub struct CreateUploadSessionResponse {
     /// The encrypted token used to continue the upload.
     pub session: EncryptedSessionToken,
     /// The upload granularity in bytes, or zero when there is none.
@@ -483,7 +483,7 @@ impl StorageService {
         id: ObjectId,
         metadata: Metadata,
         total_length: u64,
-    ) -> Result<Option<CreatedUploadSession>> {
+    ) -> Result<Option<CreateUploadSessionResponse>> {
         let Some(total_length) = NonZeroU64::new(total_length) else {
             return Ok(None);
         };
@@ -502,7 +502,7 @@ impl StorageService {
                             backend_token,
                         })
                         .map(EncryptedSessionToken::new)?;
-                    Ok(CreatedUploadSession {
+                    Ok(CreateUploadSessionResponse {
                         session,
                         granularity: inner.upload_granularity(),
                     })

@@ -185,7 +185,8 @@ pub struct CreateSessionResponse {
     pub key: String,
     /// The opaque session token that identifies the session.
     pub session: SessionToken,
-    /// This upload's granularity in bytes.
+    /// This upload's granularity in bytes, or zero when it imposes none.
+    #[serde(default)]
     pub granularity: u64,
 }
 

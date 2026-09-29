@@ -5,7 +5,7 @@ use objectstore_service::multipart::{
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
 use objectstore_service::service::{
-    CreatedUploadSession, DeleteResponse, GetResponse, InsertResponse, MetadataResponse,
+    CreateUploadSessionResponse, DeleteResponse, GetResponse, InsertResponse, MetadataResponse,
 };
 
 use objectstore_service::{ClientStream, StorageService};
@@ -226,7 +226,7 @@ impl AuthAwareService {
         id: ObjectId,
         metadata: Metadata,
         total_length: u64,
-    ) -> ApiResult<Option<CreatedUploadSession>> {
+    ) -> ApiResult<Option<CreateUploadSessionResponse>> {
         self.check_permission(Permission::ObjectWrite, id.context())?;
         Ok(self
             .service

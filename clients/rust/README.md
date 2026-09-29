@@ -167,9 +167,11 @@ If the request fails midway, it will be possible to resume it from the persisted
 **Important:** resumable uploads do not automatically compress chunk contents. The `compression`
 setting only records how the object is encoded; the caller must compress the payload accordingly.
 The object length and all offsets refer to the bytes after compression.
-When manually slicing non-final chunks, use multiples of a positive upload granularity
-(`upload.granularity()` on a newly created handle). Reconstructed handles do not know this value.
-Shorter chunks are rejected, while a larger unaligned chunk may persist only its aligned prefix.
+
+When manually slicing non-final chunks, use sizes that are multiples of `upload.granularity()`.
+All chunks except the last must be at least as large as the granularity.
+If a non-final chunk is larger than the granularity but its size is not a multiple of it, then the
+server may persist only its aligned prefix.
 
 ```rust,no_run
 #![cfg(feature = "resumable-upload-api")]
