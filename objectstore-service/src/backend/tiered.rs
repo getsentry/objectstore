@@ -472,7 +472,7 @@ impl Backend for TieredStorage {
                 content_length,
                 upload_length: session.total_length,
             })?;
-      
+
         let granularity = self.upload_granularity();
         if content_length > 0 && content_length < granularity && end != session.total_length {
             return Err(ErrorKind::ChunkTooSmall {
@@ -1320,7 +1320,7 @@ mod tests {
         let payload = vec![b'a'; BACKEND_SIZE_THRESHOLD + 1];
         let token =
             resumable_token(&storage, &id, &Metadata::default(), payload.len() as u64).await;
-        
+
         let error = storage
             .put_chunk(&id, &token, 0, 1, stream::single("a"))
             .await
