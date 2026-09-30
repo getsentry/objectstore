@@ -303,9 +303,6 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// A `content_length` of zero is valid. It writes nothing and reports the offset the backend
     /// holds while the session is open.
     ///
-    /// Tiered finalization is one-shot. Once a final chunk is admitted, further session requests
-    /// return [`ErrorKind::UploadSessionGone`], including after a failure of the final write.
-    ///
     /// Returns [`ErrorKind::UnknownUploadSession`] when `session` does not identify an open session,
     /// and [`ErrorKind::ChunkExceedsUploadLength`] when the chunk would exceed the total length
     /// declared when the session was created. Returns [`ErrorKind::ChunkTooSmall`] when a non-empty,
@@ -323,9 +320,9 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
 
     /// Reports how far the session has progressed.
     ///
-    /// Some backends return [`UploadProgress::Complete`] repeatedly after the final chunk,
-    /// including when its original response was lost. Tiered finalization is one-shot:
-    /// subsequent requests return [`ErrorKind::UploadSessionGone`].
+    /// A backend may retain completion status after the final chunk, including when its
+    /// original response was lost. Session lifetime and behavior after completion are
+    /// backend-specific.
     ///
     /// Returns [`ErrorKind::UnknownUploadSession`] when `session` does not identify a known session.
     async fn upload_offset(&self, session: &Session) -> Result<UploadProgress> {
@@ -336,8 +333,6 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// Cancels an upload session, discarding whatever was uploaded.
     ///
     /// Returns [`ErrorKind::UnknownUploadSession`] when `session` does not identify an open session.
-    /// Tiered returns [`ErrorKind::UploadSessionGone`] for missing or consumed sessions;
-    /// repeated cancellation of a retained canceled row retries LT cleanup.
     async fn cancel_upload(&self, session: &Session) -> Result<()> {
         let _ = session;
         Err(ErrorKind::Unsupported.into())

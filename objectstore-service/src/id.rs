@@ -215,14 +215,34 @@ impl ObjectId {
     /// `{usecase}/{scope1.key}.{scope1.value}/.../{key}` that is intended to be used by backends to
     /// reference the object in a storage system.
     pub fn as_storage_path(&self) -> AsStoragePath<'_> {
-        AsStoragePath { inner: self }
+        self.as_storage_path_with_delimiter(KEY_DELIMITER)
+    }
+
+    /// Returns a storage path using `delimiter` instead of the `objects` segment.
+    ///
+    /// Backends can use a separate namespace for internal rows while retaining the same
+    /// usecase, scopes, and key formatting. These paths are not parsed by
+    /// [`Self::from_storage_path`], which accepts object paths only.
+    pub fn as_storage_path_with_delimiter<'a>(&'a self, delimiter: &'a str) -> AsStoragePath<'a> {
+        AsStoragePath {
+            inner: self,
+            delimiter,
+        }
     }
 }
 
 /// A view returned by [`ObjectId::as_storage_path`].
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct AsStoragePath<'a> {
     inner: &'a ObjectId,
+    delimiter: &'a str,
+}
+
+impl<'a> AsStoragePath<'a> {
+    /// Returns the object ID supplying this path's usecase, scopes, and key.
+    pub fn object_id(&self) -> &'a ObjectId {
+        self.inner
+    }
 }
 
 impl fmt::Display for AsStoragePath<'_> {
@@ -231,7 +251,7 @@ impl fmt::Display for AsStoragePath<'_> {
         if !self.inner.context.scopes.is_empty() {
             write!(f, "{}/", self.inner.context.scopes.as_storage_path())?;
         }
-        write!(f, "{}/{}", KEY_DELIMITER, self.inner.key)
+        write!(f, "{}/{}", self.delimiter, self.inner.key)
     }
 }
 
@@ -254,6 +274,12 @@ mod tests {
 
         let path = object_id.as_storage_path().to_string();
         assert_eq!(path, "testing/org.12345/project.1337/objects/foo/bar");
+        assert_eq!(
+            object_id
+                .as_storage_path_with_delimiter("uploads")
+                .to_string(),
+            "testing/org.12345/project.1337/uploads/foo/bar"
+        );
     }
 
     #[test]
@@ -268,6 +294,12 @@ mod tests {
 
         let path = object_id.as_storage_path().to_string();
         assert_eq!(path, "testing/objects/foo/bar");
+        assert_eq!(
+            object_id
+                .as_storage_path_with_delimiter("uploads")
+                .to_string(),
+            "testing/uploads/foo/bar"
+        );
     }
 
     #[test]

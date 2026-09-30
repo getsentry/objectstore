@@ -158,8 +158,8 @@ enable storage COGS, enable the `storage-cogs` Cargo feature and provide a
 connection details and a [`CostTrackerStreamConfig`](change_stream::CostTrackerStreamConfig)
 for per-backend information.
 
-Each row in the inventory table has an anonymized hash of an `ObjectId` as well
-as the row's size, expiry, Sentry org/project, `app_feature`, and relevant
+Each row in the inventory table has an anonymized hash of its physical storage path,
+as well as the row's size, expiry, Sentry org/project, `app_feature`, and relevant
 backend. When using [`TieredStorage`](backend::tiered::TieredStorage)'s
 long-term backend the inventory table will contain _two rows_ for an object: a
 row for the actual object and its size in long-term backend, and a separate row
@@ -173,7 +173,7 @@ Under the hood, [`CostTrackerStream`](change_stream::CostTrackerStream) uses
 change events; it is generic over the transport rather than tied to Kafka. Each
 backend has its own sampling rate to lessen the load put on the stream
 processor. Sampling decisions are made
-based on [`ObjectId`](id::ObjectId). Each change event includes the sampling rate that was in
+based on the physical storage path. Each change event includes the sampling rate that was in
 effect at the time so that consumers can smooth over the effects of changing the
 sampling rate. When aggregating, divide each row's value by its `sample_rate`.
 
@@ -340,11 +340,9 @@ granularity unit are rejected; the final chunk is exempt. Clients should use gra
 multiples and continue from the preceding response's offset, or perform an explicit offset query
 after an ambiguous failure.
 
-Tiered storage keeps each upload's state in a separate high-volume row with a fixed five-day
-lifetime. Finalization atomically deletes the ongoing upload row before forwarding the final
-chunk. Subsequent session requests return gone, even if finalization fails or its response is lost. Cancellation preserves the row
-and its deadline so later requests receive a stable gone response. See the
-[Tiered resumable upload flow](backend::tiered) for state transitions and cleanup behavior.
+Tiered storage tracks upload state in high-volume storage and publishes completed objects
+through long-term redirects. See the [Tiered resumable upload flow](backend::tiered) for
+session lifetime, cancellation, finalization, and cleanup behavior.
 
 ## Multipart Uploads
 

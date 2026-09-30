@@ -173,9 +173,8 @@ pub enum UploadProgress {
     },
     /// The session is terminal and the object is available through the backend's normal reads.
     ///
-    /// Some backends retain this status for later offset queries, for example when the final
-    /// chunk's response was lost. Backends with one-shot finalization instead reject subsequent
-    /// session requests.
+    /// This status may remain available to later offset queries, depending on the backend's
+    /// session lifetime.
     Complete,
 }
 

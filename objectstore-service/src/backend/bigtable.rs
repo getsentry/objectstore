@@ -64,7 +64,7 @@ use crate::change_stream::{
 };
 use crate::error::{Error, ErrorKind, Result, ResultExt as _};
 use crate::gcp_auth::PrefetchingTokenProvider;
-use crate::id::ObjectId;
+use crate::id::{AsStoragePath, ObjectId};
 use crate::stream::{ChunkedBytes, ClientStream};
 
 /// Configuration for [`BigTableBackend`].
@@ -684,13 +684,8 @@ fn tombstone_mutations(tombstone: &Tombstone) -> [v2::Mutation; 2] {
 
 /// Upload rows use a separate path segment from `objects`, so client object keys
 /// cannot collide with them. The key is the upload's unique LT revision.
-fn resumable_upload_path(id: &ObjectId) -> Vec<u8> {
-    let scopes = id.scopes().as_storage_path().to_string();
-    if scopes.is_empty() {
-        format!("{}/uploads/{}", id.usecase(), id.key()).into_bytes()
-    } else {
-        format!("{}/{scopes}/uploads/{}", id.usecase(), id.key()).into_bytes()
-    }
+fn resumable_upload_path(id: &ObjectId) -> AsStoragePath<'_> {
+    id.as_storage_path_with_delimiter("uploads")
 }
 
 fn resumable_upload_mutations(
@@ -1107,12 +1102,13 @@ impl Backend for BigTableBackend {
 #[async_trait::async_trait]
 impl HighVolumeBackend for BigTableBackend {
     async fn create_resumable_upload(&self, id: &ObjectId, time_expires: Timestamp) -> Result<()> {
-        let path = resumable_upload_path(id);
+        let upload_path = resumable_upload_path(id);
+        let path = upload_path.to_string().into_bytes();
         let mutations = resumable_upload_mutations(ResumableUploadState::Ongoing, time_expires);
         self.mutate(path.clone(), mutations.clone(), "create_resumable_upload")
             .await?;
         self.change_stream
-            .write(id, row_size(&path, &mutations), Some(time_expires));
+            .write_path(upload_path, row_size(&path, &mutations), Some(time_expires));
         Ok(())
     }
 
@@ -1124,7 +1120,7 @@ impl HighVolumeBackend for BigTableBackend {
         let request = v2::ReadRowsRequest {
             table_name: self.table_path.clone(),
             rows: Some(v2::RowSet {
-                row_keys: vec![resumable_upload_path(id)],
+                row_keys: vec![resumable_upload_path(id).to_string().into_bytes()],
                 row_ranges: vec![],
             }),
             filter: Some(live_row_filter(
@@ -1188,7 +1184,8 @@ impl HighVolumeBackend for BigTableBackend {
                 ],
             })),
         };
-        let path = resumable_upload_path(id);
+        let upload_path = resumable_upload_path(id);
+        let path = upload_path.to_string().into_bytes();
         let mutations = match state {
             Some(state) => resumable_upload_mutations(state, time_expires).to_vec(),
             None => vec![delete_row_mutation()],
@@ -1203,11 +1200,12 @@ impl HighVolumeBackend for BigTableBackend {
             .await?;
         if written {
             match state {
-                Some(_) => {
-                    self.change_stream
-                        .write(id, row_size(&path, &mutations), Some(time_expires))
-                }
-                None => self.change_stream.delete(id),
+                Some(_) => self.change_stream.write_path(
+                    upload_path,
+                    row_size(&path, &mutations),
+                    Some(time_expires),
+                ),
+                None => self.change_stream.delete_path(upload_path),
             }
         }
         Ok(written)
@@ -3273,6 +3271,94 @@ mod tests {
         assert_eq!(records.len(), 1, "the object row must be reclaimed");
         assert_eq!(records[0].op_type, OpType::Delete);
 
+        Ok(())
+    }
+
+    #[cfg(feature = "storage-cogs")]
+    #[tokio::test]
+    async fn change_stream_reports_upload_rows_at_their_physical_paths() -> Result<()> {
+        let (backend, producer) = create_test_backend_with_change_stream().await?;
+        let expected_producer = DummyProducer::default();
+        let tracker = objectstore_inventory_tracker::InventoryTracker::new(
+            expected_producer.clone(),
+            "bigtable_objectstore",
+            1.0,
+        );
+        let now = Timestamp::now();
+        let deadline = now + Duration::from_hours(5 * 24);
+        for state in [Some(ResumableUploadState::Canceled), None] {
+            let id = ObjectId::random(ObjectContext {
+                usecase: "testing".into(),
+                scopes: Scopes::from_iter([
+                    Scope::create("org", "17").unwrap(),
+                    Scope::create("project", "42").unwrap(),
+                ]),
+            });
+            // An object and an upload can have the same revision key in separate namespaces.
+            backend
+                .put_object(&id, &Metadata::default(), stream::single("object"), now)
+                .await?;
+            let object_record_id = producer.records().last().unwrap().record_id.clone();
+            producer.clear();
+
+            backend.create_resumable_upload(&id, deadline).await?;
+            assert!(
+                backend
+                    .transition_resumable_upload(&id, deadline, state, now)
+                    .await?
+            );
+            assert!(
+                !backend
+                    .transition_resumable_upload(&id, deadline, state, now)
+                    .await?
+            );
+
+            let expected_path = format!("testing/org.17/project.42/uploads/{}", id.key());
+            tracker.write(
+                &expected_path,
+                id.usecase(),
+                0,
+                now.into(),
+                Some(deadline.into()),
+                Some(17),
+                Some(42),
+            )?;
+            let expected_record_id = expected_producer
+                .records()
+                .last()
+                .unwrap()
+                .record_id
+                .clone();
+            let records = producer.records();
+            assert_eq!(records.len(), 2, "only successful mutations are reported");
+            assert_eq!(records[0].record_id, expected_record_id);
+            assert_eq!(records[1].record_id, expected_record_id);
+            assert_ne!(records[0].record_id, object_record_id);
+            assert_eq!(records[0].op_type, OpType::Write);
+            assert_eq!(
+                records[0].size,
+                Some((expected_path.len() + b"ongoing".len()) as u64)
+            );
+            assert_eq!(
+                records[0].expiration_time,
+                Some(deadline.as_micros() as i64)
+            );
+            assert_eq!(records[0].app_feature, "testing");
+            assert_eq!(records[0].organization_id, Some(17));
+            assert_eq!(records[0].project_id, Some(42));
+            if state.is_some() {
+                assert_eq!(records[1].op_type, OpType::Write);
+                assert_eq!(
+                    records[1].expiration_time,
+                    Some(deadline.as_micros() as i64)
+                );
+            } else {
+                assert_eq!(records[1].op_type, OpType::Delete);
+            }
+            // Deleting the upload must not delete the object sharing its revision key.
+            let (_, _, body) = backend.get_object(&id, now, None).await?.unwrap();
+            assert_eq!(stream::read_to_vec(body).await?, b"object");
+        }
         Ok(())
     }
 
