@@ -321,14 +321,6 @@ trips for objects large enough that re-sending the whole payload is expensive.
    through its normal read path before reporting completion.
 5. While open, an upload can be canceled, which discards what its session holds.
 
-Backend session tokens remain private to the service. Before returning a token to a client,
-[`StorageService`] places the canonical object path, declared upload length, and backend-defined
-token string in an authenticated envelope. Continuation, offset-query, and cancellation operations
-authenticate and open that envelope, reject an object-path mismatch, and pass the structured
-[`Session`](resumable::Session) to the backend. Composed backends derive an inner session
-with the inner object ID and backend token while retaining shared upload information. See
-[`Cipher`](encryption::Cipher) for the encryption format and key-rotation behavior.
-
 Not all backends support resumable uploads. A backend returns no session when it declines a
 particular upload; this is a routine outcome rather than an error. Acceptance can depend on the
 declared size, the metadata, or whether resuming is possible in principle.
