@@ -1,13 +1,13 @@
 //! Types supporting authenticated Resumable Upload Session tokens.
 //!
 //! Storage backends represent their opaque upload state as a [`BackendToken`]. At the service
-//! boundary, `SessionToken` combines that state with service-specific fields, and
+//! boundary, [`Session`] combines that state with service-specific fields, and
 //! [`crate::encryption::Cipher`] protects the serialized token before it is returned to the server.
-//! After authentication, the service passes the structured [`SessionToken`] to the backend.
+//! After authentication, the service passes the structured [`Session`] to the backend.
 //!
 //! ```text
 //! Storage backend       | objectstore-service                          | objectstore-server             |
-//! BackendToken <------->| SessionToken ---------- Cipher ------------->| EncryptedSessionToken          |
+//! BackendToken <------->| Session --------------- Cipher ------------->| EncryptedSessionToken          |
 //! opaque backend state  | { ObjectId, upload_length, BackendToken }    | b64url encoded opaque envelope |
 //! ```
 
@@ -31,7 +31,7 @@ pub type BackendToken = String;
 /// passing it to backend continuation operations. Composed backends can derive an inner session
 /// by replacing the object ID and backend token while retaining the shared upload information.
 #[derive(Clone, Deserialize, Serialize)]
-pub struct SessionToken {
+pub struct Session {
     /// Object being uploaded through the receiving backend.
     #[serde(
         serialize_with = "serialize_object_id",
@@ -44,9 +44,9 @@ pub struct SessionToken {
     pub backend_token: BackendToken,
 }
 
-impl fmt::Debug for SessionToken {
+impl fmt::Debug for Session {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SessionToken")
+        f.debug_struct("Session")
             .field("object_id", &self.object_id)
             .field("upload_length", &self.upload_length)
             .finish_non_exhaustive()

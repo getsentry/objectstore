@@ -30,7 +30,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
-use crate::resumable::SessionToken;
+use crate::resumable::Session;
 use crate::stream::{ClientStream, PayloadStream};
 use crate::streaming::StreamExecutor;
 
@@ -497,7 +497,7 @@ impl StorageService {
             session
                 .map(|backend_token| {
                     let session = cipher
-                        .encrypt(&SessionToken {
+                        .encrypt(&Session {
                             object_id: id,
                             upload_length,
                             backend_token,
@@ -513,12 +513,8 @@ impl StorageService {
         .await
     }
 
-    fn session_for(
-        &self,
-        expected_id: &ObjectId,
-        token: EncryptedSessionToken,
-    ) -> Result<SessionToken> {
-        let session: SessionToken = self
+    fn session_for(&self, expected_id: &ObjectId, token: EncryptedSessionToken) -> Result<Session> {
+        let session: Session = self
             .cipher
             .decrypt(token.as_bytes())
             .map_err(|_| ErrorKind::UnknownUploadSession)?;
@@ -632,7 +628,7 @@ mod tests {
         async fn upload_offset(
             &self,
             _inner: &InMemoryBackend,
-            session: &SessionToken,
+            session: &Session,
         ) -> Result<UploadProgress> {
             assert_eq!(session.upload_length.get(), 4);
             self.seen_tokens

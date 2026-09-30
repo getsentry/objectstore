@@ -58,7 +58,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
-use crate::resumable::{BackendToken, SessionToken};
+use crate::resumable::{BackendToken, Session};
 use crate::stream::ClientStream;
 
 /// Hooks for [`TestBackend`].
@@ -310,7 +310,7 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
     async fn put_chunk(
         &self,
         inner: &InMemoryBackend,
-        session: &SessionToken,
+        session: &Session,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
@@ -324,13 +324,13 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
     async fn upload_offset(
         &self,
         inner: &InMemoryBackend,
-        session: &SessionToken,
+        session: &Session,
     ) -> Result<UploadProgress> {
         inner.upload_offset(session).await
     }
 
     /// Intercepts [`Backend::cancel_upload`]. Default delegates to `inner`.
-    async fn cancel_upload(&self, inner: &InMemoryBackend, session: &SessionToken) -> Result<()> {
+    async fn cancel_upload(&self, inner: &InMemoryBackend, session: &Session) -> Result<()> {
         inner.cancel_upload(session).await
     }
 }
@@ -448,7 +448,7 @@ impl<H: Hooks> Backend for TestBackend<H> {
 
     async fn put_chunk(
         &self,
-        session: &SessionToken,
+        session: &Session,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
@@ -458,11 +458,11 @@ impl<H: Hooks> Backend for TestBackend<H> {
             .await
     }
 
-    async fn upload_offset(&self, session: &SessionToken) -> Result<UploadProgress> {
+    async fn upload_offset(&self, session: &Session) -> Result<UploadProgress> {
         self.hooks.upload_offset(&self.inner, session).await
     }
 
-    async fn cancel_upload(&self, session: &SessionToken) -> Result<()> {
+    async fn cancel_upload(&self, session: &Session) -> Result<()> {
         self.hooks.cancel_upload(&self.inner, session).await
     }
 }

@@ -17,7 +17,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
-use crate::resumable::{BackendToken, SessionToken};
+use crate::resumable::{BackendToken, Session};
 use crate::stream::{ClientStream, PayloadStream};
 
 /// User agent string used for outgoing requests.
@@ -312,7 +312,7 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// non-final chunk is shorter than the upload granularity.
     async fn put_chunk(
         &self,
-        session: &SessionToken,
+        session: &Session,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
@@ -331,7 +331,7 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// publication work before returning that terminal outcome.
     ///
     /// Returns [`ErrorKind::UnknownUploadSession`] when `session` does not identify a known session.
-    async fn upload_offset(&self, session: &SessionToken) -> Result<UploadProgress> {
+    async fn upload_offset(&self, session: &Session) -> Result<UploadProgress> {
         let _ = session;
         Err(ErrorKind::Unsupported.into())
     }
@@ -339,7 +339,7 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// Cancels an upload session, discarding whatever was uploaded.
     ///
     /// Returns [`ErrorKind::UnknownUploadSession`] when `session` does not identify an open session.
-    async fn cancel_upload(&self, session: &SessionToken) -> Result<()> {
+    async fn cancel_upload(&self, session: &Session) -> Result<()> {
         let _ = session;
         Err(ErrorKind::Unsupported.into())
     }

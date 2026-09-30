@@ -131,7 +131,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
-use crate::resumable::{BackendToken, SessionToken};
+use crate::resumable::{BackendToken, Session};
 use crate::stream::{ClientStream, SizedPeek, counting_stream};
 
 /// The threshold up until which we will go to the "high volume" backend.
@@ -402,8 +402,8 @@ impl TieredResumableToken {
         serde_json::from_str(token).map_err(|_| ErrorKind::UnknownUploadSession.into())
     }
 
-    fn into_session(self, session: &SessionToken) -> SessionToken {
-        SessionToken {
+    fn into_session(self, session: &Session) -> Session {
+        Session {
             object_id: ObjectId {
                 context: session.object_id.context.clone(),
                 key: self.revision,
@@ -462,7 +462,7 @@ impl Backend for TieredStorage {
     #[tracing::instrument(level = "debug", fields(id = ?session.object_id, offset, content_length), skip_all)]
     async fn put_chunk(
         &self,
-        session: &SessionToken,
+        session: &Session,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
@@ -582,14 +582,14 @@ impl Backend for TieredStorage {
     }
 
     #[tracing::instrument(level = "debug", fields(id = ?session.object_id), skip_all)]
-    async fn upload_offset(&self, session: &SessionToken) -> Result<UploadProgress> {
+    async fn upload_offset(&self, session: &Session) -> Result<UploadProgress> {
         let tiered = TieredResumableToken::decode(&session.backend_token)?;
         let inner_session = tiered.into_session(session);
         self.inner.long_term.upload_offset(&inner_session).await
     }
 
     #[tracing::instrument(level = "debug", fields(id = ?session.object_id), skip_all)]
-    async fn cancel_upload(&self, session: &SessionToken) -> Result<()> {
+    async fn cancel_upload(&self, session: &Session) -> Result<()> {
         let tiered = TieredResumableToken::decode(&session.backend_token)?;
         let inner_session = tiered.into_session(session);
         self.inner.long_term.cancel_upload(&inner_session).await
@@ -1245,13 +1245,13 @@ mod tests {
         id: &ObjectId,
         metadata: &Metadata,
         length: u64,
-    ) -> SessionToken {
+    ) -> Session {
         let backend_token = storage
             .create_upload_session(id, metadata, NonZeroU64::new(length).unwrap())
             .await
             .unwrap()
             .unwrap();
-        SessionToken {
+        Session {
             object_id: id.clone(),
             upload_length: NonZeroU64::new(length).unwrap(),
             backend_token,

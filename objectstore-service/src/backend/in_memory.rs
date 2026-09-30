@@ -29,7 +29,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, Part, PartNumber, UploadId, UploadPartResponse,
 };
-use crate::resumable::{BackendToken, SessionToken, UploadProgress};
+use crate::resumable::{BackendToken, Session, UploadProgress};
 use crate::stream::ClientStream;
 
 /// An entry in the in-memory store.
@@ -114,7 +114,7 @@ impl InMemoryBackend {
         }
     }
 
-    fn upload_session(&self, session: &SessionToken) -> Result<ResumableSession> {
+    fn upload_session(&self, session: &Session) -> Result<ResumableSession> {
         self.resumable_store
             .lock()
             .unwrap()
@@ -273,7 +273,7 @@ impl super::common::Backend for InMemoryBackend {
 
     async fn put_chunk(
         &self,
-        session: &SessionToken,
+        session: &Session,
         offset: u64,
         content_length: u64,
         mut stream: ClientStream,
@@ -331,7 +331,7 @@ impl super::common::Backend for InMemoryBackend {
         Ok(UploadProgress::Complete)
     }
 
-    async fn upload_offset(&self, session: &SessionToken) -> Result<UploadProgress> {
+    async fn upload_offset(&self, session: &Session) -> Result<UploadProgress> {
         let upload_session = self.upload_session(session)?;
         let guard = upload_session.lock().await;
         let upload = guard.as_ref().ok_or(ErrorKind::UnknownUploadSession)?;
@@ -340,7 +340,7 @@ impl super::common::Backend for InMemoryBackend {
         })
     }
 
-    async fn cancel_upload(&self, session: &SessionToken) -> Result<()> {
+    async fn cancel_upload(&self, session: &Session) -> Result<()> {
         let upload_session = self.upload_session(session)?;
         let mut guard = upload_session.lock().await;
         guard.take().ok_or(ErrorKind::UnknownUploadSession)?;
@@ -891,13 +891,13 @@ mod tests {
         })
     }
 
-    async fn create_session(backend: &InMemoryBackend, id: &ObjectId, length: u64) -> SessionToken {
+    async fn create_session(backend: &InMemoryBackend, id: &ObjectId, length: u64) -> Session {
         let backend_token = backend
             .create_upload_session(id, &Metadata::default(), NonZeroU64::new(length).unwrap())
             .await
             .unwrap()
             .unwrap();
-        SessionToken {
+        Session {
             object_id: id.clone(),
             upload_length: NonZeroU64::new(length).unwrap(),
             backend_token,
@@ -929,7 +929,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let token = SessionToken {
+        let token = Session {
             object_id: id.clone(),
             upload_length,
             backend_token: token,

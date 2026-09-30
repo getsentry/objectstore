@@ -50,7 +50,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, Part, PartNumber, UploadId, UploadPartResponse,
 };
-use crate::resumable::{BackendToken, SessionToken};
+use crate::resumable::{BackendToken, Session};
 use crate::stream::{self, ClientStream};
 
 /// Options for owner-only files on Unix, further restricted by umask.
@@ -333,7 +333,7 @@ impl Backend for LocalFsBackend {
     #[tracing::instrument(level = "debug", fields(id = ?session.object_id, offset, content_length), skip_all)]
     async fn put_chunk(
         &self,
-        session: &SessionToken,
+        session: &Session,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
@@ -382,13 +382,13 @@ impl Backend for LocalFsBackend {
     }
 
     #[tracing::instrument(level = "debug", fields(id = ?session.object_id), skip_all)]
-    async fn upload_offset(&self, session: &SessionToken) -> Result<UploadProgress> {
+    async fn upload_offset(&self, session: &Session) -> Result<UploadProgress> {
         self.put_chunk(session, 0, 0, futures_util::stream::empty().boxed())
             .await
     }
 
     #[tracing::instrument(level = "debug", fields(id = ?session.object_id), skip_all)]
-    async fn cancel_upload(&self, session: &SessionToken) -> Result<()> {
+    async fn cancel_upload(&self, session: &Session) -> Result<()> {
         let upload_id =
             Uuid::parse_str(&session.backend_token).map_err(|_| ErrorKind::UnknownUploadSession)?;
         let _guard = self.locks.acquire(&session.object_id).await?;
@@ -1126,13 +1126,13 @@ mod tests {
     use crate::id::ObjectContext;
     use crate::stream;
 
-    async fn upload_token(backend: &LocalFsBackend, id: &ObjectId, length: u64) -> SessionToken {
+    async fn upload_token(backend: &LocalFsBackend, id: &ObjectId, length: u64) -> Session {
         let backend_token = backend
             .create_upload_session(id, &Metadata::default(), NonZeroU64::new(length).unwrap())
             .await
             .unwrap()
             .unwrap();
-        SessionToken {
+        Session {
             object_id: id.clone(),
             upload_length: NonZeroU64::new(length).unwrap(),
             backend_token,
@@ -1155,7 +1155,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let token = SessionToken {
+        let token = Session {
             object_id: id.clone(),
             upload_length,
             backend_token: token,
@@ -2269,7 +2269,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let token = SessionToken {
+        let token = Session {
             object_id: id.clone(),
             upload_length,
             backend_token: token,

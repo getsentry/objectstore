@@ -32,7 +32,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
-use crate::resumable::{BackendToken, SessionToken};
+use crate::resumable::{BackendToken, Session};
 use crate::stream::ClientStream;
 
 /// Increments `cogs.usage` by one operation for the given `usecase`.
@@ -145,7 +145,7 @@ impl Backend for CountingBackend {
 
     async fn put_chunk(
         &self,
-        session: &SessionToken,
+        session: &Session,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
@@ -156,12 +156,12 @@ impl Backend for CountingBackend {
             .await
     }
 
-    async fn upload_offset(&self, session: &SessionToken) -> Result<UploadProgress> {
+    async fn upload_offset(&self, session: &Session) -> Result<UploadProgress> {
         count(&session.object_id.context.usecase);
         self.inner.upload_offset(session).await
     }
 
-    async fn cancel_upload(&self, session: &SessionToken) -> Result<()> {
+    async fn cancel_upload(&self, session: &Session) -> Result<()> {
         count(&session.object_id.context.usecase);
         self.inner.cancel_upload(session).await
     }

@@ -33,7 +33,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
-use crate::resumable::{BackendToken, SessionToken, UploadProgress};
+use crate::resumable::{BackendToken, Session, UploadProgress};
 use crate::stream::ClientStream;
 
 /// Configuration for [`GcsBackend`].
@@ -1217,7 +1217,7 @@ impl Backend for GcsBackend {
     #[tracing::instrument(level = "debug", fields(id = ?session.object_id, offset, content_length), skip_all)]
     async fn put_chunk(
         &self,
-        session: &SessionToken,
+        session: &Session,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
@@ -1275,7 +1275,7 @@ impl Backend for GcsBackend {
     }
 
     #[tracing::instrument(level = "debug", fields(id = ?session.object_id), skip_all)]
-    async fn upload_offset(&self, session: &SessionToken) -> Result<UploadProgress> {
+    async fn upload_offset(&self, session: &Session) -> Result<UploadProgress> {
         objectstore_log::debug!("Querying resumable upload offset on GCS backend");
         let session_uri =
             Url::parse(&session.backend_token).map_err(|_| ErrorKind::UnknownUploadSession)?;
@@ -1312,7 +1312,7 @@ impl Backend for GcsBackend {
     }
 
     #[tracing::instrument(level = "debug", fields(id = ?session.object_id), skip_all)]
-    async fn cancel_upload(&self, session: &SessionToken) -> Result<()> {
+    async fn cancel_upload(&self, session: &Session) -> Result<()> {
         objectstore_log::debug!("Cancelling resumable upload on GCS backend");
         let session_uri =
             Url::parse(&session.backend_token).map_err(|_| ErrorKind::UnknownUploadSession)?;
@@ -1732,12 +1732,12 @@ mod tests {
             id: &ObjectId,
             metadata: &Metadata,
             upload_length: NonZeroU64,
-        ) -> Result<SessionToken> {
+        ) -> Result<Session> {
             let backend_token =
                 <Self as Backend>::create_upload_session(self, id, metadata, upload_length)
                     .await?
                     .ok_or_else(|| Error::from(ErrorKind::Unsupported))?;
-            Ok(SessionToken {
+            Ok(Session {
                 object_id: id.clone(),
                 upload_length,
                 backend_token,
