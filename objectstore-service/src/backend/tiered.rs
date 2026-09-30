@@ -459,7 +459,7 @@ impl Backend for TieredStorage {
         )?))
     }
 
-    #[tracing::instrument(level = "debug", fields(id = ?session.object_id, offset, content_length), skip_all)]
+    #[tracing::instrument(level = "debug", fields(?session, offset, content_length), skip_all)]
     async fn put_chunk(
         &self,
         session: &Session,
@@ -581,14 +581,14 @@ impl Backend for TieredStorage {
         Ok(UploadProgress::Complete)
     }
 
-    #[tracing::instrument(level = "debug", fields(id = ?session.object_id), skip_all)]
+    #[tracing::instrument(level = "debug", fields(?session), skip_all)]
     async fn upload_offset(&self, session: &Session) -> Result<UploadProgress> {
         let tiered = TieredResumableToken::decode(&session.backend_token)?;
         let inner_session = tiered.into_session(session);
         self.inner.long_term.upload_offset(&inner_session).await
     }
 
-    #[tracing::instrument(level = "debug", fields(id = ?session.object_id), skip_all)]
+    #[tracing::instrument(level = "debug", fields(?session), skip_all)]
     async fn cancel_upload(&self, session: &Session) -> Result<()> {
         let tiered = TieredResumableToken::decode(&session.backend_token)?;
         let inner_session = tiered.into_session(session);

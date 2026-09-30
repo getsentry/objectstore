@@ -330,7 +330,7 @@ impl Backend for LocalFsBackend {
 
     // In this backend, if all the bytes of a resumable upload have been written but publication failed,
     // an empty chunk or offset query will retry publication.
-    #[tracing::instrument(level = "debug", fields(id = ?session.object_id, offset, content_length), skip_all)]
+    #[tracing::instrument(level = "debug", fields(?session, offset, content_length), skip_all)]
     async fn put_chunk(
         &self,
         session: &Session,
@@ -381,13 +381,13 @@ impl Backend for LocalFsBackend {
         Ok(UploadProgress::Complete)
     }
 
-    #[tracing::instrument(level = "debug", fields(id = ?session.object_id), skip_all)]
+    #[tracing::instrument(level = "debug", fields(?session), skip_all)]
     async fn upload_offset(&self, session: &Session) -> Result<UploadProgress> {
         self.put_chunk(session, 0, 0, futures_util::stream::empty().boxed())
             .await
     }
 
-    #[tracing::instrument(level = "debug", fields(id = ?session.object_id), skip_all)]
+    #[tracing::instrument(level = "debug", fields(?session), skip_all)]
     async fn cancel_upload(&self, session: &Session) -> Result<()> {
         let upload_id =
             Uuid::parse_str(&session.backend_token).map_err(|_| ErrorKind::UnknownUploadSession)?;
