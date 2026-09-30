@@ -21,23 +21,26 @@ multer = { workspace = true }
 objectstore-types = { workspace = true }
 # Pinned below workspace version for MSRV compatibility
 reqwest = { version = "0.13.1", default-features = false, features = ["charset", "http2", "system-proxy", "json", "stream", "multipart", "query"] }
+rand = { workspace = true }
 sentry-core = { version = ">=0.41", default-features = false, features = ["client"] }
 serde = { workspace = true }
+tempfile = { workspace = true }
 thiserror = { workspace = true }
-tokio = { version = "1.45.0", default-features = false, features = ["fs"] }
+tokio = { version = "1.45.0", default-features = false, features = ["fs", "io-util", "time"] }
 tokio-util = { workspace = true, features = ["io"] }
 url = { workspace = true }
 zstd-safe = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }
+axum = { workspace = true }
 futures-util = { workspace = true }
 http-body-util = { workspace = true }
 jsonwebtoken = { workspace = true }
 objectstore-test = { workspace = true }
 serde = { workspace = true }
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "net", "rt", "sync"] }
 zstd = { workspace = true }
 
 [features]
