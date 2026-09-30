@@ -325,8 +325,7 @@ Backend session tokens remain private to the service. Before returning a token t
 [`StorageService`] places the canonical object path, declared upload length, and backend-defined
 token string in an authenticated envelope. Continuation, offset-query, and cancellation operations
 authenticate and open that envelope, reject an object-path mismatch, and pass the backend token
-back to the backend, which can decode it using a backend-specific convention. Chunk writes and
-offset queries also receive the unchanged upload length from the envelope. See
+back to the backend, which can decode it using a backend-specific convention. See
 [`Cipher`](encryption::Cipher) for the encryption format and key-rotation behavior.
 
 Not all backends support resumable uploads. A backend returns no session when it declines a
