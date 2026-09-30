@@ -2285,7 +2285,7 @@ mod tests {
                     &token,
                     0,
                     payload.len() as u64,
-                    stream::single(payload.to_vec())
+                    stream::single(payload.to_vec()),
                 )
                 .await
                 .unwrap(),

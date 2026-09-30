@@ -2011,7 +2011,7 @@ mod tests {
                     &token,
                     0,
                     single.len() as u64,
-                    stream::single(single.clone())
+                    stream::single(single.clone()),
                 )
                 .await?,
             UploadProgress::Complete
@@ -2053,7 +2053,7 @@ mod tests {
                     &token,
                     0,
                     RESUMABLE_CHUNK_SIZE as u64,
-                    stream::single(expected[..RESUMABLE_CHUNK_SIZE].to_vec())
+                    stream::single(expected[..RESUMABLE_CHUNK_SIZE].to_vec()),
                 )
                 .await?,
             UploadProgress::Incomplete {
@@ -2072,7 +2072,7 @@ mod tests {
                     &token,
                     RESUMABLE_CHUNK_SIZE as u64,
                     5,
-                    stream::single(b"final".to_vec())
+                    stream::single(b"final".to_vec()),
                 )
                 .await?,
             UploadProgress::Complete
@@ -2112,7 +2112,7 @@ mod tests {
                     &token,
                     (RESUMABLE_CHUNK_SIZE - 3) as u64,
                     6,
-                    stream::single(b"BADxyz".to_vec())
+                    stream::single(b"BADxyz".to_vec()),
                 )
                 .await?,
             UploadProgress::Complete
@@ -2234,7 +2234,12 @@ mod tests {
         .await?;
         assert!(matches!(
             backend
-                .put_chunk(&token, 0, data.len() as u64, stream::single(data.clone()))
+                .put_chunk(
+                    &token,
+                    0,
+                    data.len() as u64,
+                    stream::single(data.clone()),
+                )
                 .await,
             Err(error) if error.kind() == ErrorKind::BackendUnavailable
         ));
@@ -3250,7 +3255,7 @@ mod tests {
                     &token,
                     0,
                     payload.len() as u64,
-                    stream::single::<ClientError>(payload.clone())
+                    stream::single::<ClientError>(payload.clone()),
                 )
                 .await?,
             UploadProgress::Complete
@@ -3286,7 +3291,12 @@ mod tests {
 
         assert!(matches!(
             backend
-                .put_chunk(&token, 0, payload.len() as u64, stream::single::<ClientError>(payload.clone()))
+                .put_chunk(
+                    &token,
+                    0,
+                    payload.len() as u64,
+                    stream::single::<ClientError>(payload.clone()),
+                )
                 .await,
             Err(error) if error.kind() == ErrorKind::CorruptData
         ));
