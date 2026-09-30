@@ -307,17 +307,19 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
     }
 
     /// Intercepts [`Backend::put_chunk`]. Default delegates to `inner`.
+    #[allow(clippy::too_many_arguments)]
     async fn put_chunk(
         &self,
         inner: &InMemoryBackend,
         id: &ObjectId,
         token: &BackendToken,
+        total_length: NonZeroU64,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
     ) -> Result<UploadProgress> {
         inner
-            .put_chunk(id, token, offset, content_length, stream)
+            .put_chunk(id, token, total_length, offset, content_length, stream)
             .await
     }
 
@@ -327,8 +329,9 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         inner: &InMemoryBackend,
         id: &ObjectId,
         token: &BackendToken,
+        total_length: NonZeroU64,
     ) -> Result<UploadProgress> {
-        inner.upload_offset(id, token).await
+        inner.upload_offset(id, token, total_length).await
     }
 
     /// Intercepts [`Backend::cancel_upload`]. Default delegates to `inner`.
@@ -457,17 +460,33 @@ impl<H: Hooks> Backend for TestBackend<H> {
         &self,
         id: &ObjectId,
         token: &BackendToken,
+        total_length: NonZeroU64,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
     ) -> Result<UploadProgress> {
         self.hooks
-            .put_chunk(&self.inner, id, token, offset, content_length, stream)
+            .put_chunk(
+                &self.inner,
+                id,
+                token,
+                total_length,
+                offset,
+                content_length,
+                stream,
+            )
             .await
     }
 
-    async fn upload_offset(&self, id: &ObjectId, token: &BackendToken) -> Result<UploadProgress> {
-        self.hooks.upload_offset(&self.inner, id, token).await
+    async fn upload_offset(
+        &self,
+        id: &ObjectId,
+        token: &BackendToken,
+        total_length: NonZeroU64,
+    ) -> Result<UploadProgress> {
+        self.hooks
+            .upload_offset(&self.inner, id, token, total_length)
+            .await
     }
 
     async fn cancel_upload(&self, id: &ObjectId, token: &BackendToken) -> Result<()> {

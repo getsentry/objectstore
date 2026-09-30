@@ -30,7 +30,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
-use crate::resumable::{BackendToken, SessionToken};
+use crate::resumable::SessionToken;
 use crate::stream::{ClientStream, PayloadStream};
 use crate::streaming::StreamExecutor;
 
@@ -499,6 +499,7 @@ impl StorageService {
                     let session = cipher
                         .encrypt(&SessionToken {
                             object_id: id,
+                            total_length,
                             backend_token,
                         })
                         .map(EncryptedSessionToken::new)?;
@@ -512,11 +513,11 @@ impl StorageService {
         .await
     }
 
-    fn backend_token_for(
+    fn session_for(
         &self,
         expected_id: &ObjectId,
         token: EncryptedSessionToken,
-    ) -> Result<BackendToken> {
+    ) -> Result<SessionToken> {
         let session: SessionToken = self
             .cipher
             .decrypt(token.as_bytes())
@@ -524,7 +525,7 @@ impl StorageService {
         if session.object_id != *expected_id {
             return Err(ErrorKind::UnknownUploadSession.into());
         }
-        Ok(session.backend_token)
+        Ok(session)
     }
 
     /// Writes a chunk of `content_length` bytes at `offset` into an open session.
@@ -543,11 +544,18 @@ impl StorageService {
         content_length: u64,
         body: ClientStream,
     ) -> Result<UploadProgress> {
-        let session = self.backend_token_for(&id, token)?;
+        let session = self.session_for(&id, token)?;
         let inner = Arc::clone(&self.inner);
         self.spawn("put_chunk", async move {
             inner
-                .put_chunk(&id, &session, offset, content_length, body)
+                .put_chunk(
+                    &id,
+                    &session.backend_token,
+                    session.total_length,
+                    offset,
+                    content_length,
+                    body,
+                )
                 .await
         })
         .await
@@ -563,20 +571,22 @@ impl StorageService {
         id: ObjectId,
         token: EncryptedSessionToken,
     ) -> Result<UploadProgress> {
-        let session = self.backend_token_for(&id, token)?;
+        let session = self.session_for(&id, token)?;
         let inner = Arc::clone(&self.inner);
         self.spawn("upload_offset", async move {
-            inner.upload_offset(&id, &session).await
+            inner
+                .upload_offset(&id, &session.backend_token, session.total_length)
+                .await
         })
         .await
     }
 
     /// Cancels an upload session, discarding whatever was uploaded.
     pub async fn cancel_upload(&self, id: ObjectId, token: EncryptedSessionToken) -> Result<()> {
-        let session = self.backend_token_for(&id, token)?;
+        let session = self.session_for(&id, token)?;
         let inner = Arc::clone(&self.inner);
         self.spawn("cancel_upload", async move {
-            inner.cancel_upload(&id, &session).await
+            inner.cancel_upload(&id, &session.backend_token).await
         })
         .await
     }
@@ -604,6 +614,7 @@ mod tests {
     use crate::backend::testing::{Hooks, TestBackend};
     use crate::backend::tiered::TieredStorage;
     use crate::change_stream::ChangeStreamFactory;
+    use crate::resumable::BackendToken;
     use crate::stream::{self, ClientStream};
 
     #[derive(Clone, Debug, Default)]
@@ -632,7 +643,9 @@ mod tests {
             _inner: &InMemoryBackend,
             _id: &ObjectId,
             token: &BackendToken,
+            total_length: NonZeroU64,
         ) -> Result<UploadProgress> {
+            assert_eq!(total_length.get(), 4);
             self.seen_tokens.lock().unwrap().push(token.to_owned());
             Ok(UploadProgress::Incomplete { offset: 0 })
         }

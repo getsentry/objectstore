@@ -147,19 +147,25 @@ impl Backend for CountingBackend {
         &self,
         id: &ObjectId,
         token: &BackendToken,
+        total_length: NonZeroU64,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
     ) -> Result<UploadProgress> {
         count(&id.context.usecase);
         self.inner
-            .put_chunk(id, token, offset, content_length, stream)
+            .put_chunk(id, token, total_length, offset, content_length, stream)
             .await
     }
 
-    async fn upload_offset(&self, id: &ObjectId, token: &BackendToken) -> Result<UploadProgress> {
+    async fn upload_offset(
+        &self,
+        id: &ObjectId,
+        token: &BackendToken,
+        total_length: NonZeroU64,
+    ) -> Result<UploadProgress> {
         count(&id.context.usecase);
-        self.inner.upload_offset(id, token).await
+        self.inner.upload_offset(id, token, total_length).await
     }
 
     async fn cancel_upload(&self, id: &ObjectId, token: &BackendToken) -> Result<()> {

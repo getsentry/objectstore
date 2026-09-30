@@ -291,6 +291,9 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
 
     /// Writes a chunk of `content_length` bytes at `offset` into an open session.
     ///
+    /// `total_length` must match the length declared at session creation. The service recovers it
+    /// from the authenticated session token; composed backends forward it to their inner backend.
+    ///
     /// A backend may acknowledge fewer bytes than the chunk supplied, for example by persisting
     /// only an aligned prefix. Callers must continue from the authoritative offset in the returned
     /// [`UploadProgress`], or query [`Self::upload_offset`] after an ambiguous failure. A backend
@@ -311,23 +314,31 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
         &self,
         id: &ObjectId,
         token: &BackendToken,
+        total_length: NonZeroU64,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
     ) -> Result<UploadProgress> {
-        let _ = (id, token, offset, content_length, stream);
+        let _ = (id, token, total_length, offset, content_length, stream);
         Err(ErrorKind::Unsupported.into())
     }
 
     /// Reports how far the session has progressed.
+    ///
+    /// `total_length` must match the length declared at session creation, as for [`Self::put_chunk`].
     ///
     /// This can return [`UploadProgress::Complete`] repeatedly after the final chunk, including
     /// when its original response was lost. A composed backend may finish pending idempotent
     /// publication work before returning that terminal outcome.
     ///
     /// Returns [`ErrorKind::UnknownUploadSession`] when `token` does not identify a known session.
-    async fn upload_offset(&self, id: &ObjectId, token: &BackendToken) -> Result<UploadProgress> {
-        let _ = (id, token);
+    async fn upload_offset(
+        &self,
+        id: &ObjectId,
+        token: &BackendToken,
+        total_length: NonZeroU64,
+    ) -> Result<UploadProgress> {
+        let _ = (id, token, total_length);
         Err(ErrorKind::Unsupported.into())
     }
 

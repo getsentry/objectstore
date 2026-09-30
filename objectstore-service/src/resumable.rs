@@ -5,10 +5,12 @@
 //! [`crate::encryption::Cipher`] protects the serialized token before it is returned to the server.
 //!
 //! ```text
-//! Storage backend       | objectstore-service                         | objectstore-server             |
-//! BackendToken <------->| SessionToken ---------- Cipher ------------>| EncryptedSessionToken          |
-//! opaque backend state  | { ObjectId, BackendToken }                  | b64url encoded opaque envelope |
+//! Storage backend       | objectstore-service                          | objectstore-server             |
+//! BackendToken <------->| SessionToken ---------- Cipher ------------->| EncryptedSessionToken          |
+//! opaque backend state  | { ObjectId, total_length, BackendToken }     | b64url encoded opaque envelope |
 //! ```
+
+use std::num::NonZeroU64;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
@@ -29,6 +31,7 @@ pub(crate) struct SessionToken {
         deserialize_with = "deserialize_object_id"
     )]
     pub(crate) object_id: ObjectId,
+    pub(crate) total_length: NonZeroU64,
     pub(crate) backend_token: BackendToken,
 }
 
