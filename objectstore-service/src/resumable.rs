@@ -27,17 +27,16 @@ pub type BackendToken = String;
 /// Identifies a resumable upload and carries its declared length.
 ///
 /// The service encrypts this value before returning it to clients and authenticates it before
-/// passing it to backend continuation operations. Composed backends can derive an inner session
-/// by replacing the object ID and backend token while retaining the shared upload information.
+/// passing it to backend continuation operations.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Session {
-    /// Object being uploaded through the receiving backend.
+    /// The `ObjectID` this upload is tied to to.
     #[serde(
         serialize_with = "serialize_object_id",
         deserialize_with = "deserialize_object_id"
     )]
     pub object_id: ObjectId,
-    /// Total length declared when the upload was created.
+    /// Total length of the upload in bytes.
     pub upload_length: NonZeroU64,
     /// Opaque session state belonging to the receiving backend.
     pub backend_token: BackendToken,
