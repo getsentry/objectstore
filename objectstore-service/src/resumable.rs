@@ -7,7 +7,7 @@
 //! ```text
 //! Storage backend       | objectstore-service                          | objectstore-server             |
 //! BackendToken <------->| SessionToken ---------- Cipher ------------->| EncryptedSessionToken          |
-//! opaque backend state  | { ObjectId, total_length, BackendToken }     | b64url encoded opaque envelope |
+//! opaque backend state  | { ObjectId, upload_length, BackendToken }    | b64url encoded opaque envelope |
 //! ```
 
 use std::num::NonZeroU64;
@@ -31,7 +31,7 @@ pub(crate) struct SessionToken {
         deserialize_with = "deserialize_object_id"
     )]
     pub(crate) object_id: ObjectId,
-    pub(crate) total_length: NonZeroU64,
+    pub(crate) upload_length: NonZeroU64,
     pub(crate) backend_token: BackendToken,
 }
 

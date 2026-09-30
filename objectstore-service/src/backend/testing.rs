@@ -299,10 +299,10 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         inner: &InMemoryBackend,
         id: &ObjectId,
         metadata: &Metadata,
-        total_length: NonZeroU64,
+        upload_length: NonZeroU64,
     ) -> Result<Option<BackendToken>> {
         inner
-            .create_upload_session(id, metadata, total_length)
+            .create_upload_session(id, metadata, upload_length)
             .await
     }
 
@@ -313,13 +313,13 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         inner: &InMemoryBackend,
         id: &ObjectId,
         token: &BackendToken,
-        total_length: NonZeroU64,
+        upload_length: NonZeroU64,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
     ) -> Result<UploadProgress> {
         inner
-            .put_chunk(id, token, total_length, offset, content_length, stream)
+            .put_chunk(id, token, upload_length, offset, content_length, stream)
             .await
     }
 
@@ -329,9 +329,9 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         inner: &InMemoryBackend,
         id: &ObjectId,
         token: &BackendToken,
-        total_length: NonZeroU64,
+        upload_length: NonZeroU64,
     ) -> Result<UploadProgress> {
-        inner.upload_offset(id, token, total_length).await
+        inner.upload_offset(id, token, upload_length).await
     }
 
     /// Intercepts [`Backend::cancel_upload`]. Default delegates to `inner`.
@@ -449,10 +449,10 @@ impl<H: Hooks> Backend for TestBackend<H> {
         &self,
         id: &ObjectId,
         metadata: &Metadata,
-        total_length: NonZeroU64,
+        upload_length: NonZeroU64,
     ) -> Result<Option<BackendToken>> {
         self.hooks
-            .create_upload_session(&self.inner, id, metadata, total_length)
+            .create_upload_session(&self.inner, id, metadata, upload_length)
             .await
     }
 
@@ -460,7 +460,7 @@ impl<H: Hooks> Backend for TestBackend<H> {
         &self,
         id: &ObjectId,
         token: &BackendToken,
-        total_length: NonZeroU64,
+        upload_length: NonZeroU64,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
@@ -470,7 +470,7 @@ impl<H: Hooks> Backend for TestBackend<H> {
                 &self.inner,
                 id,
                 token,
-                total_length,
+                upload_length,
                 offset,
                 content_length,
                 stream,
@@ -482,10 +482,10 @@ impl<H: Hooks> Backend for TestBackend<H> {
         &self,
         id: &ObjectId,
         token: &BackendToken,
-        total_length: NonZeroU64,
+        upload_length: NonZeroU64,
     ) -> Result<UploadProgress> {
         self.hooks
-            .upload_offset(&self.inner, id, token, total_length)
+            .upload_offset(&self.inner, id, token, upload_length)
             .await
     }
 

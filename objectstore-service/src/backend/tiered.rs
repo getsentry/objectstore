@@ -417,14 +417,14 @@ impl Backend for TieredStorage {
         Ok(self)
     }
 
-    #[tracing::instrument(level = "debug", fields(?id, total_length), skip_all)]
+    #[tracing::instrument(level = "debug", fields(?id, upload_length), skip_all)]
     async fn create_upload_session(
         &self,
         id: &ObjectId,
         metadata: &Metadata,
-        total_length: NonZeroU64,
+        upload_length: NonZeroU64,
     ) -> Result<Option<BackendToken>> {
-        if total_length.get() <= BACKEND_SIZE_THRESHOLD as u64 {
+        if upload_length.get() <= BACKEND_SIZE_THRESHOLD as u64 {
             return Ok(None);
         }
 
@@ -432,7 +432,7 @@ impl Backend for TieredStorage {
         let Some(inner) = self
             .inner
             .long_term
-            .create_upload_session(&revision, metadata, total_length)
+            .create_upload_session(&revision, metadata, upload_length)
             .await?
         else {
             return Ok(None);
@@ -453,7 +453,7 @@ impl Backend for TieredStorage {
         &self,
         id: &ObjectId,
         token: &BackendToken,
-        total_length: NonZeroU64,
+        upload_length: NonZeroU64,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
@@ -465,15 +465,15 @@ impl Backend for TieredStorage {
         };
         let end = offset
             .checked_add(content_length)
-            .filter(|end| *end <= total_length.get())
+            .filter(|end| *end <= upload_length.get())
             .ok_or(ErrorKind::ChunkExceedsUploadLength {
                 offset,
                 content_length,
-                upload_length: total_length.get(),
+                upload_length: upload_length.get(),
             })?;
 
         let granularity = self.upload_granularity();
-        if content_length > 0 && content_length < granularity && end != total_length.get() {
+        if content_length > 0 && content_length < granularity && end != upload_length.get() {
             return Err(ErrorKind::ChunkTooSmall {
                 chunk_length: content_length,
                 upload_granularity: granularity,
@@ -482,14 +482,14 @@ impl Backend for TieredStorage {
         }
 
         // Non-final request; just forward the chunk.
-        if end != total_length.get() {
+        if end != upload_length.get() {
             let progress = self
                 .inner
                 .long_term
                 .put_chunk(
                     &revision,
                     &session.inner,
-                    total_length,
+                    upload_length,
                     offset,
                     content_length,
                     stream,
@@ -506,7 +506,7 @@ impl Backend for TieredStorage {
         // GCS returns `Complete` when the upload was completed successfully, even if the underlying
         // blob has been subsequently deleted, so the intention here is to prevent the creation of a
         // dangling tombstone in such cases.
-        match self.upload_offset(id, token, total_length).await? {
+        match self.upload_offset(id, token, upload_length).await? {
             UploadProgress::Complete => return Ok(UploadProgress::Complete),
             UploadProgress::Incomplete { offset: actual } if actual < offset => {
                 return Err(ErrorKind::UploadOffsetMismatch { offset: actual }.into());
@@ -545,7 +545,7 @@ impl Backend for TieredStorage {
             .put_chunk(
                 &revision,
                 &session.inner,
-                total_length,
+                upload_length,
                 offset,
                 content_length,
                 stream,
@@ -590,7 +590,7 @@ impl Backend for TieredStorage {
         &self,
         id: &ObjectId,
         token: &BackendToken,
-        total_length: NonZeroU64,
+        upload_length: NonZeroU64,
     ) -> Result<UploadProgress> {
         let session = TieredResumableToken::decode(token)?;
         let revision = ObjectId {
@@ -599,7 +599,7 @@ impl Backend for TieredStorage {
         };
         self.inner
             .long_term
-            .upload_offset(&revision, &session.inner, total_length)
+            .upload_offset(&revision, &session.inner, upload_length)
             .await
     }
 
@@ -1279,7 +1279,7 @@ mod tests {
         let (storage, _, _, _) = make_tiered_storage();
         let id = make_id("tiered-resumable-inmemory");
         let payload = vec![b'a'; BACKEND_SIZE_THRESHOLD + 1];
-        let total_length = NonZeroU64::new(payload.len() as u64).unwrap();
+        let upload_length = NonZeroU64::new(payload.len() as u64).unwrap();
         let token =
             resumable_token(&storage, &id, &Metadata::default(), payload.len() as u64).await;
 
@@ -1289,7 +1289,7 @@ mod tests {
                 .put_chunk(
                     &id,
                     &token,
-                    total_length,
+                    upload_length,
                     0,
                     payload.len() as u64,
                     stream::single(payload.clone())
@@ -1300,7 +1300,7 @@ mod tests {
         // InMemory consumes the session immediately.
         assert_eq!(
             storage
-                .upload_offset(&id, &token, total_length)
+                .upload_offset(&id, &token, upload_length)
                 .await
                 .unwrap_err()
                 .kind(),
@@ -1342,12 +1342,12 @@ mod tests {
         let storage = TieredStorage::new(Box::new(hv), Box::new(lt), Box::new(NoopChangeLog));
         let id = make_id(&format!("tiered-resumable-{}", uuid::Uuid::now_v7()));
         let payload = vec![b'a'; BACKEND_SIZE_THRESHOLD + 1];
-        let total_length = NonZeroU64::new(payload.len() as u64).unwrap();
+        let upload_length = NonZeroU64::new(payload.len() as u64).unwrap();
         let token =
             resumable_token(&storage, &id, &Metadata::default(), payload.len() as u64).await;
 
         let error = storage
-            .put_chunk(&id, &token, total_length, 0, 1, stream::single("a"))
+            .put_chunk(&id, &token, upload_length, 0, 1, stream::single("a"))
             .await
             .unwrap_err();
         assert_eq!(
@@ -1364,7 +1364,7 @@ mod tests {
                 .put_chunk(
                     &id,
                     &token,
-                    total_length,
+                    upload_length,
                     0,
                     payload.len() as u64,
                     stream::single(payload.clone())
@@ -1374,7 +1374,7 @@ mod tests {
         );
         // GCS still reports completion.
         assert_eq!(
-            storage.upload_offset(&id, &token, total_length).await?,
+            storage.upload_offset(&id, &token, upload_length).await?,
             UploadProgress::Complete
         );
         let (_, _, body) = storage
@@ -1390,13 +1390,13 @@ mod tests {
         let (storage, _, _, _) = make_tiered_storage();
         let id = make_id("resumable-invalid");
         let length = BACKEND_SIZE_THRESHOLD as u64 + 1;
-        let total_length = NonZeroU64::new(length).unwrap();
+        let upload_length = NonZeroU64::new(length).unwrap();
         let token = resumable_token(&storage, &id, &Metadata::default(), length).await;
 
         // Overflow and future offsets are rejected.
         assert_eq!(
             storage
-                .put_chunk(&id, &token, total_length, u64::MAX, 1, stream::single("x"))
+                .put_chunk(&id, &token, upload_length, u64::MAX, 1, stream::single("x"))
                 .await
                 .unwrap_err()
                 .kind(),
@@ -1411,7 +1411,7 @@ mod tests {
                 .put_chunk(
                     &id,
                     &token,
-                    total_length,
+                    upload_length,
                     length - 1,
                     1,
                     stream::single("x")
@@ -1427,7 +1427,7 @@ mod tests {
     async fn resumable_cancel() {
         let (storage, hv, _, _) = make_tiered_storage();
         let id = make_id("resumable-invalid");
-        let total_length = NonZeroU64::new(BACKEND_SIZE_THRESHOLD as u64 + 1).unwrap();
+        let upload_length = NonZeroU64::new(BACKEND_SIZE_THRESHOLD as u64 + 1).unwrap();
         let token = resumable_token(
             &storage,
             &id,
@@ -1440,7 +1440,7 @@ mod tests {
         storage.cancel_upload(&id, &token).await.unwrap();
         assert_eq!(
             storage
-                .upload_offset(&id, &token, total_length)
+                .upload_offset(&id, &token, upload_length)
                 .await
                 .unwrap_err()
                 .kind(),

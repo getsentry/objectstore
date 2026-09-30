@@ -283,9 +283,9 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
         &self,
         id: &ObjectId,
         metadata: &Metadata,
-        total_length: NonZeroU64,
+        upload_length: NonZeroU64,
     ) -> Result<Option<BackendToken>> {
-        let _ = (id, metadata, total_length);
+        let _ = (id, metadata, upload_length);
         Ok(None)
     }
 
@@ -311,12 +311,12 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
         &self,
         id: &ObjectId,
         token: &BackendToken,
-        total_length: NonZeroU64,
+        upload_length: NonZeroU64,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
     ) -> Result<UploadProgress> {
-        let _ = (id, token, total_length, offset, content_length, stream);
+        let _ = (id, token, upload_length, offset, content_length, stream);
         Err(ErrorKind::Unsupported.into())
     }
 
@@ -331,9 +331,9 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
         &self,
         id: &ObjectId,
         token: &BackendToken,
-        total_length: NonZeroU64,
+        upload_length: NonZeroU64,
     ) -> Result<UploadProgress> {
-        let _ = (id, token, total_length);
+        let _ = (id, token, upload_length);
         Err(ErrorKind::Unsupported.into())
     }
 

@@ -771,7 +771,7 @@ impl fmt::Debug for GcsBackend {
 }
 
 /// Converts GCS's inclusive `Range: bytes=0-N` acknowledgement into the next offset.
-fn range_header_to_offset(value: &str, total_length: NonZeroU64) -> Result<u64> {
+fn range_header_to_offset(value: &str, upload_length: NonZeroU64) -> Result<u64> {
     let end = value.strip_prefix("bytes=0-").ok_or_else(|| {
         Error::new(
             ErrorKind::Internal,
@@ -786,7 +786,7 @@ fn range_header_to_offset(value: &str, total_length: NonZeroU64) -> Result<u64> 
     let offset = end
         .checked_add(1)
         .ok_or_else(|| Error::new(ErrorKind::Internal, "GCS offset overflows u64"))?;
-    if offset > total_length.get() {
+    if offset > upload_length.get() {
         return Err(Error::new(
             ErrorKind::Internal,
             "GCS offset exceeds upload length",
@@ -800,7 +800,7 @@ fn range_header_to_offset(value: &str, total_length: NonZeroU64) -> Result<u64> 
 /// Returns the progress GCS reported, plus the completed object when this is the response that
 /// finished the upload.
 async fn range_response_to_upload_progress(
-    total_length: NonZeroU64,
+    upload_length: NonZeroU64,
     response: reqwest::Response,
 ) -> Result<GcsUploadProgress> {
     let status = response.status();
@@ -843,7 +843,7 @@ async fn range_response_to_upload_progress(
                             "invalid GCS resumable upload Range header",
                         )
                     })?;
-                    range_header_to_offset(range, total_length)?
+                    range_header_to_offset(range, upload_length)?
                 }
                 // GCS omits this header while it holds nothing
                 None => 0,
@@ -1151,7 +1151,7 @@ impl Backend for GcsBackend {
         &self,
         id: &ObjectId,
         metadata: &Metadata,
-        total_length: NonZeroU64,
+        upload_length: NonZeroU64,
     ) -> Result<Option<BackendToken>> {
         objectstore_log::debug!("Creating resumable upload session on GCS backend");
         let url = self.upload_url(id, "resumable")?;
@@ -1172,7 +1172,7 @@ impl Backend for GcsBackend {
                         .await?
                         .header(header::CONTENT_TYPE, "application/json")
                         .header("x-upload-content-type", content_type.as_ref())
-                        .header("x-upload-content-length", total_length.get())
+                        .header("x-upload-content-length", upload_length.get())
                         .body(metadata_json)
                         .send_traced()
                         .await
@@ -1219,7 +1219,7 @@ impl Backend for GcsBackend {
         &self,
         id: &ObjectId,
         token: &BackendToken,
-        total_length: NonZeroU64,
+        upload_length: NonZeroU64,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
@@ -1229,14 +1229,14 @@ impl Backend for GcsBackend {
 
         let end = offset
             .checked_add(content_length)
-            .filter(|end| *end <= total_length.get())
+            .filter(|end| *end <= upload_length.get())
             .ok_or(ErrorKind::ChunkExceedsUploadLength {
                 offset,
                 content_length,
-                upload_length: total_length.get(),
+                upload_length: upload_length.get(),
             })?;
         let granularity = self.upload_granularity();
-        if content_length > 0 && content_length < granularity && end != total_length.get() {
+        if content_length > 0 && content_length < granularity && end != upload_length.get() {
             return Err(ErrorKind::ChunkTooSmall {
                 chunk_length: content_length,
                 upload_granularity: granularity,
@@ -1246,8 +1246,8 @@ impl Backend for GcsBackend {
 
         let content_range = match content_length {
             // An empty chunk is equivalent to an offset query.
-            0 => format!("bytes */{}", total_length),
-            _ => format!("bytes {offset}-{}/{}", end - 1, total_length),
+            0 => format!("bytes */{}", upload_length),
+            _ => format!("bytes {offset}-{}/{}", end - 1, upload_length),
         };
 
         let response = self
@@ -1260,7 +1260,7 @@ impl Backend for GcsBackend {
             .await
             .reqwest_context("uploading a GCS resumable chunk")?;
 
-        let progress = range_response_to_upload_progress(total_length, response).await?;
+        let progress = range_response_to_upload_progress(upload_length, response).await?;
         if let GcsUploadProgress::Complete(ref object) = progress {
             let stored_size = object.size.as_deref().and_then(|size| size.parse().ok());
             let expires_at = object.custom_time.map(Rfc3339Timestamp::into_inner);
@@ -1274,7 +1274,7 @@ impl Backend for GcsBackend {
         &self,
         id: &ObjectId,
         token: &BackendToken,
-        total_length: NonZeroU64,
+        upload_length: NonZeroU64,
     ) -> Result<UploadProgress> {
         objectstore_log::debug!("Querying resumable upload offset on GCS backend");
         let session_uri = Url::parse(token).map_err(|_| ErrorKind::UnknownUploadSession)?;
@@ -1283,12 +1283,12 @@ impl Backend for GcsBackend {
             let response = self
                 .request(Method::PUT, session_uri.as_str())
                 .await?
-                .header(header::CONTENT_RANGE, format!("bytes */{}", total_length))
+                .header(header::CONTENT_RANGE, format!("bytes */{}", upload_length))
                 .send_traced()
                 .await
                 .reqwest_context("querying a GCS resumable upload")?;
 
-            let progress = range_response_to_upload_progress(total_length, response).await?;
+            let progress = range_response_to_upload_progress(upload_length, response).await?;
             // The final `put_chunk` may have persisted the object but failed while
             // reading its response, so completion observed here must be reported too.
             if let GcsUploadProgress::Complete(ref object) = progress {
@@ -1720,9 +1720,9 @@ mod tests {
             &self,
             id: &ObjectId,
             metadata: &Metadata,
-            total_length: NonZeroU64,
+            upload_length: NonZeroU64,
         ) -> Result<BackendToken> {
-            <Self as Backend>::create_upload_session(self, id, metadata, total_length)
+            <Self as Backend>::create_upload_session(self, id, metadata, upload_length)
                 .await?
                 .ok_or_else(|| Error::from(ErrorKind::Unsupported).into())
         }
@@ -1934,9 +1934,9 @@ mod tests {
     async fn test_resumable_empty_chunk_reports_offset_without_writing() -> Result<()> {
         let backend = create_test_backend().await?;
         let id = make_id_with_key("resumable-empty-chunk");
-        let total_length = 2 * (RESUMABLE_CHUNK_SIZE + 2);
+        let upload_length = 2 * (RESUMABLE_CHUNK_SIZE + 2);
         let token = backend
-            .create_upload_session(&id, &Metadata::default(), nonzero(total_length as u64))
+            .create_upload_session(&id, &Metadata::default(), nonzero(upload_length as u64))
             .await?;
 
         // An empty chunk cannot advance a session that still expects bytes. It reports the
@@ -1946,7 +1946,7 @@ mod tests {
                 .put_chunk(
                     &id,
                     &token,
-                    nonzero(total_length as u64),
+                    nonzero(upload_length as u64),
                     0,
                     0,
                     stream::single(Vec::new())
@@ -1961,7 +1961,7 @@ mod tests {
             .put_chunk(
                 &id,
                 &token,
-                nonzero(total_length as u64),
+                nonzero(upload_length as u64),
                 0,
                 chunk_length as u64,
                 stream::single(vec![b'a'; chunk_length]),
@@ -1979,7 +1979,7 @@ mod tests {
                 .put_chunk(
                     &id,
                     &token,
-                    nonzero(total_length as u64),
+                    nonzero(upload_length as u64),
                     chunk_length as u64,
                     0,
                     stream::single(Vec::new()),
@@ -1989,7 +1989,7 @@ mod tests {
         );
         assert_eq!(
             backend
-                .upload_offset(&id, &token, nonzero(total_length as u64))
+                .upload_offset(&id, &token, nonzero(upload_length as u64))
                 .await?,
             after_write
         );
@@ -2110,9 +2110,9 @@ mod tests {
     async fn test_resumable_unaligned_chunk_and_rewind_preserve_persisted_bytes() -> Result<()> {
         let backend = create_test_backend().await?;
         let id = make_id_with_key("resumable-rewind");
-        let total_length = RESUMABLE_CHUNK_SIZE + 3;
+        let upload_length = RESUMABLE_CHUNK_SIZE + 3;
         let token = backend
-            .create_upload_session(&id, &Metadata::default(), nonzero(total_length as u64))
+            .create_upload_session(&id, &Metadata::default(), nonzero(upload_length as u64))
             .await?;
 
         let prefix = vec![b'a'; RESUMABLE_CHUNK_SIZE];
@@ -2121,7 +2121,7 @@ mod tests {
                 .put_chunk(
                     &id,
                     &token,
-                    nonzero(total_length as u64),
+                    nonzero(upload_length as u64),
                     0,
                     prefix.len() as u64,
                     stream::single(prefix),
@@ -2139,7 +2139,7 @@ mod tests {
                 .put_chunk(
                     &id,
                     &token,
-                    nonzero(total_length as u64),
+                    nonzero(upload_length as u64),
                     (RESUMABLE_CHUNK_SIZE - 3) as u64,
                     6,
                     stream::single(b"BADxyz".to_vec()),

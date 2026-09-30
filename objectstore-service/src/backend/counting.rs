@@ -135,11 +135,11 @@ impl Backend for CountingBackend {
         &self,
         id: &ObjectId,
         metadata: &Metadata,
-        total_length: NonZeroU64,
+        upload_length: NonZeroU64,
     ) -> Result<Option<BackendToken>> {
         count(&id.context.usecase);
         self.inner
-            .create_upload_session(id, metadata, total_length)
+            .create_upload_session(id, metadata, upload_length)
             .await
     }
 
@@ -147,14 +147,14 @@ impl Backend for CountingBackend {
         &self,
         id: &ObjectId,
         token: &BackendToken,
-        total_length: NonZeroU64,
+        upload_length: NonZeroU64,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
     ) -> Result<UploadProgress> {
         count(&id.context.usecase);
         self.inner
-            .put_chunk(id, token, total_length, offset, content_length, stream)
+            .put_chunk(id, token, upload_length, offset, content_length, stream)
             .await
     }
 
@@ -162,10 +162,10 @@ impl Backend for CountingBackend {
         &self,
         id: &ObjectId,
         token: &BackendToken,
-        total_length: NonZeroU64,
+        upload_length: NonZeroU64,
     ) -> Result<UploadProgress> {
         count(&id.context.usecase);
-        self.inner.upload_offset(id, token, total_length).await
+        self.inner.upload_offset(id, token, upload_length).await
     }
 
     async fn cancel_upload(&self, id: &ObjectId, token: &BackendToken) -> Result<()> {

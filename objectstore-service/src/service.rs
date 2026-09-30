@@ -474,7 +474,7 @@ impl StorageService {
 
     // --- Resumable upload operations ---
 
-    /// Opens a resumable upload session for an object of `total_length` bytes.
+    /// Opens a resumable upload session for an object of `upload_length` bytes.
     ///
     /// Returns `Ok(None)` for zero-length objects or when the backend declines resumable uploads
     /// for this object, in which case the caller should fall back to [`Self::insert_object`].
@@ -482,9 +482,9 @@ impl StorageService {
         &self,
         id: ObjectId,
         metadata: Metadata,
-        total_length: u64,
+        upload_length: u64,
     ) -> Result<Option<CreateUploadSessionResponse>> {
-        let Some(total_length) = NonZeroU64::new(total_length) else {
+        let Some(upload_length) = NonZeroU64::new(upload_length) else {
             return Ok(None);
         };
         metadata.validate().kind(ErrorKind::InvalidMetadata)?;
@@ -492,14 +492,14 @@ impl StorageService {
         let cipher = Arc::clone(&self.cipher);
         self.spawn("create_upload_session", async move {
             let session = inner
-                .create_upload_session(&id, &metadata, total_length)
+                .create_upload_session(&id, &metadata, upload_length)
                 .await?;
             session
                 .map(|backend_token| {
                     let session = cipher
                         .encrypt(&SessionToken {
                             object_id: id,
-                            total_length,
+                            upload_length,
                             backend_token,
                         })
                         .map(EncryptedSessionToken::new)?;
@@ -551,7 +551,7 @@ impl StorageService {
                 .put_chunk(
                     &id,
                     &session.backend_token,
-                    session.total_length,
+                    session.upload_length,
                     offset,
                     content_length,
                     body,
@@ -575,7 +575,7 @@ impl StorageService {
         let inner = Arc::clone(&self.inner);
         self.spawn("upload_offset", async move {
             inner
-                .upload_offset(&id, &session.backend_token, session.total_length)
+                .upload_offset(&id, &session.backend_token, session.upload_length)
                 .await
         })
         .await
@@ -633,7 +633,7 @@ mod tests {
             _inner: &InMemoryBackend,
             _id: &ObjectId,
             _metadata: &Metadata,
-            _total_length: NonZeroU64,
+            _upload_length: NonZeroU64,
         ) -> Result<Option<BackendToken>> {
             Ok(Some("backend token".to_owned()))
         }
@@ -643,9 +643,9 @@ mod tests {
             _inner: &InMemoryBackend,
             _id: &ObjectId,
             token: &BackendToken,
-            total_length: NonZeroU64,
+            upload_length: NonZeroU64,
         ) -> Result<UploadProgress> {
-            assert_eq!(total_length.get(), 4);
+            assert_eq!(upload_length.get(), 4);
             self.seen_tokens.lock().unwrap().push(token.to_owned());
             Ok(UploadProgress::Incomplete { offset: 0 })
         }
