@@ -202,7 +202,7 @@ async fn upload_large_object(session: &Session, object: Bytes) -> Result<()> {
             Ok(UploadProgress::Complete) => return Ok(()),
             Ok(UploadProgress::Incomplete { offset: next }) => next,
             Err(Error::UploadOffsetMismatch { offset: next }) => next,
-            Err(err) => return err.into(),
+            Err(err) => return Err(err.into()),
         };
     }
 }
