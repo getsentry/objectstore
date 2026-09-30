@@ -50,7 +50,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, Part, PartNumber, UploadId, UploadPartResponse,
 };
-use crate::resumable::BackendToken;
+use crate::resumable::{BackendToken, SessionToken};
 use crate::stream::{self, ClientStream};
 
 /// Options for owner-only files on Unix, further restricted by umask.
@@ -330,26 +330,25 @@ impl Backend for LocalFsBackend {
 
     // In this backend, if all the bytes of a resumable upload have been written but publication failed,
     // an empty chunk or offset query will retry publication.
-    #[tracing::instrument(level = "debug", fields(?id, offset, content_length), skip_all)]
+    #[tracing::instrument(level = "debug", fields(id = ?session.object_id, offset, content_length), skip_all)]
     async fn put_chunk(
         &self,
-        id: &ObjectId,
-        token: &BackendToken,
-        upload_length: NonZeroU64,
+        session: &SessionToken,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
     ) -> Result<UploadProgress> {
-        let upload_id = Uuid::parse_str(token).map_err(|_| ErrorKind::UnknownUploadSession)?;
+        let upload_id =
+            Uuid::parse_str(&session.backend_token).map_err(|_| ErrorKind::UnknownUploadSession)?;
         offset
             .checked_add(content_length)
-            .filter(|end| *end <= upload_length.get())
+            .filter(|end| *end <= session.upload_length.get())
             .ok_or(ErrorKind::ChunkExceedsUploadLength {
                 offset,
                 content_length,
-                upload_length: upload_length.get(),
+                upload_length: session.upload_length.get(),
             })?;
-        let _guard = self.locks.acquire(id).await?;
+        let _guard = self.locks.acquire(&session.object_id).await?;
 
         let upload_path = self.upload_path(upload_id);
         let mut upload = UploadFile::open(&upload_path).await?;
@@ -363,13 +362,13 @@ impl Backend for LocalFsBackend {
         let reader = StreamReader::new(stream).take(content_length);
         let persisted_offset = upload.append(reader).await?;
 
-        if persisted_offset != upload_length.get() {
+        if persisted_offset != session.upload_length.get() {
             return Ok(UploadProgress::Incomplete {
                 offset: persisted_offset,
             });
         }
 
-        let object_path = self.path(id);
+        let object_path = self.path(&session.object_id);
         create_directories(object_path.parent().unwrap())
             .await
             .context(
@@ -377,32 +376,22 @@ impl Backend for LocalFsBackend {
                 "creating local-fs object directory",
             )?;
         let (stored_size, expires_at) = upload.publish(object_path).await?;
-        self.change_stream.write(id, stored_size, expires_at);
+        self.change_stream
+            .write(&session.object_id, stored_size, expires_at);
         Ok(UploadProgress::Complete)
     }
 
-    #[tracing::instrument(level = "debug", fields(?id), skip_all)]
-    async fn upload_offset(
-        &self,
-        id: &ObjectId,
-        token: &BackendToken,
-        upload_length: NonZeroU64,
-    ) -> Result<UploadProgress> {
-        self.put_chunk(
-            id,
-            token,
-            upload_length,
-            0,
-            0,
-            futures_util::stream::empty().boxed(),
-        )
-        .await
+    #[tracing::instrument(level = "debug", fields(id = ?session.object_id), skip_all)]
+    async fn upload_offset(&self, session: &SessionToken) -> Result<UploadProgress> {
+        self.put_chunk(session, 0, 0, futures_util::stream::empty().boxed())
+            .await
     }
 
-    #[tracing::instrument(level = "debug", fields(?id), skip_all)]
-    async fn cancel_upload(&self, id: &ObjectId, token: &BackendToken) -> Result<()> {
-        let upload_id = Uuid::parse_str(token).map_err(|_| ErrorKind::UnknownUploadSession)?;
-        let _guard = self.locks.acquire(id).await?;
+    #[tracing::instrument(level = "debug", fields(id = ?session.object_id), skip_all)]
+    async fn cancel_upload(&self, session: &SessionToken) -> Result<()> {
+        let upload_id =
+            Uuid::parse_str(&session.backend_token).map_err(|_| ErrorKind::UnknownUploadSession)?;
+        let _guard = self.locks.acquire(&session.object_id).await?;
         let path = self.upload_path(upload_id);
         match tokio::fs::remove_file(&path).await {
             Ok(()) => Ok(()),
@@ -1137,12 +1126,17 @@ mod tests {
     use crate::id::ObjectContext;
     use crate::stream;
 
-    async fn upload_token(backend: &LocalFsBackend, id: &ObjectId, length: u64) -> BackendToken {
-        backend
+    async fn upload_token(backend: &LocalFsBackend, id: &ObjectId, length: u64) -> SessionToken {
+        let backend_token = backend
             .create_upload_session(id, &Metadata::default(), NonZeroU64::new(length).unwrap())
             .await
             .unwrap()
-            .unwrap()
+            .unwrap();
+        SessionToken {
+            object_id: id.clone(),
+            upload_length: NonZeroU64::new(length).unwrap(),
+            backend_token,
+        }
     }
 
     #[tokio::test]
@@ -1161,7 +1155,12 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let upload_id = Uuid::parse_str(&token).unwrap();
+        let token = SessionToken {
+            object_id: id.clone(),
+            upload_length,
+            backend_token: token,
+        };
+        let upload_id = Uuid::parse_str(&token.backend_token).unwrap();
         let upload_path = backend.upload_path(upload_id);
         assert_eq!(
             upload_path.parent().unwrap().file_name().unwrap(),
@@ -1171,45 +1170,39 @@ mod tests {
 
         // Upload the first chunk and verify that only the session advances.
         assert_eq!(
+            backend.upload_offset(&token).await.unwrap(),
+            UploadProgress::Incomplete { offset: 0 }
+        );
+        assert_eq!(
             backend
-                .upload_offset(&id, &token, upload_length)
+                .put_chunk(&token, 2, 0, stream::single(""))
                 .await
                 .unwrap(),
             UploadProgress::Incomplete { offset: 0 }
         );
         assert_eq!(
             backend
-                .put_chunk(&id, &token, upload_length, 2, 0, stream::single(""))
-                .await
-                .unwrap(),
-            UploadProgress::Incomplete { offset: 0 }
-        );
-        assert_eq!(
-            backend
-                .put_chunk(&id, &token, upload_length, 0, 3, stream::single("abc"))
+                .put_chunk(&token, 0, 3, stream::single("abc"))
                 .await
                 .unwrap(),
             UploadProgress::Incomplete { offset: 3 }
         );
         assert!(!backend.path(&id).exists());
         assert_eq!(
-            backend
-                .upload_offset(&id, &token, upload_length)
-                .await
-                .unwrap(),
+            backend.upload_offset(&token).await.unwrap(),
             UploadProgress::Incomplete { offset: 3 }
         );
 
         // Zero-length chunks report current progress, while stale non-empty offsets fail.
         assert_eq!(
             backend
-                .put_chunk(&id, &token, upload_length, 0, 0, stream::single(""))
+                .put_chunk(&token, 0, 0, stream::single(""))
                 .await
                 .unwrap(),
             UploadProgress::Incomplete { offset: 3 }
         );
         let error = backend
-            .put_chunk(&id, &token, upload_length, 0, 3, stream::single("abc"))
+            .put_chunk(&token, 0, 3, stream::single("abc"))
             .await
             .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::UploadOffsetMismatch { offset: 3 });
@@ -1217,7 +1210,7 @@ mod tests {
         // Upload the final chunk and verify atomic publication removes the session.
         assert_eq!(
             backend
-                .put_chunk(&id, &token, upload_length, 3, 3, stream::single("def"))
+                .put_chunk(&token, 3, 3, stream::single("def"))
                 .await
                 .unwrap(),
             UploadProgress::Complete
@@ -1231,11 +1224,7 @@ mod tests {
         assert_eq!(stored_metadata.content_type, metadata.content_type);
         assert_eq!(stream::read_to_vec(payload).await.unwrap(), b"abcdef");
         assert_eq!(
-            backend
-                .upload_offset(&id, &token, upload_length)
-                .await
-                .unwrap_err()
-                .kind(),
+            backend.upload_offset(&token).await.unwrap_err().kind(),
             ErrorKind::UnknownUploadSession
         );
     }
@@ -1245,25 +1234,22 @@ mod tests {
         for query_offset in [false, true] {
             let (_tempdir, backend) = make_backend();
             let id = make_id();
-            let upload_length = NonZeroU64::new(4).unwrap();
             let token = upload_token(&backend, &id, 4).await;
             let object_path = backend.path(&id);
 
             // A directory at the destination prevents rename after all bytes are persisted.
             tokio::fs::create_dir_all(&object_path).await.unwrap();
             let error = backend
-                .put_chunk(&id, &token, upload_length, 0, 4, stream::single("data"))
+                .put_chunk(&token, 0, 4, stream::single("data"))
                 .await
                 .unwrap_err();
             assert_eq!(error.kind(), ErrorKind::BackendFailure);
             tokio::fs::remove_dir(&object_path).await.unwrap();
 
             let progress = if query_offset {
-                backend.upload_offset(&id, &token, upload_length).await
+                backend.upload_offset(&token).await
             } else {
-                backend
-                    .put_chunk(&id, &token, upload_length, 4, 0, stream::single(""))
-                    .await
+                backend.put_chunk(&token, 4, 0, stream::single("")).await
             };
             assert_eq!(progress.unwrap(), UploadProgress::Complete);
             let (_, _, payload) = backend
@@ -1273,11 +1259,7 @@ mod tests {
                 .unwrap();
             assert_eq!(stream::read_to_vec(payload).await.unwrap(), b"data");
             assert_eq!(
-                backend
-                    .upload_offset(&id, &token, upload_length)
-                    .await
-                    .unwrap_err()
-                    .kind(),
+                backend.upload_offset(&token).await.unwrap_err().kind(),
                 ErrorKind::UnknownUploadSession
             );
         }
@@ -1287,12 +1269,11 @@ mod tests {
     async fn failed_resumable_chunk_preserves_partial_progress() {
         let (_tempdir, backend) = make_backend();
         let id = make_id();
-        let upload_length = NonZeroU64::new(4).unwrap();
         let token = upload_token(&backend, &id, 4).await;
 
         // Persist a prefix, then disconnect after writing one byte of the next chunk.
         backend
-            .put_chunk(&id, &token, upload_length, 0, 2, stream::single("ab"))
+            .put_chunk(&token, 0, 2, stream::single("ab"))
             .await
             .unwrap();
         let broken = futures_stream::iter([
@@ -1302,23 +1283,17 @@ mod tests {
             ))),
         ])
         .boxed();
-        let error = backend
-            .put_chunk(&id, &token, upload_length, 2, 2, broken)
-            .await
-            .unwrap_err();
+        let error = backend.put_chunk(&token, 2, 2, broken).await.unwrap_err();
         assert_eq!(error.kind(), ErrorKind::ClientStream);
 
         // Resume from the partial byte and verify the complete object.
         assert_eq!(
-            backend
-                .upload_offset(&id, &token, upload_length)
-                .await
-                .unwrap(),
+            backend.upload_offset(&token).await.unwrap(),
             UploadProgress::Incomplete { offset: 3 }
         );
         assert_eq!(
             backend
-                .put_chunk(&id, &token, upload_length, 3, 1, stream::single("d"))
+                .put_chunk(&token, 3, 1, stream::single("d"))
                 .await
                 .unwrap(),
             UploadProgress::Complete
@@ -1335,15 +1310,14 @@ mod tests {
     async fn concurrent_uploads_for_same_object_do_not_deadlock() {
         let (_tempdir, backend) = make_backend();
         let id = make_id();
-        let upload_length = NonZeroU64::new(3).unwrap();
         let first = upload_token(&backend, &id, 3).await;
         let second = upload_token(&backend, &id, 3).await;
 
         // Complete both sessions concurrently through their shared object lock.
         let writes = async {
             tokio::join!(
-                backend.put_chunk(&id, &first, upload_length, 0, 3, stream::single("one")),
-                backend.put_chunk(&id, &second, upload_length, 0, 3, stream::single("two")),
+                backend.put_chunk(&first, 0, 3, stream::single("one")),
+                backend.put_chunk(&second, 0, 3, stream::single("two")),
             )
         };
         let (first_result, second_result) = tokio::time::timeout(Duration::from_secs(2), writes)
@@ -2295,6 +2269,11 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        let token = SessionToken {
+            object_id: id.clone(),
+            upload_length,
+            backend_token: token,
+        };
 
         // Session creation alone does not report a stored object.
         assert!(producer.records().is_empty());
@@ -2303,12 +2282,10 @@ mod tests {
         assert_eq!(
             backend
                 .put_chunk(
-                    &id,
                     &token,
-                    upload_length,
                     0,
                     payload.len() as u64,
-                    stream::single(payload.to_vec()),
+                    stream::single(payload.to_vec())
                 )
                 .await
                 .unwrap(),

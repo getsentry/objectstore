@@ -17,7 +17,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
-use crate::resumable::BackendToken;
+use crate::resumable::{BackendToken, SessionToken};
 use crate::stream::{ClientStream, PayloadStream};
 
 /// User agent string used for outgoing requests.
@@ -291,8 +291,8 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
 
     /// Writes a chunk of `content_length` bytes at `offset` into an open session.
     ///
-    /// The caller must pass the `upload_length` declared when the session was created.
-    /// [`StorageService`](crate::StorageService) retrieves it from the authenticated session token.
+    /// The session identifies the upload and carries its declared length.
+    /// [`StorageService`](crate::StorageService) authenticates it before passing it to the backend.
     ///
     /// A backend may acknowledge fewer bytes than the chunk supplied, for example by persisting
     /// only an aligned prefix. Callers must continue from the authoritative offset in the returned
@@ -306,48 +306,41 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// A `content_length` of zero is valid. It writes nothing and reports the offset the backend
     /// holds.
     ///
-    /// Returns [`ErrorKind::UnknownUploadSession`] when `token` does not identify an open session,
+    /// Returns [`ErrorKind::UnknownUploadSession`] when `session` does not identify an open session,
     /// and [`ErrorKind::ChunkExceedsUploadLength`] when the chunk would exceed the total length
     /// declared when the session was created. Returns [`ErrorKind::ChunkTooSmall`] when a non-empty,
     /// non-final chunk is shorter than the upload granularity.
     async fn put_chunk(
         &self,
-        id: &ObjectId,
-        token: &BackendToken,
-        upload_length: NonZeroU64,
+        session: &SessionToken,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
     ) -> Result<UploadProgress> {
-        let _ = (id, token, upload_length, offset, content_length, stream);
+        let _ = (session, offset, content_length, stream);
         Err(ErrorKind::Unsupported.into())
     }
 
     /// Reports how far the session has progressed.
     ///
-    /// The caller must pass the `upload_length` declared when the session was created.
-    /// [`StorageService`](crate::StorageService) retrieves it from the authenticated session token.
+    /// The session identifies the upload and carries its declared length.
+    /// [`StorageService`](crate::StorageService) authenticates it before passing it to the backend.
     ///
     /// This can return [`UploadProgress::Complete`] repeatedly after the final chunk, including
     /// when its original response was lost. A composed backend may finish pending idempotent
     /// publication work before returning that terminal outcome.
     ///
-    /// Returns [`ErrorKind::UnknownUploadSession`] when `token` does not identify a known session.
-    async fn upload_offset(
-        &self,
-        id: &ObjectId,
-        token: &BackendToken,
-        upload_length: NonZeroU64,
-    ) -> Result<UploadProgress> {
-        let _ = (id, token, upload_length);
+    /// Returns [`ErrorKind::UnknownUploadSession`] when `session` does not identify a known session.
+    async fn upload_offset(&self, session: &SessionToken) -> Result<UploadProgress> {
+        let _ = session;
         Err(ErrorKind::Unsupported.into())
     }
 
     /// Cancels an upload session, discarding whatever was uploaded.
     ///
-    /// Returns [`ErrorKind::UnknownUploadSession`] when `token` does not identify an open session.
-    async fn cancel_upload(&self, id: &ObjectId, token: &BackendToken) -> Result<()> {
-        let _ = (id, token);
+    /// Returns [`ErrorKind::UnknownUploadSession`] when `session` does not identify an open session.
+    async fn cancel_upload(&self, session: &SessionToken) -> Result<()> {
+        let _ = session;
         Err(ErrorKind::Unsupported.into())
     }
 }

@@ -32,7 +32,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
-use crate::resumable::BackendToken;
+use crate::resumable::{BackendToken, SessionToken};
 use crate::stream::ClientStream;
 
 /// Increments `cogs.usage` by one operation for the given `usecase`.
@@ -145,32 +145,25 @@ impl Backend for CountingBackend {
 
     async fn put_chunk(
         &self,
-        id: &ObjectId,
-        token: &BackendToken,
-        upload_length: NonZeroU64,
+        session: &SessionToken,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
     ) -> Result<UploadProgress> {
-        count(&id.context.usecase);
+        count(&session.object_id.context.usecase);
         self.inner
-            .put_chunk(id, token, upload_length, offset, content_length, stream)
+            .put_chunk(session, offset, content_length, stream)
             .await
     }
 
-    async fn upload_offset(
-        &self,
-        id: &ObjectId,
-        token: &BackendToken,
-        upload_length: NonZeroU64,
-    ) -> Result<UploadProgress> {
-        count(&id.context.usecase);
-        self.inner.upload_offset(id, token, upload_length).await
+    async fn upload_offset(&self, session: &SessionToken) -> Result<UploadProgress> {
+        count(&session.object_id.context.usecase);
+        self.inner.upload_offset(session).await
     }
 
-    async fn cancel_upload(&self, id: &ObjectId, token: &BackendToken) -> Result<()> {
-        count(&id.context.usecase);
-        self.inner.cancel_upload(id, token).await
+    async fn cancel_upload(&self, session: &SessionToken) -> Result<()> {
+        count(&session.object_id.context.usecase);
+        self.inner.cancel_upload(session).await
     }
 }
 

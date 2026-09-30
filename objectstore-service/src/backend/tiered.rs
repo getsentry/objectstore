@@ -131,7 +131,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
-use crate::resumable::BackendToken;
+use crate::resumable::{BackendToken, SessionToken};
 use crate::stream::{ClientStream, SizedPeek, counting_stream};
 
 /// The threshold up until which we will go to the "high volume" backend.
@@ -401,6 +401,17 @@ impl TieredResumableToken {
     fn decode(token: &BackendToken) -> Result<Self> {
         serde_json::from_str(token).map_err(|_| ErrorKind::UnknownUploadSession.into())
     }
+
+    fn into_session(self, session: &SessionToken) -> SessionToken {
+        SessionToken {
+            object_id: ObjectId {
+                context: session.object_id.context.clone(),
+                key: self.revision,
+            },
+            backend_token: self.inner,
+            ..session.clone()
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -448,32 +459,31 @@ impl Backend for TieredStorage {
         )?))
     }
 
-    #[tracing::instrument(level = "debug", fields(?id, offset, content_length), skip_all)]
+    #[tracing::instrument(level = "debug", fields(id = ?session.object_id, offset, content_length), skip_all)]
     async fn put_chunk(
         &self,
-        id: &ObjectId,
-        token: &BackendToken,
-        upload_length: NonZeroU64,
+        session: &SessionToken,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
     ) -> Result<UploadProgress> {
-        let session = TieredResumableToken::decode(token)?;
-        let revision = ObjectId {
-            context: id.context.clone(),
-            key: session.revision.clone(),
-        };
+        let tiered = TieredResumableToken::decode(&session.backend_token)?;
+        let time_expires = tiered.time_expires;
+        let inner_session = tiered.into_session(session);
+        let id = &session.object_id;
+        let revision = &inner_session.object_id;
         let end = offset
             .checked_add(content_length)
-            .filter(|end| *end <= upload_length.get())
+            .filter(|end| *end <= session.upload_length.get())
             .ok_or(ErrorKind::ChunkExceedsUploadLength {
                 offset,
                 content_length,
-                upload_length: upload_length.get(),
+                upload_length: session.upload_length.get(),
             })?;
 
         let granularity = self.upload_granularity();
-        if content_length > 0 && content_length < granularity && end != upload_length.get() {
+        if content_length > 0 && content_length < granularity && end != session.upload_length.get()
+        {
             return Err(ErrorKind::ChunkTooSmall {
                 chunk_length: content_length,
                 upload_granularity: granularity,
@@ -482,18 +492,11 @@ impl Backend for TieredStorage {
         }
 
         // Non-final request; just forward the chunk.
-        if end != upload_length.get() {
+        if end != session.upload_length.get() {
             let progress = self
                 .inner
                 .long_term
-                .put_chunk(
-                    &revision,
-                    &session.inner,
-                    upload_length,
-                    offset,
-                    content_length,
-                    stream,
-                )
+                .put_chunk(&inner_session, offset, content_length, stream)
                 .await?;
             return match progress {
                 UploadProgress::Incomplete { .. } => Ok(progress),
@@ -506,7 +509,7 @@ impl Backend for TieredStorage {
         // GCS returns `Complete` when the upload was completed successfully, even if the underlying
         // blob has been subsequently deleted, so the intention here is to prevent the creation of a
         // dangling tombstone in such cases.
-        match self.upload_offset(id, token, upload_length).await? {
+        match self.upload_offset(session).await? {
             UploadProgress::Complete => return Ok(UploadProgress::Complete),
             UploadProgress::Incomplete { offset: actual } if actual < offset => {
                 return Err(ErrorKind::UploadOffsetMismatch { offset: actual }.into());
@@ -521,7 +524,7 @@ impl Backend for TieredStorage {
             .get_tiered_metadata(id, Timestamp::now())
             .await?
         {
-            TieredMetadata::Tombstone(t) if t.target == revision => {
+            TieredMetadata::Tombstone(t) if t.target == *revision => {
                 return Ok(UploadProgress::Complete);
             }
             TieredMetadata::Tombstone(t) => Some(t.target),
@@ -542,14 +545,7 @@ impl Backend for TieredStorage {
         let progress = self
             .inner
             .long_term
-            .put_chunk(
-                &revision,
-                &session.inner,
-                upload_length,
-                offset,
-                content_length,
-                stream,
-            )
+            .put_chunk(&inner_session, offset, content_length, stream)
             .await?;
         if progress != UploadProgress::Complete {
             return Ok(progress);
@@ -575,8 +571,8 @@ impl Backend for TieredStorage {
                 id,
                 current.as_ref(),
                 TieredWrite::Tombstone(Tombstone {
-                    target: revision,
-                    time_expires: session.time_expires,
+                    target: revision.clone(),
+                    time_expires,
                 }),
                 Timestamp::now(),
             )
@@ -585,35 +581,18 @@ impl Backend for TieredStorage {
         Ok(UploadProgress::Complete)
     }
 
-    #[tracing::instrument(level = "debug", fields(?id), skip_all)]
-    async fn upload_offset(
-        &self,
-        id: &ObjectId,
-        token: &BackendToken,
-        upload_length: NonZeroU64,
-    ) -> Result<UploadProgress> {
-        let session = TieredResumableToken::decode(token)?;
-        let revision = ObjectId {
-            context: id.context.clone(),
-            key: session.revision.clone(),
-        };
-        self.inner
-            .long_term
-            .upload_offset(&revision, &session.inner, upload_length)
-            .await
+    #[tracing::instrument(level = "debug", fields(id = ?session.object_id), skip_all)]
+    async fn upload_offset(&self, session: &SessionToken) -> Result<UploadProgress> {
+        let tiered = TieredResumableToken::decode(&session.backend_token)?;
+        let inner_session = tiered.into_session(session);
+        self.inner.long_term.upload_offset(&inner_session).await
     }
 
-    #[tracing::instrument(level = "debug", fields(?id), skip_all)]
-    async fn cancel_upload(&self, id: &ObjectId, token: &BackendToken) -> Result<()> {
-        let session = TieredResumableToken::decode(token)?;
-        let revision = ObjectId {
-            context: id.context.clone(),
-            key: session.revision.clone(),
-        };
-        self.inner
-            .long_term
-            .cancel_upload(&revision, &session.inner)
-            .await
+    #[tracing::instrument(level = "debug", fields(id = ?session.object_id), skip_all)]
+    async fn cancel_upload(&self, session: &SessionToken) -> Result<()> {
+        let tiered = TieredResumableToken::decode(&session.backend_token)?;
+        let inner_session = tiered.into_session(session);
+        self.inner.long_term.cancel_upload(&inner_session).await
     }
 
     #[tracing::instrument(level = "debug", fields(?id), skip_all)]
@@ -1266,12 +1245,17 @@ mod tests {
         id: &ObjectId,
         metadata: &Metadata,
         length: u64,
-    ) -> BackendToken {
-        storage
+    ) -> SessionToken {
+        let backend_token = storage
             .create_upload_session(id, metadata, NonZeroU64::new(length).unwrap())
             .await
             .unwrap()
-            .unwrap()
+            .unwrap();
+        SessionToken {
+            object_id: id.clone(),
+            upload_length: NonZeroU64::new(length).unwrap(),
+            backend_token,
+        }
     }
 
     #[tokio::test]
@@ -1279,7 +1263,6 @@ mod tests {
         let (storage, _, _, _) = make_tiered_storage();
         let id = make_id("tiered-resumable-inmemory");
         let payload = vec![b'a'; BACKEND_SIZE_THRESHOLD + 1];
-        let upload_length = NonZeroU64::new(payload.len() as u64).unwrap();
         let token =
             resumable_token(&storage, &id, &Metadata::default(), payload.len() as u64).await;
 
@@ -1287,9 +1270,7 @@ mod tests {
         assert_eq!(
             storage
                 .put_chunk(
-                    &id,
                     &token,
-                    upload_length,
                     0,
                     payload.len() as u64,
                     stream::single(payload.clone())
@@ -1299,11 +1280,7 @@ mod tests {
         );
         // InMemory consumes the session immediately.
         assert_eq!(
-            storage
-                .upload_offset(&id, &token, upload_length)
-                .await
-                .unwrap_err()
-                .kind(),
+            storage.upload_offset(&token).await.unwrap_err().kind(),
             ErrorKind::UnknownUploadSession
         );
         let (_, _, body) = storage
@@ -1342,12 +1319,11 @@ mod tests {
         let storage = TieredStorage::new(Box::new(hv), Box::new(lt), Box::new(NoopChangeLog));
         let id = make_id(&format!("tiered-resumable-{}", uuid::Uuid::now_v7()));
         let payload = vec![b'a'; BACKEND_SIZE_THRESHOLD + 1];
-        let upload_length = NonZeroU64::new(payload.len() as u64).unwrap();
         let token =
             resumable_token(&storage, &id, &Metadata::default(), payload.len() as u64).await;
 
         let error = storage
-            .put_chunk(&id, &token, upload_length, 0, 1, stream::single("a"))
+            .put_chunk(&token, 0, 1, stream::single("a"))
             .await
             .unwrap_err();
         assert_eq!(
@@ -1362,9 +1338,7 @@ mod tests {
         assert_eq!(
             storage
                 .put_chunk(
-                    &id,
                     &token,
-                    upload_length,
                     0,
                     payload.len() as u64,
                     stream::single(payload.clone())
@@ -1374,7 +1348,7 @@ mod tests {
         );
         // GCS still reports completion.
         assert_eq!(
-            storage.upload_offset(&id, &token, upload_length).await?,
+            storage.upload_offset(&token).await?,
             UploadProgress::Complete
         );
         let (_, _, body) = storage
@@ -1390,13 +1364,12 @@ mod tests {
         let (storage, _, _, _) = make_tiered_storage();
         let id = make_id("resumable-invalid");
         let length = BACKEND_SIZE_THRESHOLD as u64 + 1;
-        let upload_length = NonZeroU64::new(length).unwrap();
         let token = resumable_token(&storage, &id, &Metadata::default(), length).await;
 
         // Overflow and future offsets are rejected.
         assert_eq!(
             storage
-                .put_chunk(&id, &token, upload_length, u64::MAX, 1, stream::single("x"))
+                .put_chunk(&token, u64::MAX, 1, stream::single("x"))
                 .await
                 .unwrap_err()
                 .kind(),
@@ -1408,14 +1381,7 @@ mod tests {
         );
         assert_eq!(
             storage
-                .put_chunk(
-                    &id,
-                    &token,
-                    upload_length,
-                    length - 1,
-                    1,
-                    stream::single("x")
-                )
+                .put_chunk(&token, length - 1, 1, stream::single("x"))
                 .await
                 .unwrap_err()
                 .kind(),
@@ -1427,7 +1393,6 @@ mod tests {
     async fn resumable_cancel() {
         let (storage, hv, _, _) = make_tiered_storage();
         let id = make_id("resumable-invalid");
-        let upload_length = NonZeroU64::new(BACKEND_SIZE_THRESHOLD as u64 + 1).unwrap();
         let token = resumable_token(
             &storage,
             &id,
@@ -1437,13 +1402,9 @@ mod tests {
         .await;
 
         // Cancellation removes the open long-term session.
-        storage.cancel_upload(&id, &token).await.unwrap();
+        storage.cancel_upload(&token).await.unwrap();
         assert_eq!(
-            storage
-                .upload_offset(&id, &token, upload_length)
-                .await
-                .unwrap_err()
-                .kind(),
+            storage.upload_offset(&token).await.unwrap_err().kind(),
             ErrorKind::UnknownUploadSession
         );
         assert!(!hv.contains(&id));

@@ -29,7 +29,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, Part, PartNumber, UploadId, UploadPartResponse,
 };
-use crate::resumable::{BackendToken, UploadProgress};
+use crate::resumable::{BackendToken, SessionToken, UploadProgress};
 use crate::stream::ClientStream;
 
 /// An entry in the in-memory store.
@@ -114,11 +114,11 @@ impl InMemoryBackend {
         }
     }
 
-    fn upload_session(&self, id: &ObjectId, token: &BackendToken) -> Result<ResumableSession> {
+    fn upload_session(&self, session: &SessionToken) -> Result<ResumableSession> {
         self.resumable_store
             .lock()
             .unwrap()
-            .get(&(id.clone(), token.clone()))
+            .get(&(session.object_id.clone(), session.backend_token.clone()))
             // Clone the session handle so that the `resumable_store` mutex is released immediately.
             .cloned()
             .ok_or_else(|| ErrorKind::UnknownUploadSession.into())
@@ -273,23 +273,21 @@ impl super::common::Backend for InMemoryBackend {
 
     async fn put_chunk(
         &self,
-        id: &ObjectId,
-        token: &BackendToken,
-        upload_length: NonZeroU64,
+        session: &SessionToken,
         offset: u64,
         content_length: u64,
         mut stream: ClientStream,
     ) -> Result<UploadProgress> {
-        let session = self.upload_session(id, token)?;
-        let mut guard = session.lock().await;
+        let upload_session = self.upload_session(session)?;
+        let mut guard = upload_session.lock().await;
         let upload = guard.as_mut().ok_or(ErrorKind::UnknownUploadSession)?;
         offset
             .checked_add(content_length)
-            .filter(|end| *end <= upload_length.get())
+            .filter(|end| *end <= session.upload_length.get())
             .ok_or(ErrorKind::ChunkExceedsUploadLength {
                 offset,
                 content_length,
-                upload_length: upload_length.get(),
+                upload_length: session.upload_length.get(),
             })?;
         if content_length != 0 && offset != upload.data.len() as u64 {
             return Err(ErrorKind::UploadOffsetMismatch {
@@ -309,7 +307,7 @@ impl super::common::Backend for InMemoryBackend {
         }
 
         let offset = upload.data.len() as u64;
-        if offset != upload_length.get() {
+        if offset != session.upload_length.get() {
             return Ok(UploadProgress::Incomplete { offset });
         }
 
@@ -318,39 +316,38 @@ impl super::common::Backend for InMemoryBackend {
         let expires_at = metadata.time_expires;
         let entry = StoreEntry::Object(metadata, upload.data.freeze());
         let size = entry.stored_size();
-        self.store.lock().unwrap().insert(id.clone(), entry);
+        self.store
+            .lock()
+            .unwrap()
+            .insert(session.object_id.clone(), entry);
 
-        self.change_stream.write(id, size as u64, expires_at);
+        self.change_stream
+            .write(&session.object_id, size as u64, expires_at);
         self.resumable_store
             .lock()
             .unwrap()
-            .remove(&(id.clone(), token.clone()));
+            .remove(&(session.object_id.clone(), session.backend_token.clone()));
 
         Ok(UploadProgress::Complete)
     }
 
-    async fn upload_offset(
-        &self,
-        id: &ObjectId,
-        token: &BackendToken,
-        _upload_length: NonZeroU64,
-    ) -> Result<UploadProgress> {
-        let session = self.upload_session(id, token)?;
-        let guard = session.lock().await;
+    async fn upload_offset(&self, session: &SessionToken) -> Result<UploadProgress> {
+        let upload_session = self.upload_session(session)?;
+        let guard = upload_session.lock().await;
         let upload = guard.as_ref().ok_or(ErrorKind::UnknownUploadSession)?;
         Ok(UploadProgress::Incomplete {
             offset: upload.data.len() as u64,
         })
     }
 
-    async fn cancel_upload(&self, id: &ObjectId, token: &BackendToken) -> Result<()> {
-        let session = self.upload_session(id, token)?;
-        let mut guard = session.lock().await;
+    async fn cancel_upload(&self, session: &SessionToken) -> Result<()> {
+        let upload_session = self.upload_session(session)?;
+        let mut guard = upload_session.lock().await;
         guard.take().ok_or(ErrorKind::UnknownUploadSession)?;
         self.resumable_store
             .lock()
             .unwrap()
-            .remove(&(id.clone(), token.clone()));
+            .remove(&(session.object_id.clone(), session.backend_token.clone()));
         Ok(())
     }
 
@@ -894,12 +891,17 @@ mod tests {
         })
     }
 
-    async fn create_session(backend: &InMemoryBackend, id: &ObjectId, length: u64) -> BackendToken {
-        backend
+    async fn create_session(backend: &InMemoryBackend, id: &ObjectId, length: u64) -> SessionToken {
+        let backend_token = backend
             .create_upload_session(id, &Metadata::default(), NonZeroU64::new(length).unwrap())
             .await
             .unwrap()
-            .unwrap()
+            .unwrap();
+        SessionToken {
+            object_id: id.clone(),
+            upload_length: NonZeroU64::new(length).unwrap(),
+            backend_token,
+        }
     }
 
     #[tokio::test]
@@ -927,18 +929,20 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        let token = SessionToken {
+            object_id: id.clone(),
+            upload_length,
+            backend_token: token,
+        };
         assert_eq!(
-            backend
-                .upload_offset(&id, &token, upload_length)
-                .await
-                .unwrap(),
+            backend.upload_offset(&token).await.unwrap(),
             UploadProgress::Incomplete { offset: 0 }
         );
 
         // Upload a prefix. The session advances, and the old object remains visible.
         assert_eq!(
             backend
-                .put_chunk(&id, &token, upload_length, 0, 1, stream::single("a"))
+                .put_chunk(&token, 0, 1, stream::single("a"))
                 .await
                 .unwrap(),
             UploadProgress::Incomplete { offset: 1 }
@@ -946,13 +950,13 @@ mod tests {
         assert_eq!(backend.get(&id).expect_object().1, "old");
         assert_eq!(
             backend
-                .put_chunk(&id, &token, upload_length, 0, 0, stream::single(""))
+                .put_chunk(&token, 0, 0, stream::single(""))
                 .await
                 .unwrap(),
             UploadProgress::Incomplete { offset: 1 }
         );
         let error = backend
-            .put_chunk(&id, &token, upload_length, 0, 1, stream::single("a"))
+            .put_chunk(&token, 0, 1, stream::single("a"))
             .await
             .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::UploadOffsetMismatch { offset: 1 });
@@ -960,7 +964,7 @@ mod tests {
         // Upload the suffix. Publication replaces the object and deletes the session.
         assert_eq!(
             backend
-                .put_chunk(&id, &token, upload_length, 1, 2, stream::single("bc"))
+                .put_chunk(&token, 1, 2, stream::single("bc"))
                 .await
                 .unwrap(),
             UploadProgress::Complete
@@ -970,11 +974,7 @@ mod tests {
         assert_eq!(actual.custom, metadata.custom);
         assert_eq!(actual.size, metadata.size);
         assert_eq!(
-            backend
-                .upload_offset(&id, &token, upload_length)
-                .await
-                .unwrap_err()
-                .kind(),
+            backend.upload_offset(&token).await.unwrap_err().kind(),
             ErrorKind::UnknownUploadSession
         );
     }
@@ -983,12 +983,11 @@ mod tests {
     async fn resumable_cancel_and_invalid_sessions() {
         let backend = InMemoryBackend::new("test");
         let id = make_id();
-        let upload_length = NonZeroU64::new(3).unwrap();
         let token = create_session(&backend, &id, 3).await;
 
         // The backend rejects a chunk whose declared range exceeds the session length.
         let error = backend
-            .put_chunk(&id, &token, upload_length, 3, 1, stream::single("x"))
+            .put_chunk(&token, 3, 1, stream::single("x"))
             .await
             .unwrap_err();
         assert_eq!(
@@ -1002,17 +1001,13 @@ mod tests {
 
         // Cancellation discards partial progress and makes the token unknown to the backend.
         backend
-            .put_chunk(&id, &token, upload_length, 0, 1, stream::single("a"))
+            .put_chunk(&token, 0, 1, stream::single("a"))
             .await
             .unwrap();
-        backend.cancel_upload(&id, &token).await.unwrap();
+        backend.cancel_upload(&token).await.unwrap();
         assert!(!backend.contains(&id));
         assert_eq!(
-            backend
-                .upload_offset(&id, &token, upload_length)
-                .await
-                .unwrap_err()
-                .kind(),
+            backend.upload_offset(&token).await.unwrap_err().kind(),
             ErrorKind::UnknownUploadSession
         );
     }
@@ -1021,12 +1016,11 @@ mod tests {
     async fn failed_resumable_chunk_preserves_partial_progress() {
         let backend = InMemoryBackend::new("test");
         let id = make_id();
-        let upload_length = NonZeroU64::new(4).unwrap();
         let token = create_session(&backend, &id, 4).await;
 
         // Persist a prefix, then disconnect after writing one byte of the next chunk.
         backend
-            .put_chunk(&id, &token, upload_length, 0, 2, stream::single("ab"))
+            .put_chunk(&token, 0, 2, stream::single("ab"))
             .await
             .unwrap();
         let body = futures_util::stream::iter([
@@ -1038,7 +1032,7 @@ mod tests {
         .boxed();
         assert_eq!(
             backend
-                .put_chunk(&id, &token, upload_length, 2, 2, body)
+                .put_chunk(&token, 2, 2, body)
                 .await
                 .unwrap_err()
                 .kind(),
@@ -1047,15 +1041,12 @@ mod tests {
 
         // Resume from the partial byte and verify the complete object.
         assert_eq!(
-            backend
-                .upload_offset(&id, &token, upload_length)
-                .await
-                .unwrap(),
+            backend.upload_offset(&token).await.unwrap(),
             UploadProgress::Incomplete { offset: 3 }
         );
         assert_eq!(
             backend
-                .put_chunk(&id, &token, upload_length, 3, 1, stream::single("d"))
+                .put_chunk(&token, 3, 1, stream::single("d"))
                 .await
                 .unwrap(),
             UploadProgress::Complete
@@ -1067,16 +1058,15 @@ mod tests {
     async fn resumable_serializes_session_operations() {
         let backend = InMemoryBackend::new("test");
         let id = make_id();
-        let upload_length = NonZeroU64::new(1).unwrap();
         let token = create_session(&backend, &id, 1).await;
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let body = futures_util::stream::once(async { Ok(receiver.await.unwrap()) }).boxed();
 
         // An offset query waits while a chunk holds the session lock.
-        let request = backend.put_chunk(&id, &token, upload_length, 0, 1, body);
+        let request = backend.put_chunk(&token, 0, 1, body);
         tokio::pin!(request);
         assert!(futures_util::poll!(&mut request).is_pending());
-        let query = backend.upload_offset(&id, &token, upload_length);
+        let query = backend.upload_offset(&token);
         tokio::pin!(query);
         assert!(futures_util::poll!(&mut query).is_pending());
 
@@ -1095,19 +1085,18 @@ mod tests {
     async fn resumable_emits_only_publication() {
         let (backend, producer) = backend_with_change_stream();
         let id = make_id();
-        let upload_length = NonZeroU64::new(2).unwrap();
         let token = create_session(&backend, &id, 2).await;
 
         // Partial session state is not reported as a stored object.
         backend
-            .put_chunk(&id, &token, upload_length, 0, 1, stream::single("a"))
+            .put_chunk(&token, 0, 1, stream::single("a"))
             .await
             .unwrap();
         assert!(producer.records().is_empty());
 
         // Completion emits exactly one write for the published object.
         backend
-            .put_chunk(&id, &token, upload_length, 1, 1, stream::single("b"))
+            .put_chunk(&token, 1, 1, stream::single("b"))
             .await
             .unwrap();
         let records = producer.records();

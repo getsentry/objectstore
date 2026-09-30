@@ -548,14 +548,7 @@ impl StorageService {
         let inner = Arc::clone(&self.inner);
         self.spawn("put_chunk", async move {
             inner
-                .put_chunk(
-                    &id,
-                    &session.backend_token,
-                    session.upload_length,
-                    offset,
-                    content_length,
-                    body,
-                )
+                .put_chunk(&session, offset, content_length, body)
                 .await
         })
         .await
@@ -574,9 +567,7 @@ impl StorageService {
         let session = self.session_for(&id, token)?;
         let inner = Arc::clone(&self.inner);
         self.spawn("upload_offset", async move {
-            inner
-                .upload_offset(&id, &session.backend_token, session.upload_length)
-                .await
+            inner.upload_offset(&session).await
         })
         .await
     }
@@ -586,7 +577,7 @@ impl StorageService {
         let session = self.session_for(&id, token)?;
         let inner = Arc::clone(&self.inner);
         self.spawn("cancel_upload", async move {
-            inner.cancel_upload(&id, &session.backend_token).await
+            inner.cancel_upload(&session).await
         })
         .await
     }
@@ -641,12 +632,13 @@ mod tests {
         async fn upload_offset(
             &self,
             _inner: &InMemoryBackend,
-            _id: &ObjectId,
-            token: &BackendToken,
-            upload_length: NonZeroU64,
+            session: &SessionToken,
         ) -> Result<UploadProgress> {
-            assert_eq!(upload_length.get(), 4);
-            self.seen_tokens.lock().unwrap().push(token.to_owned());
+            assert_eq!(session.upload_length.get(), 4);
+            self.seen_tokens
+                .lock()
+                .unwrap()
+                .push(session.backend_token.clone());
             Ok(UploadProgress::Incomplete { offset: 0 })
         }
     }

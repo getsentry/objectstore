@@ -58,7 +58,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
-use crate::resumable::BackendToken;
+use crate::resumable::{BackendToken, SessionToken};
 use crate::stream::ClientStream;
 
 /// Hooks for [`TestBackend`].
@@ -307,19 +307,16 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
     }
 
     /// Intercepts [`Backend::put_chunk`]. Default delegates to `inner`.
-    #[allow(clippy::too_many_arguments)]
     async fn put_chunk(
         &self,
         inner: &InMemoryBackend,
-        id: &ObjectId,
-        token: &BackendToken,
-        upload_length: NonZeroU64,
+        session: &SessionToken,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
     ) -> Result<UploadProgress> {
         inner
-            .put_chunk(id, token, upload_length, offset, content_length, stream)
+            .put_chunk(session, offset, content_length, stream)
             .await
     }
 
@@ -327,21 +324,14 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
     async fn upload_offset(
         &self,
         inner: &InMemoryBackend,
-        id: &ObjectId,
-        token: &BackendToken,
-        upload_length: NonZeroU64,
+        session: &SessionToken,
     ) -> Result<UploadProgress> {
-        inner.upload_offset(id, token, upload_length).await
+        inner.upload_offset(session).await
     }
 
     /// Intercepts [`Backend::cancel_upload`]. Default delegates to `inner`.
-    async fn cancel_upload(
-        &self,
-        inner: &InMemoryBackend,
-        id: &ObjectId,
-        token: &BackendToken,
-    ) -> Result<()> {
-        inner.cancel_upload(id, token).await
+    async fn cancel_upload(&self, inner: &InMemoryBackend, session: &SessionToken) -> Result<()> {
+        inner.cancel_upload(session).await
     }
 }
 
@@ -458,39 +448,22 @@ impl<H: Hooks> Backend for TestBackend<H> {
 
     async fn put_chunk(
         &self,
-        id: &ObjectId,
-        token: &BackendToken,
-        upload_length: NonZeroU64,
+        session: &SessionToken,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
     ) -> Result<UploadProgress> {
         self.hooks
-            .put_chunk(
-                &self.inner,
-                id,
-                token,
-                upload_length,
-                offset,
-                content_length,
-                stream,
-            )
+            .put_chunk(&self.inner, session, offset, content_length, stream)
             .await
     }
 
-    async fn upload_offset(
-        &self,
-        id: &ObjectId,
-        token: &BackendToken,
-        upload_length: NonZeroU64,
-    ) -> Result<UploadProgress> {
-        self.hooks
-            .upload_offset(&self.inner, id, token, upload_length)
-            .await
+    async fn upload_offset(&self, session: &SessionToken) -> Result<UploadProgress> {
+        self.hooks.upload_offset(&self.inner, session).await
     }
 
-    async fn cancel_upload(&self, id: &ObjectId, token: &BackendToken) -> Result<()> {
-        self.hooks.cancel_upload(&self.inner, id, token).await
+    async fn cancel_upload(&self, session: &SessionToken) -> Result<()> {
+        self.hooks.cancel_upload(&self.inner, session).await
     }
 }
 

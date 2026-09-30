@@ -3,6 +3,7 @@
 //! Storage backends represent their opaque upload state as a [`BackendToken`]. At the service
 //! boundary, `SessionToken` combines that state with service-specific fields, and
 //! [`crate::encryption::Cipher`] protects the serialized token before it is returned to the server.
+//! After authentication, the service passes the structured [`SessionToken`] to the backend.
 //!
 //! ```text
 //! Storage backend       | objectstore-service                          | objectstore-server             |
@@ -10,6 +11,7 @@
 //! opaque backend state  | { ObjectId, upload_length, BackendToken }    | b64url encoded opaque envelope |
 //! ```
 
+use std::fmt;
 use std::num::NonZeroU64;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
@@ -23,16 +25,32 @@ pub use objectstore_types::resumable::{
 /// Opaque session state encoded and decoded by a storage backend.
 pub type BackendToken = String;
 
-/// Structured token encrypted at the service boundary.
-#[derive(Deserialize, Serialize)]
-pub(crate) struct SessionToken {
+/// Identifies a resumable upload and carries its declared length.
+///
+/// The service encrypts this value before returning it to clients and authenticates it before
+/// passing it to backend continuation operations. Composed backends can derive an inner session
+/// by replacing the object ID and backend token while retaining the shared upload information.
+#[derive(Clone, Deserialize, Serialize)]
+pub struct SessionToken {
+    /// Object being uploaded through the receiving backend.
     #[serde(
         serialize_with = "serialize_object_id",
         deserialize_with = "deserialize_object_id"
     )]
-    pub(crate) object_id: ObjectId,
-    pub(crate) upload_length: NonZeroU64,
-    pub(crate) backend_token: BackendToken,
+    pub object_id: ObjectId,
+    /// Total length declared when the upload was created.
+    pub upload_length: NonZeroU64,
+    /// Opaque session state belonging to the receiving backend.
+    pub backend_token: BackendToken,
+}
+
+impl fmt::Debug for SessionToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SessionToken")
+            .field("object_id", &self.object_id)
+            .field("upload_length", &self.upload_length)
+            .finish_non_exhaustive()
+    }
 }
 
 fn serialize_object_id<S>(id: &ObjectId, serializer: S) -> std::result::Result<S::Ok, S::Error>
