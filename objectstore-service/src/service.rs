@@ -552,9 +552,9 @@ impl StorageService {
 
     /// Reports how far a session has progressed.
     ///
-    /// This can observe completion after the final chunk's response was lost. A composed backend
-    /// may also finish pending publication work, so this requires write permission at the API
-    /// layer.
+    /// Some backends can report completion after the final chunk's response was lost.
+    /// Tiered finalization is one-shot and subsequent queries return
+    /// [`ErrorKind::UploadSessionGone`]. This operation requires write permission at the API layer.
     pub async fn upload_offset(
         &self,
         id: ObjectId,

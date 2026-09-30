@@ -48,8 +48,8 @@ use objectstore_types::resumable::UploadProgress;
 
 use crate::backend::common::{
     Backend, DeleteResponse, ExpiryUpdate, GetResponse, HighVolumeBackend, MetadataResponse,
-    MultipartUploadBackend, PutResponse, SetExpiryResponse, TieredGet, TieredMetadata,
-    TieredUpdate, TieredWrite, Tombstone,
+    MultipartUploadBackend, PutResponse, ResumableUploadRecord, ResumableUploadState,
+    SetExpiryResponse, TieredGet, TieredMetadata, TieredUpdate, TieredWrite, Tombstone,
 };
 use crate::backend::in_memory::InMemoryBackend;
 use crate::error::Result;
@@ -143,6 +143,40 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
     }
 
     // --- HighVolumeBackend methods ---
+
+    /// Intercepts upload-row creation. Default delegates to `inner`.
+    async fn create_resumable_upload(
+        &self,
+        inner: &InMemoryBackend,
+        id: &ObjectId,
+        time_expires: Timestamp,
+    ) -> Result<()> {
+        inner.create_resumable_upload(id, time_expires).await
+    }
+
+    /// Intercepts upload-row reads. Default delegates to `inner`.
+    async fn get_resumable_upload(
+        &self,
+        inner: &InMemoryBackend,
+        id: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<Option<ResumableUploadRecord>> {
+        inner.get_resumable_upload(id, access_time).await
+    }
+
+    /// Intercepts upload-row transitions. Default delegates to `inner`.
+    async fn transition_resumable_upload(
+        &self,
+        inner: &InMemoryBackend,
+        id: &ObjectId,
+        time_expires: Timestamp,
+        state: Option<ResumableUploadState>,
+        access_time: Timestamp,
+    ) -> Result<bool> {
+        inner
+            .transition_resumable_upload(id, time_expires, state, access_time)
+            .await
+    }
 
     /// Intercepts [`HighVolumeBackend::put_non_tombstone`]. Default delegates to `inner`.
     async fn put_non_tombstone(
@@ -469,6 +503,34 @@ impl<H: Hooks> Backend for TestBackend<H> {
 
 #[async_trait::async_trait]
 impl<H: Hooks> HighVolumeBackend for TestBackend<H> {
+    async fn create_resumable_upload(&self, id: &ObjectId, time_expires: Timestamp) -> Result<()> {
+        self.hooks
+            .create_resumable_upload(&self.inner, id, time_expires)
+            .await
+    }
+
+    async fn get_resumable_upload(
+        &self,
+        id: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<Option<ResumableUploadRecord>> {
+        self.hooks
+            .get_resumable_upload(&self.inner, id, access_time)
+            .await
+    }
+
+    async fn transition_resumable_upload(
+        &self,
+        id: &ObjectId,
+        time_expires: Timestamp,
+        state: Option<ResumableUploadState>,
+        access_time: Timestamp,
+    ) -> Result<bool> {
+        self.hooks
+            .transition_resumable_upload(&self.inner, id, time_expires, state, access_time)
+            .await
+    }
+
     async fn put_non_tombstone(
         &self,
         id: &ObjectId,

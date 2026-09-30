@@ -173,8 +173,9 @@ pub enum UploadProgress {
     },
     /// The session is terminal and the object is available through the backend's normal reads.
     ///
-    /// This is an observable status rather than a one-time event. A later offset query can return
-    /// `Complete` again, for example when the response to the final chunk was lost.
+    /// Some backends retain this status for later offset queries, for example when the final
+    /// chunk's response was lost. Backends with one-shot finalization instead reject subsequent
+    /// session requests.
     Complete,
 }
 
@@ -192,8 +193,9 @@ pub struct CreateSessionResponse {
 
 /// Response from the request that completes the upload.
 ///
-/// This is either the chunk carrying the last byte, or an offset query against a
-/// session whose final chunk completed but whose response was not observed.
+/// The chunk carrying the last byte produces this response. Depending on the backend,
+/// an offset query may also produce it when the final chunk completed but its response
+/// was not observed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompleteUploadResponse {
     /// The object key.

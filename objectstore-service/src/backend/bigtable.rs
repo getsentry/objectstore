@@ -20,6 +20,15 @@
 //! `p`/`m` and `r` are mutually exclusive. Every write begins with a `DeleteFromRow`
 //! mutation that clears all columns before writing the new cells, so mixed rows cannot exist.
 //!
+//! ## Resumable Upload Rows
+//!
+//! Tiered upload rows use `{usecase}/{scopes}/uploads/{revision}` rather than the
+//! `objects` path segment. Their `u` cell holds `ongoing` or `canceled` in `fg`,
+//! with a fixed deadline of creation + five days as its timestamp. Finalization
+//! atomically deletes an ongoing row; cancellation retains it with its deadline.
+//! Only a live `ongoing` cell can be canceled or deleted. Reads and CAS predicates
+//! enforce logical expiry without waiting for garbage collection.
+//!
 //! ## Legacy Tombstone Format
 //!
 //! Tombstones written before the `r` column layout used the object-row format with an
@@ -47,8 +56,8 @@ use tracing::Instrument;
 
 use crate::backend::common::{
     self, Backend, DeleteResponse, ExpiryUpdate, GetResponse, HighVolumeBackend, MetadataResponse,
-    PutResponse, SetExpiryResponse, TieredGet, TieredMetadata, TieredUpdate, TieredWrite,
-    Tombstone,
+    PutResponse, ResumableUploadRecord, ResumableUploadState, SetExpiryResponse, TieredGet,
+    TieredMetadata, TieredUpdate, TieredWrite, Tombstone,
 };
 use crate::change_stream::{
     ChangeStream, ChangeStreamFactory, CostTrackerStreamConfig, flush_change_stream,
@@ -184,6 +193,8 @@ const COLUMN_PAYLOAD: &[u8] = b"p";
 const COLUMN_METADATA: &[u8] = b"m";
 /// Column that stores the redirect path for tombstone rows.
 const COLUMN_REDIRECT: &[u8] = b"r";
+/// State of a resumable upload, stored in a separate upload row.
+const COLUMN_UPLOAD_STATE: &[u8] = b"u";
 /// Regex to match all non-payload columns (`m`, `r`) for metadata-only reads.
 const FILTER_META: &[u8] = b"^[mr]$";
 
@@ -671,6 +682,32 @@ fn tombstone_mutations(tombstone: &Tombstone) -> [v2::Mutation; 2] {
     ]
 }
 
+/// Upload rows use a separate path segment from `objects`, so client object keys
+/// cannot collide with them. The key is the upload's unique LT revision.
+fn resumable_upload_path(id: &ObjectId) -> Vec<u8> {
+    let scopes = id.scopes().as_storage_path().to_string();
+    if scopes.is_empty() {
+        format!("{}/uploads/{}", id.usecase(), id.key()).into_bytes()
+    } else {
+        format!("{}/{scopes}/uploads/{}", id.usecase(), id.key()).into_bytes()
+    }
+}
+
+fn resumable_upload_mutations(
+    state: ResumableUploadState,
+    time_expires: Timestamp,
+) -> [v2::Mutation; 2] {
+    [
+        delete_row_mutation(),
+        mutation(mutation::Mutation::SetCell(mutation::SetCell {
+            family_name: FAMILY_GC.to_owned(),
+            column_qualifier: COLUMN_UPLOAD_STATE.to_owned(),
+            timestamp_micros: time_expires.as_micros() as i64,
+            value: state.as_str().as_bytes().to_vec(),
+        })),
+    ]
+}
+
 /// Subset of [`Metadata`] that indicates a row is a tombstone instead of a real object.
 ///
 /// Used to construct [`RowData`].
@@ -1069,6 +1106,111 @@ impl Backend for BigTableBackend {
 
 #[async_trait::async_trait]
 impl HighVolumeBackend for BigTableBackend {
+    async fn create_resumable_upload(&self, id: &ObjectId, time_expires: Timestamp) -> Result<()> {
+        let path = resumable_upload_path(id);
+        let mutations = resumable_upload_mutations(ResumableUploadState::Ongoing, time_expires);
+        self.mutate(path.clone(), mutations.clone(), "create_resumable_upload")
+            .await?;
+        self.change_stream
+            .write(id, row_size(&path, &mutations), Some(time_expires));
+        Ok(())
+    }
+
+    async fn get_resumable_upload(
+        &self,
+        id: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<Option<ResumableUploadRecord>> {
+        let request = v2::ReadRowsRequest {
+            table_name: self.table_path.clone(),
+            rows: Some(v2::RowSet {
+                row_keys: vec![resumable_upload_path(id)],
+                row_ranges: vec![],
+            }),
+            filter: Some(live_row_filter(
+                column_filter(COLUMN_UPLOAD_STATE),
+                access_time,
+            )),
+            rows_limit: 1,
+            ..Default::default()
+        };
+        let response = retry("get_resumable_upload", || async {
+            self.bigtable.client().read_rows(request.clone()).await
+        })
+        .await?;
+        let Some(cell) = response
+            .into_iter()
+            .next()
+            .and_then(|(_, cells)| cells.into_iter().next())
+        else {
+            return Ok(None);
+        };
+        let state = match cell.value.as_slice() {
+            b"ongoing" => ResumableUploadState::Ongoing,
+            b"canceled" => ResumableUploadState::Canceled,
+            _ => {
+                return Err(Error::new(
+                    ErrorKind::CorruptData,
+                    "invalid resumable upload state",
+                ));
+            }
+        };
+        let time_expires = Timestamp::from_unix_micros(cell.timestamp_micros).context(
+            ErrorKind::CorruptData,
+            "decoding resumable upload expiration",
+        )?;
+        Ok(Some(ResumableUploadRecord {
+            state,
+            time_expires,
+        }))
+    }
+
+    async fn transition_resumable_upload(
+        &self,
+        id: &ObjectId,
+        time_expires: Timestamp,
+        state: Option<ResumableUploadState>,
+        access_time: Timestamp,
+    ) -> Result<bool> {
+        assert_ne!(state, Some(ResumableUploadState::Ongoing));
+        let predicate = v2::RowFilter {
+            filter: Some(v2::row_filter::Filter::Chain(v2::row_filter::Chain {
+                filters: vec![
+                    column_filter(COLUMN_UPLOAD_STATE),
+                    exact_expiry_filter(time_expires.as_micros() as i64)?,
+                    v2::RowFilter {
+                        filter: Some(v2::row_filter::Filter::ValueRegexFilter(
+                            b"^ongoing$".to_vec(),
+                        )),
+                    },
+                ],
+            })),
+        };
+        let path = resumable_upload_path(id);
+        let mutations = match state {
+            Some(state) => resumable_upload_mutations(state, time_expires).to_vec(),
+            None => vec![delete_row_mutation()],
+        };
+        let written = self
+            .check_and_mutate(
+                path.clone(),
+                MutatePredicate::Include(live_row_filter(predicate, access_time)),
+                mutations.clone(),
+                "transition_resumable_upload",
+            )
+            .await?;
+        if written {
+            match state {
+                Some(_) => {
+                    self.change_stream
+                        .write(id, row_size(&path, &mutations), Some(time_expires))
+                }
+                None => self.change_stream.delete(id),
+            }
+        }
+        Ok(written)
+    }
+
     #[tracing::instrument(level = "debug", fields(?id), skip_all)]
     async fn put_non_tombstone(
         &self,
@@ -1588,6 +1730,70 @@ mod tests {
             usecase: "testing".into(),
             scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
         })
+    }
+
+    #[tokio::test]
+    async fn resumable_upload_rows_have_strict_transitions_and_fixed_expiry() -> Result<()> {
+        let backend = create_test_backend().await?;
+        let now = Timestamp::now();
+        let deadline = now + Duration::from_hours(5 * 24);
+        for state in [None, Some(ResumableUploadState::Canceled)] {
+            let id = make_id();
+            backend.create_resumable_upload(&id, deadline).await?;
+            assert_eq!(
+                backend.get_resumable_upload(&id, now).await?,
+                Some(ResumableUploadRecord {
+                    state: ResumableUploadState::Ongoing,
+                    time_expires: deadline
+                })
+            );
+            assert!(backend.get_object(&id, now, None).await?.is_none());
+            let later = now + Duration::from_hours(24);
+            let (a, b) = tokio::join!(
+                backend.transition_resumable_upload(&id, deadline, state, later),
+                backend.transition_resumable_upload(&id, deadline, state, later),
+            );
+            assert_ne!(
+                a?, b?,
+                "only one CAS may win, even for identical target states"
+            );
+            assert_eq!(
+                backend.get_resumable_upload(&id, later).await?,
+                state.map(|state| ResumableUploadRecord {
+                    state,
+                    time_expires: deadline
+                })
+            );
+            assert!(
+                !backend
+                    .transition_resumable_upload(&id, deadline, state, later)
+                    .await?
+            );
+            assert!(
+                backend
+                    .get_resumable_upload(&id, deadline + Duration::from_secs(1))
+                    .await?
+                    .is_none()
+            );
+        }
+        let id = make_id();
+        assert!(
+            !backend
+                .transition_resumable_upload(&id, deadline, None, now)
+                .await?
+        );
+        backend.create_resumable_upload(&id, deadline).await?;
+        assert!(
+            !backend
+                .transition_resumable_upload(&id, deadline, None, deadline + Duration::from_secs(1))
+                .await?
+        );
+        // Expired upload rows cannot be resurrected by a transition.
+        assert_eq!(
+            backend.get_resumable_upload(&id, now).await?.unwrap().state,
+            ResumableUploadState::Ongoing
+        );
+        Ok(())
     }
 
     async fn create_object(

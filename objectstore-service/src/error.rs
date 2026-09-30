@@ -57,7 +57,7 @@ pub enum ErrorKind {
         /// The offset the backend currently holds.
         offset: u64,
     },
-    /// A resumable upload session expired or was canceled.
+    /// A resumable upload session expired, was canceled, or consumed its finalization attempt.
     UploadSessionGone,
     /// The backend does not recognize a resumable upload session.
     UnknownUploadSession,

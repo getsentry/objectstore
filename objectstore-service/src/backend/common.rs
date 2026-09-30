@@ -301,7 +301,10 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// finish its own publication work before returning that outcome.
     ///
     /// A `content_length` of zero is valid. It writes nothing and reports the offset the backend
-    /// holds.
+    /// holds while the session is open.
+    ///
+    /// Tiered finalization is one-shot. Once a final chunk is admitted, further session requests
+    /// return [`ErrorKind::UploadSessionGone`], including after a failure of the final write.
     ///
     /// Returns [`ErrorKind::UnknownUploadSession`] when `session` does not identify an open session,
     /// and [`ErrorKind::ChunkExceedsUploadLength`] when the chunk would exceed the total length
@@ -320,9 +323,9 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
 
     /// Reports how far the session has progressed.
     ///
-    /// This can return [`UploadProgress::Complete`] repeatedly after the final chunk, including
-    /// when its original response was lost. A composed backend may finish pending idempotent
-    /// publication work before returning that terminal outcome.
+    /// Some backends return [`UploadProgress::Complete`] repeatedly after the final chunk,
+    /// including when its original response was lost. Tiered finalization is one-shot:
+    /// subsequent requests return [`ErrorKind::UploadSessionGone`].
     ///
     /// Returns [`ErrorKind::UnknownUploadSession`] when `session` does not identify a known session.
     async fn upload_offset(&self, session: &Session) -> Result<UploadProgress> {
@@ -333,6 +336,8 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// Cancels an upload session, discarding whatever was uploaded.
     ///
     /// Returns [`ErrorKind::UnknownUploadSession`] when `session` does not identify an open session.
+    /// Tiered returns [`ErrorKind::UploadSessionGone`] for missing or consumed sessions;
+    /// repeated cancellation of a retained canceled row retries LT cleanup.
     async fn cancel_upload(&self, session: &Session) -> Result<()> {
         let _ = session;
         Err(ErrorKind::Unsupported.into())
@@ -401,6 +406,37 @@ pub trait MultipartUploadBackend: Backend + fmt::Debug + Send + Sync + 'static {
 /// redirect tombstones.
 #[async_trait::async_trait]
 pub trait HighVolumeBackend: Backend {
+    /// Creates an ongoing resumable upload row, separate from the logical object row.
+    ///
+    /// `id` is the upload's unique LT revision. The deadline is fixed at creation and
+    /// must be preserved by subsequent transitions.
+    async fn create_resumable_upload(&self, id: &ObjectId, time_expires: Timestamp) -> Result<()>;
+
+    /// Reads a resumable upload row, returning `None` if it is missing or expired.
+    async fn get_resumable_upload(
+        &self,
+        id: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<Option<ResumableUploadRecord>>;
+
+    /// Atomically cancels or deletes a live, ongoing upload row.
+    ///
+    /// `Some(Canceled)` retains the row for cancellation cleanup retries. `None` deletes
+    /// the row to consume finalization authority. Returns `true` only when this call
+    /// changes an ongoing row; canceled, missing, and expired rows return `false`.
+    /// `time_expires` must match the original deadline and is preserved when canceling.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `state` is `Some(ResumableUploadState::Ongoing)`.
+    async fn transition_resumable_upload(
+        &self,
+        id: &ObjectId,
+        time_expires: Timestamp,
+        state: Option<ResumableUploadState>,
+        access_time: Timestamp,
+    ) -> Result<bool>;
+
     /// Writes the object only if NO redirect tombstone exists at this key.
     ///
     /// Returns `None` after storing the object, or `Some(tombstone)` (skipping
@@ -492,6 +528,34 @@ pub trait HighVolumeBackend: Backend {
         update: TieredUpdate,
         access_time: Timestamp,
     ) -> Result<SetExpiryResponse>;
+}
+
+/// State of a Tiered resumable upload in high-volume storage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResumableUploadState {
+    /// The upload can accept chunks or be canceled.
+    Ongoing,
+    /// Cancellation won the transition; LT cancellation may still need retrying.
+    Canceled,
+}
+
+impl ResumableUploadState {
+    /// Returns the persisted state value.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Ongoing => "ongoing",
+            Self::Canceled => "canceled",
+        }
+    }
+}
+
+/// A Tiered resumable upload row with its fixed creation deadline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResumableUploadRecord {
+    /// The current upload state.
+    pub state: ResumableUploadState,
+    /// The deadline set when the upload was created.
+    pub time_expires: Timestamp,
 }
 
 /// Information about a redirect tombstone in the high-volume backend.

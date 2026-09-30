@@ -19,8 +19,8 @@ use objectstore_types::metadata::Metadata;
 
 use crate::backend::common::{
     self, DeleteResponse, ExpiryUpdate, GetResponse, HighVolumeBackend, MultipartUploadBackend,
-    PutResponse, SetExpiryResponse, TieredGet, TieredMetadata, TieredUpdate, TieredWrite,
-    Tombstone,
+    PutResponse, ResumableUploadRecord, ResumableUploadState, SetExpiryResponse, TieredGet,
+    TieredMetadata, TieredUpdate, TieredWrite, Tombstone,
 };
 use crate::change_stream::{ChangeStream, NoopStream, flush_change_stream};
 use crate::error::{Error, ErrorKind, Result};
@@ -99,6 +99,7 @@ pub struct InMemoryBackend {
     store: Arc<Mutex<Store>>,
     multipart_store: Arc<Mutex<MultipartStore>>,
     resumable_store: Arc<Mutex<ResumableStore>>,
+    tiered_uploads: Arc<Mutex<HashMap<ObjectId, ResumableUploadRecord>>>,
     change_stream: Arc<dyn ChangeStream>,
 }
 
@@ -110,6 +111,7 @@ impl InMemoryBackend {
             store: Arc::new(Mutex::new(HashMap::new())),
             multipart_store: Arc::new(Mutex::new(HashMap::new())),
             resumable_store: Arc::new(Mutex::new(HashMap::new())),
+            tiered_uploads: Arc::new(Mutex::new(HashMap::new())),
             change_stream: Arc::new(NoopStream),
         }
     }
@@ -358,6 +360,58 @@ impl super::common::Backend for InMemoryBackend {
 
 #[async_trait::async_trait]
 impl HighVolumeBackend for InMemoryBackend {
+    async fn create_resumable_upload(&self, id: &ObjectId, time_expires: Timestamp) -> Result<()> {
+        self.tiered_uploads.lock().unwrap().insert(
+            id.clone(),
+            ResumableUploadRecord {
+                state: ResumableUploadState::Ongoing,
+                time_expires,
+            },
+        );
+        Ok(())
+    }
+
+    async fn get_resumable_upload(
+        &self,
+        id: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<Option<ResumableUploadRecord>> {
+        Ok(self
+            .tiered_uploads
+            .lock()
+            .unwrap()
+            .get(id)
+            .copied()
+            .filter(|row| row.time_expires >= access_time))
+    }
+
+    async fn transition_resumable_upload(
+        &self,
+        id: &ObjectId,
+        time_expires: Timestamp,
+        state: Option<ResumableUploadState>,
+        access_time: Timestamp,
+    ) -> Result<bool> {
+        assert_ne!(state, Some(ResumableUploadState::Ongoing));
+        let mut uploads = self.tiered_uploads.lock().unwrap();
+        let Some(row) = uploads.get_mut(id) else {
+            return Ok(false);
+        };
+        if row.state != ResumableUploadState::Ongoing
+            || row.time_expires < access_time
+            || row.time_expires != time_expires
+        {
+            return Ok(false);
+        }
+        match state {
+            Some(state) => row.state = state,
+            None => {
+                uploads.remove(id);
+            }
+        }
+        Ok(true)
+    }
+
     async fn put_non_tombstone(
         &self,
         id: &ObjectId,

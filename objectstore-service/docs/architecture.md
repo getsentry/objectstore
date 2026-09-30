@@ -340,6 +340,12 @@ granularity unit are rejected; the final chunk is exempt. Clients should use gra
 multiples and continue from the preceding response's offset, or perform an explicit offset query
 after an ambiguous failure.
 
+Tiered storage keeps each upload's state in a separate high-volume row with a fixed five-day
+lifetime. Finalization atomically deletes the ongoing upload row before forwarding the final
+chunk. Subsequent session requests return gone, even if finalization fails or its response is lost. Cancellation preserves the row
+and its deadline so later requests receive a stable gone response. See the
+[Tiered resumable upload flow](backend::tiered) for state transitions and cleanup behavior.
+
 ## Multipart Uploads
 
 When the configured backend supports it, [`StorageService`] exposes multipart
