@@ -402,7 +402,8 @@ impl TieredResumableToken {
         serde_json::from_str(token).map_err(|_| ErrorKind::UnknownUploadSession.into())
     }
 
-    fn into_session(self, session: &Session) -> Session {
+    /// Builds the long-term session with the revision ID and inner token, retaining shared fields.
+    fn into_inner_session(self, session: &Session) -> Session {
         Session {
             object_id: ObjectId {
                 context: session.object_id.context.clone(),
@@ -469,7 +470,7 @@ impl Backend for TieredStorage {
     ) -> Result<UploadProgress> {
         let tiered = TieredResumableToken::decode(&session.backend_token)?;
         let time_expires = tiered.time_expires;
-        let inner_session = tiered.into_session(session);
+        let inner_session = tiered.into_inner_session(session);
         let id = &session.object_id;
         let revision = &inner_session.object_id;
         let end = offset
@@ -584,14 +585,14 @@ impl Backend for TieredStorage {
     #[tracing::instrument(level = "debug", fields(?session), skip_all)]
     async fn upload_offset(&self, session: &Session) -> Result<UploadProgress> {
         let tiered = TieredResumableToken::decode(&session.backend_token)?;
-        let inner_session = tiered.into_session(session);
+        let inner_session = tiered.into_inner_session(session);
         self.inner.long_term.upload_offset(&inner_session).await
     }
 
     #[tracing::instrument(level = "debug", fields(?session), skip_all)]
     async fn cancel_upload(&self, session: &Session) -> Result<()> {
         let tiered = TieredResumableToken::decode(&session.backend_token)?;
-        let inner_session = tiered.into_session(session);
+        let inner_session = tiered.into_inner_session(session);
         self.inner.long_term.cancel_upload(&inner_session).await
     }
 
