@@ -291,9 +291,6 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
 
     /// Writes a chunk of `content_length` bytes at `offset` into an open session.
     ///
-    /// The session identifies the upload and carries its declared length.
-    /// [`StorageService`](crate::StorageService) authenticates it before passing it to the backend.
-    ///
     /// A backend may acknowledge fewer bytes than the chunk supplied, for example by persisting
     /// only an aligned prefix. Callers must continue from the authoritative offset in the returned
     /// [`UploadProgress`], or query [`Self::upload_offset`] after an ambiguous failure. A backend
@@ -322,9 +319,6 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     }
 
     /// Reports how far the session has progressed.
-    ///
-    /// The session identifies the upload and carries its declared length.
-    /// [`StorageService`](crate::StorageService) authenticates it before passing it to the backend.
     ///
     /// This can return [`UploadProgress::Complete`] repeatedly after the final chunk, including
     /// when its original response was lost. A composed backend may finish pending idempotent
