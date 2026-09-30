@@ -178,7 +178,7 @@ server may persist only its aligned prefix.
 
 use bytes::Bytes;
 use anyhow::{Context as _, Result};
-use objectstore_client::{Session, UploadProgress};
+use objectstore_client::{Error, Session, UploadProgress};
 
 async fn upload_large_object(session: &Session, object: Bytes) -> Result<()> {
     let upload = session
@@ -197,10 +197,12 @@ async fn upload_large_object(session: &Session, object: Bytes) -> Result<()> {
         offset = match upload
             .put(offset, object.slice(offset as usize..))
             .send()
-            .await?
+            .await
         {
-            UploadProgress::Complete => return Ok(()),
-            UploadProgress::Incomplete { offset: next } => next,
+            Ok(UploadProgress::Complete) => return Ok(()),
+            Ok(UploadProgress::Incomplete { offset: next }) => next,
+            Err(Error::UploadOffsetMismatch { offset: next }) => next,
+            Err(err) => return Err(err.into()),
         };
     }
 }

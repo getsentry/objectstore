@@ -358,11 +358,10 @@ impl fmt::Debug for PutChunkBuilder {
 impl PutChunkBuilder {
     /// Writes this chunk and returns the server's authoritative progress.
     ///
-    /// If `offset` differs from the server's current offset, the response is returned as
-    /// [`UploadProgress::Incomplete`] with the server's authoritative offset.
-    ///
     /// # Errors
     ///
+    /// Returns [`Error::UploadOffsetMismatch`] with the server's authoritative offset when
+    /// `offset` differs from the server's current offset.
     /// Returns [`Error::ResumableUploadUnavailable`] when the session expired, was canceled, or
     /// could not be found. The upload must be restarted with a new session in that case.
     /// Returns [`Error::ChunkTooSmall`] before sending the request when this is known to be a
@@ -372,6 +371,7 @@ impl PutChunkBuilder {
     /// let offset = match upload.put(offset, chunk).send().await {
     ///     Ok(UploadProgress::Complete) => return Ok(()),
     ///     Ok(UploadProgress::Incomplete { offset }) => offset,
+    ///     Err(Error::UploadOffsetMismatch { offset }) => offset,
     ///     Err(error @ Error::ResumableUploadUnavailable) => todo!("retry the whole upload"),
     ///     Err(error) => todo!("handle error"),
     /// };
@@ -428,7 +428,7 @@ impl CancelUploadBuilder {
 
 async fn parse_progress_response(response: Response) -> crate::Result<UploadProgress> {
     match response.status() {
-        StatusCode::NO_CONTENT | StatusCode::CONFLICT => {
+        status @ (StatusCode::NO_CONTENT | StatusCode::CONFLICT) => {
             let offset = parse_offset(&response);
             response.drain_body().await;
             let offset = offset.ok_or_else(|| {
@@ -436,7 +436,11 @@ async fn parse_progress_response(response: Response) -> crate::Result<UploadProg
                     "resumable upload response has no valid Upload-Offset header".into(),
                 )
             })?;
-            Ok(UploadProgress::Incomplete { offset })
+            if status == StatusCode::CONFLICT {
+                Err(Error::UploadOffsetMismatch { offset })
+            } else {
+                Ok(UploadProgress::Incomplete { offset })
+            }
         }
         StatusCode::CREATED => {
             let _: CompleteUploadResponse = response.json().await?;
