@@ -1172,7 +1172,9 @@ impl HighVolumeBackend for BigTableBackend {
         state: Option<ResumableUploadState>,
         access_time: Timestamp,
     ) -> Result<bool> {
-        assert_ne!(state, Some(ResumableUploadState::Ongoing));
+        if state == Some(ResumableUploadState::Ongoing) {
+            return Ok(false);
+        }
         let predicate = v2::RowFilter {
             filter: Some(v2::row_filter::Filter::Chain(v2::row_filter::Chain {
                 filters: vec![
@@ -1740,6 +1742,16 @@ mod tests {
         for state in [None, Some(ResumableUploadState::Canceled)] {
             let id = make_id();
             backend.create_resumable_upload(&id, deadline).await?;
+            assert!(
+                !backend
+                    .transition_resumable_upload(
+                        &id,
+                        deadline,
+                        Some(ResumableUploadState::Ongoing),
+                        now,
+                    )
+                    .await?
+            );
             assert_eq!(
                 backend.get_resumable_upload(&id, now).await?,
                 Some(ResumableUploadRecord {

@@ -392,7 +392,9 @@ impl HighVolumeBackend for InMemoryBackend {
         state: Option<ResumableUploadState>,
         access_time: Timestamp,
     ) -> Result<bool> {
-        assert_ne!(state, Some(ResumableUploadState::Ongoing));
+        if state == Some(ResumableUploadState::Ongoing) {
+            return Ok(false);
+        }
         let mut uploads = self.tiered_uploads.lock().unwrap();
         let Some(row) = uploads.get_mut(id) else {
             return Ok(false);

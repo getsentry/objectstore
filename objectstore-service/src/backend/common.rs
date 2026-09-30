@@ -425,10 +425,7 @@ pub trait HighVolumeBackend: Backend {
     /// the row to consume finalization authority. Returns `true` only when this call
     /// changes an ongoing row; canceled, missing, and expired rows return `false`.
     /// `time_expires` must match the original deadline and is preserved when canceling.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `state` is `Some(ResumableUploadState::Ongoing)`.
+    /// Passing `Some(Ongoing)` is a no-op and returns `false`.
     async fn transition_resumable_upload(
         &self,
         id: &ObjectId,

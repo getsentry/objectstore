@@ -1774,6 +1774,16 @@ mod tests {
             .unwrap();
         assert!(row.time_expires >= now + RESUMABLE_UPLOAD_TTL);
         assert!(row.time_expires <= Timestamp::now() + RESUMABLE_UPLOAD_TTL);
+        assert!(
+            !hv.transition_resumable_upload(
+                &revision,
+                row.time_expires,
+                Some(ResumableUploadState::Ongoing),
+                now,
+            )
+            .await
+            .unwrap()
+        );
         // Non-final chunks keep the upload open and never extend its deadline.
         assert_eq!(
             storage
