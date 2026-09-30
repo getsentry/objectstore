@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.8
+
+### New Features ✨
+
+- (resumable) Define and expose upload granularity by @lcian in [#652](https://github.com/getsentry/objectstore/pull/652)
+
 ## 0.2.7
 
 ### New Features ✨
