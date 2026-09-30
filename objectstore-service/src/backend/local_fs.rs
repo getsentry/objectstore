@@ -340,7 +340,7 @@ impl Backend for LocalFsBackend {
         content_length: u64,
         stream: ClientStream,
     ) -> Result<UploadProgress> {
-        let session = UploadSession::from_token(token)?;
+        let upload_id = upload_id_from_token(token)?;
         offset
             .checked_add(content_length)
             .filter(|end| *end <= upload_length.get())
@@ -351,7 +351,7 @@ impl Backend for LocalFsBackend {
             })?;
         let _guard = self.locks.acquire(id).await?;
 
-        let upload_path = self.upload_path(session.upload_id);
+        let upload_path = self.upload_path(upload_id);
         let mut upload = UploadFile::open(&upload_path).await?;
         if content_length != 0 && offset != upload.offset() {
             return Err(ErrorKind::UploadOffsetMismatch {
@@ -401,9 +401,9 @@ impl Backend for LocalFsBackend {
 
     #[tracing::instrument(level = "debug", fields(?id), skip_all)]
     async fn cancel_upload(&self, id: &ObjectId, token: &BackendToken) -> Result<()> {
-        let session = UploadSession::from_token(token)?;
+        let upload_id = upload_id_from_token(token)?;
         let _guard = self.locks.acquire(id).await?;
-        let path = self.upload_path(session.upload_id);
+        let path = self.upload_path(upload_id);
         match tokio::fs::remove_file(&path).await {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -820,16 +820,8 @@ impl ObjectLocks {
     }
 }
 
-#[derive(Debug)]
-struct UploadSession {
-    upload_id: Uuid,
-}
-
-impl UploadSession {
-    fn from_token(token: &BackendToken) -> Result<Self> {
-        let upload_id = Uuid::parse_str(token).map_err(|_| ErrorKind::UnknownUploadSession)?;
-        Ok(Self { upload_id })
-    }
+fn upload_id_from_token(token: &BackendToken) -> Result<Uuid> {
+    Uuid::parse_str(token).map_err(|_| ErrorKind::UnknownUploadSession.into())
 }
 
 /// An open resumable upload containing a metadata preamble followed by payload bytes.
@@ -1173,8 +1165,8 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let session = UploadSession::from_token(&token).unwrap();
-        let upload_path = backend.upload_path(session.upload_id);
+        let upload_id = upload_id_from_token(&token).unwrap();
+        let upload_path = backend.upload_path(upload_id);
         assert_eq!(
             upload_path.parent().unwrap().file_name().unwrap(),
             "uploads"
