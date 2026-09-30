@@ -158,8 +158,8 @@ enable storage COGS, enable the `storage-cogs` Cargo feature and provide a
 connection details and a [`CostTrackerStreamConfig`](change_stream::CostTrackerStreamConfig)
 for per-backend information.
 
-Each row in the inventory table has an anonymized hash of its physical storage path,
-as well as the row's size, expiry, Sentry org/project, `app_feature`, and relevant
+Each row in the inventory table has an anonymized hash of an `ObjectId` as well
+as the row's size, expiry, Sentry org/project, `app_feature`, and relevant
 backend. When using [`TieredStorage`](backend::tiered::TieredStorage)'s
 long-term backend the inventory table will contain _two rows_ for an object: a
 row for the actual object and its size in long-term backend, and a separate row
@@ -173,7 +173,7 @@ Under the hood, [`CostTrackerStream`](change_stream::CostTrackerStream) uses
 change events; it is generic over the transport rather than tied to Kafka. Each
 backend has its own sampling rate to lessen the load put on the stream
 processor. Sampling decisions are made
-based on the physical storage path. Each change event includes the sampling rate that was in
+based on [`ObjectId`](id::ObjectId). Each change event includes the sampling rate that was in
 effect at the time so that consumers can smooth over the effects of changing the
 sampling rate. When aggregating, divide each row's value by its `sample_rate`.
 

@@ -3,8 +3,6 @@
 //! A backend describes its cost-tracking reporting with a [`CostTrackerStreamConfig`];
 //! the service describes where those records go with a [`CostTrackerConfig`], shared by
 //! every backend. [`ChangeStreamFactory`] pairs the two into a [`ChangeStream`].
-//! Physical storage paths identify reported rows; their object IDs supply usecase
-//! and scope metadata for attribution.
 //!
 //! Behind the `storage-cogs` feature. Without it every backend gets a [`NoopStream`] and
 //! the transport is left out of the binary.
@@ -17,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use objectstore_types::time::Timestamp;
 
-use crate::id::{AsStoragePath, ObjectId};
+use crate::id::ObjectId;
 
 #[cfg(feature = "storage-cogs")]
 mod cost_tracker;
@@ -83,26 +81,13 @@ fn default_sample_rate() -> f64 {
 #[async_trait::async_trait]
 pub trait ChangeStream: fmt::Debug + Send + Sync + 'static {
     /// Reports that `id` now occupies `size` bytes. Used for new writes and overwrites.
-    fn write(&self, id: &ObjectId, size: u64, expires_at: Option<Timestamp>) {
-        self.write_path(id.as_storage_path(), size, expires_at);
-    }
-
-    /// Reports a write at the actual storage path, including backend-internal namespaces.
-    ///
-    /// The path determines record identity and sampling; its object ID supplies the
-    /// usecase and scopes for attribution.
-    fn write_path(&self, path: AsStoragePath<'_>, size: u64, expires_at: Option<Timestamp>);
+    fn write(&self, id: &ObjectId, size: u64, expires_at: Option<Timestamp>);
 
     /// Reports that `id`'s expiration moved, with its stored size unchanged.
     fn update(&self, id: &ObjectId, expires_at: Option<Timestamp>);
 
     /// Reports that `id` was deleted explicitly. Does not account for automatic GC.
-    fn delete(&self, id: &ObjectId) {
-        self.delete_path(id.as_storage_path());
-    }
-
-    /// Reports explicit deletion at the same storage path used for its write records.
-    fn delete_path(&self, path: AsStoragePath<'_>);
+    fn delete(&self, id: &ObjectId);
 
     /// Blocks until reported records have been delivered, or `timeout` elapses.
     ///
@@ -128,11 +113,11 @@ pub struct NoopStream;
 
 #[async_trait::async_trait]
 impl ChangeStream for NoopStream {
-    fn write_path(&self, _path: AsStoragePath<'_>, _size: u64, _expires_at: Option<Timestamp>) {}
+    fn write(&self, _id: &ObjectId, _size: u64, _expires_at: Option<Timestamp>) {}
 
     fn update(&self, _id: &ObjectId, _expires_at: Option<Timestamp>) {}
 
-    fn delete_path(&self, _path: AsStoragePath<'_>) {}
+    fn delete(&self, _id: &ObjectId) {}
 
     async fn join(&self, _timeout: Duration) {}
 }

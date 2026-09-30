@@ -10,9 +10,9 @@ use crate::change_stream::{
 };
 use objectstore_types::time::Timestamp;
 
-use crate::id::{AsStoragePath, ObjectId};
+use crate::id::ObjectId;
 
-/// Reports through an [`InventoryTracker`], which hashes each storage path both to
+/// Reports through an [`InventoryTracker`], which hashes each [`ObjectId`] both to
 /// anonymize it and to decide whether it is sampled. See [`objectstore_inventory_tracker`]
 /// for the record format.
 ///
@@ -73,10 +73,9 @@ where
     P: Producer + Clone + Send + Sync + 'static,
     P::Error: Into<BoxError> + Send + 'static,
 {
-    fn write_path(&self, path: AsStoragePath<'_>, size: u64, expires_at: Option<Timestamp>) {
-        let id = path.object_id();
+    fn write(&self, id: &ObjectId, size: u64, expires_at: Option<Timestamp>) {
         let result = self.tracker.write(
-            &path.to_string(),
+            &id.as_storage_path().to_string(),
             id.usecase(),
             size,
             SystemTime::now(),
@@ -99,11 +98,12 @@ where
         self.swallow("update", result);
     }
 
-    fn delete_path(&self, path: AsStoragePath<'_>) {
-        let id = path.object_id();
-        let result = self
-            .tracker
-            .delete(&path.to_string(), id.usecase(), SystemTime::now());
+    fn delete(&self, id: &ObjectId) {
+        let result = self.tracker.delete(
+            &id.as_storage_path().to_string(),
+            id.usecase(),
+            SystemTime::now(),
+        );
         self.swallow("delete", result);
     }
 

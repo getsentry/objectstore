@@ -232,17 +232,10 @@ impl ObjectId {
 }
 
 /// A view returned by [`ObjectId::as_storage_path`].
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 pub struct AsStoragePath<'a> {
     inner: &'a ObjectId,
     delimiter: &'a str,
-}
-
-impl<'a> AsStoragePath<'a> {
-    /// Returns the object ID supplying this path's usecase, scopes, and key.
-    pub fn object_id(&self) -> &'a ObjectId {
-        self.inner
-    }
 }
 
 impl fmt::Display for AsStoragePath<'_> {
