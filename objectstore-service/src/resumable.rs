@@ -11,7 +11,6 @@
 //! opaque backend state  | { ObjectId, upload_length, BackendToken }    | b64url encoded opaque envelope |
 //! ```
 
-use std::fmt;
 use std::num::NonZeroU64;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
@@ -30,7 +29,7 @@ pub type BackendToken = String;
 /// The service encrypts this value before returning it to clients and authenticates it before
 /// passing it to backend continuation operations. Composed backends can derive an inner session
 /// by replacing the object ID and backend token while retaining the shared upload information.
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Session {
     /// Object being uploaded through the receiving backend.
     #[serde(
@@ -42,15 +41,6 @@ pub struct Session {
     pub upload_length: NonZeroU64,
     /// Opaque session state belonging to the receiving backend.
     pub backend_token: BackendToken,
-}
-
-impl fmt::Debug for Session {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Session")
-            .field("object_id", &self.object_id)
-            .field("upload_length", &self.upload_length)
-            .finish_non_exhaustive()
-    }
 }
 
 fn serialize_object_id<S>(id: &ObjectId, serializer: S) -> std::result::Result<S::Ok, S::Error>
