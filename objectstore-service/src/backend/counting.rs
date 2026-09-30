@@ -32,7 +32,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
-use crate::resumable::BackendToken;
+use crate::resumable::{BackendToken, Session};
 use crate::stream::ClientStream;
 
 /// Increments `cogs.usage` by one operation for the given `usecase`.
@@ -135,36 +135,35 @@ impl Backend for CountingBackend {
         &self,
         id: &ObjectId,
         metadata: &Metadata,
-        total_length: NonZeroU64,
+        upload_length: NonZeroU64,
     ) -> Result<Option<BackendToken>> {
         count(&id.context.usecase);
         self.inner
-            .create_upload_session(id, metadata, total_length)
+            .create_upload_session(id, metadata, upload_length)
             .await
     }
 
     async fn put_chunk(
         &self,
-        id: &ObjectId,
-        token: &BackendToken,
+        session: &Session,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
     ) -> Result<UploadProgress> {
-        count(&id.context.usecase);
+        count(&session.object_id.context.usecase);
         self.inner
-            .put_chunk(id, token, offset, content_length, stream)
+            .put_chunk(session, offset, content_length, stream)
             .await
     }
 
-    async fn upload_offset(&self, id: &ObjectId, token: &BackendToken) -> Result<UploadProgress> {
-        count(&id.context.usecase);
-        self.inner.upload_offset(id, token).await
+    async fn upload_offset(&self, session: &Session) -> Result<UploadProgress> {
+        count(&session.object_id.context.usecase);
+        self.inner.upload_offset(session).await
     }
 
-    async fn cancel_upload(&self, id: &ObjectId, token: &BackendToken) -> Result<()> {
-        count(&id.context.usecase);
-        self.inner.cancel_upload(id, token).await
+    async fn cancel_upload(&self, session: &Session) -> Result<()> {
+        count(&session.object_id.context.usecase);
+        self.inner.cancel_upload(session).await
     }
 }
 

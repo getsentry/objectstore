@@ -17,7 +17,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
-use crate::resumable::BackendToken;
+use crate::resumable::{BackendToken, Session};
 use crate::stream::{ClientStream, PayloadStream};
 
 /// User agent string used for outgoing requests.
@@ -283,9 +283,9 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
         &self,
         id: &ObjectId,
         metadata: &Metadata,
-        total_length: NonZeroU64,
+        upload_length: NonZeroU64,
     ) -> Result<Option<BackendToken>> {
-        let _ = (id, metadata, total_length);
+        let _ = (id, metadata, upload_length);
         Ok(None)
     }
 
@@ -303,19 +303,18 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// A `content_length` of zero is valid. It writes nothing and reports the offset the backend
     /// holds.
     ///
-    /// Returns [`ErrorKind::UnknownUploadSession`] when `token` does not identify an open session,
+    /// Returns [`ErrorKind::UnknownUploadSession`] when `session` does not identify an open session,
     /// and [`ErrorKind::ChunkExceedsUploadLength`] when the chunk would exceed the total length
     /// declared when the session was created. Returns [`ErrorKind::ChunkTooSmall`] when a non-empty,
     /// non-final chunk is shorter than the upload granularity.
     async fn put_chunk(
         &self,
-        id: &ObjectId,
-        token: &BackendToken,
+        session: &Session,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
     ) -> Result<UploadProgress> {
-        let _ = (id, token, offset, content_length, stream);
+        let _ = (session, offset, content_length, stream);
         Err(ErrorKind::Unsupported.into())
     }
 
@@ -325,17 +324,17 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// when its original response was lost. A composed backend may finish pending idempotent
     /// publication work before returning that terminal outcome.
     ///
-    /// Returns [`ErrorKind::UnknownUploadSession`] when `token` does not identify a known session.
-    async fn upload_offset(&self, id: &ObjectId, token: &BackendToken) -> Result<UploadProgress> {
-        let _ = (id, token);
+    /// Returns [`ErrorKind::UnknownUploadSession`] when `session` does not identify a known session.
+    async fn upload_offset(&self, session: &Session) -> Result<UploadProgress> {
+        let _ = session;
         Err(ErrorKind::Unsupported.into())
     }
 
     /// Cancels an upload session, discarding whatever was uploaded.
     ///
-    /// Returns [`ErrorKind::UnknownUploadSession`] when `token` does not identify an open session.
-    async fn cancel_upload(&self, id: &ObjectId, token: &BackendToken) -> Result<()> {
-        let _ = (id, token);
+    /// Returns [`ErrorKind::UnknownUploadSession`] when `session` does not identify an open session.
+    async fn cancel_upload(&self, session: &Session) -> Result<()> {
+        let _ = session;
         Err(ErrorKind::Unsupported.into())
     }
 }
