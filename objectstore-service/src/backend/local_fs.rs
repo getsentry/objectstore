@@ -340,7 +340,7 @@ impl Backend for LocalFsBackend {
         content_length: u64,
         stream: ClientStream,
     ) -> Result<UploadProgress> {
-        let upload_id = upload_id_from_token(token)?;
+        let upload_id = Uuid::parse_str(token).map_err(|_| ErrorKind::UnknownUploadSession)?;
         offset
             .checked_add(content_length)
             .filter(|end| *end <= upload_length.get())
@@ -401,7 +401,7 @@ impl Backend for LocalFsBackend {
 
     #[tracing::instrument(level = "debug", fields(?id), skip_all)]
     async fn cancel_upload(&self, id: &ObjectId, token: &BackendToken) -> Result<()> {
-        let upload_id = upload_id_from_token(token)?;
+        let upload_id = Uuid::parse_str(token).map_err(|_| ErrorKind::UnknownUploadSession)?;
         let _guard = self.locks.acquire(id).await?;
         let path = self.upload_path(upload_id);
         match tokio::fs::remove_file(&path).await {
@@ -820,10 +820,6 @@ impl ObjectLocks {
     }
 }
 
-fn upload_id_from_token(token: &BackendToken) -> Result<Uuid> {
-    Uuid::parse_str(token).map_err(|_| ErrorKind::UnknownUploadSession.into())
-}
-
 /// An open resumable upload containing a metadata preamble followed by payload bytes.
 struct UploadFile {
     file: tokio::fs::File,
@@ -1165,7 +1161,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let upload_id = upload_id_from_token(&token).unwrap();
+        let upload_id = Uuid::parse_str(&token).unwrap();
         let upload_path = backend.upload_path(upload_id);
         assert_eq!(
             upload_path.parent().unwrap().file_name().unwrap(),
