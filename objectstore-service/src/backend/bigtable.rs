@@ -2,7 +2,7 @@
 //!
 //! # Row Format
 //!
-//! Each row key is the object's storage path. A row contains either an **object** or a
+//! Object row keys use the object's storage path. An object row contains either an **object** or a
 //! **tombstone** — never both. The two layouts are mutually exclusive and distinguished by
 //! column presence:
 //!
@@ -19,6 +19,10 @@
 //!
 //! `p`/`m` and `r` are mutually exclusive. Every write begins with a `DeleteFromRow`
 //! mutation that clears all columns before writing the new cells, so mixed rows cannot exist.
+//!
+//! Upload markers use a separate `uploads` namespace and contain only a one-byte
+//! `u` cell in `fg`, timestamped with the upload deadline. They are internal
+//! bookkeeping and emit no object change-stream events.
 //!
 //! ## Legacy Tombstone Format
 //!
@@ -184,6 +188,8 @@ const COLUMN_PAYLOAD: &[u8] = b"p";
 const COLUMN_METADATA: &[u8] = b"m";
 /// Column that stores the redirect path for tombstone rows.
 const COLUMN_REDIRECT: &[u8] = b"r";
+/// Column whose presence authorizes an ongoing upload, in the separate uploads namespace.
+const COLUMN_UPLOAD: &[u8] = b"u";
 /// Regex to match all non-payload columns (`m`, `r`) for metadata-only reads.
 const FILTER_META: &[u8] = b"^[mr]$";
 
@@ -1069,6 +1075,50 @@ impl Backend for BigTableBackend {
 
 #[async_trait::async_trait]
 impl HighVolumeBackend for BigTableBackend {
+    async fn create_upload_marker(&self, id: &ObjectId, time_expires: Timestamp) -> Result<()> {
+        let mutations = vec![mutation(mutation::Mutation::SetCell(mutation::SetCell {
+            family_name: FAMILY_GC.to_owned(),
+            column_qualifier: COLUMN_UPLOAD.to_vec(),
+            timestamp_micros: time_expires.as_micros() as i64,
+            value: vec![1],
+        }))];
+        self.mutate(
+            id.as_upload_path().to_string().into_bytes(),
+            mutations,
+            "create_upload_marker",
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn has_upload_marker(&self, id: &ObjectId, access_time: Timestamp) -> Result<bool> {
+        let request = v2::ReadRowsRequest {
+            table_name: self.table_path.clone(),
+            rows: Some(v2::RowSet {
+                row_keys: vec![id.as_upload_path().to_string().into_bytes()],
+                row_ranges: vec![],
+            }),
+            filter: Some(live_row_filter(column_filter(COLUMN_UPLOAD), access_time)),
+            rows_limit: 1,
+            ..Default::default()
+        };
+        let rows = retry("has_upload_marker", || async {
+            self.bigtable.client().read_rows(request.clone()).await
+        })
+        .await?;
+        Ok(!rows.is_empty())
+    }
+
+    async fn delete_upload_marker(&self, id: &ObjectId, access_time: Timestamp) -> Result<bool> {
+        self.check_and_mutate(
+            id.as_upload_path().to_string().into_bytes(),
+            MutatePredicate::Include(live_row_filter(column_filter(COLUMN_UPLOAD), access_time)),
+            vec![delete_row_mutation()],
+            "delete_upload_marker",
+        )
+        .await
+    }
+
     #[tracing::instrument(level = "debug", fields(?id), skip_all)]
     async fn put_non_tombstone(
         &self,
