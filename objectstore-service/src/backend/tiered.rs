@@ -434,13 +434,13 @@ impl TieredStorage {
 type LongTermBackendToken = BackendToken;
 
 #[derive(Debug, Serialize, Deserialize)]
-struct TieredUploadToken {
+struct TieredResumableToken {
     inner: LongTermBackendToken,
     revision: String,
     time_expires: Option<Timestamp>,
 }
 
-impl TieredUploadToken {
+impl TieredResumableToken {
     fn decode(token: &BackendToken) -> Result<Self> {
         serde_json::from_str(token).map_err(|_| ErrorKind::UnknownUploadSession.into())
     }
@@ -512,7 +512,7 @@ impl Backend for TieredStorage {
             }
             return Err(error);
         }
-        let token = TieredUploadToken {
+        let token = TieredResumableToken {
             revision: revision.key,
             inner,
             time_expires: metadata.time_expires,
@@ -531,7 +531,7 @@ impl Backend for TieredStorage {
         content_length: u64,
         stream: ClientStream,
     ) -> Result<UploadProgress> {
-        let tiered = TieredUploadToken::decode(&session.backend_token)?;
+        let tiered = TieredResumableToken::decode(&session.backend_token)?;
         let time_expires = tiered.time_expires;
         let inner_session = tiered.into_inner_session(session);
         let id = &session.object_id;
@@ -633,7 +633,7 @@ impl Backend for TieredStorage {
 
     #[tracing::instrument(level = "debug", fields(?session), skip_all)]
     async fn upload_offset(&self, session: &Session) -> Result<UploadProgress> {
-        let tiered = TieredUploadToken::decode(&session.backend_token)?;
+        let tiered = TieredResumableToken::decode(&session.backend_token)?;
         let inner_session = tiered.into_inner_session(session);
         self.check_upload_marker(&inner_session.object_id).await?;
         match self.inner.long_term.upload_offset(&inner_session).await? {
@@ -644,7 +644,7 @@ impl Backend for TieredStorage {
 
     #[tracing::instrument(level = "debug", fields(?session), skip_all)]
     async fn cancel_upload(&self, session: &Session) -> Result<()> {
-        let tiered = TieredUploadToken::decode(&session.backend_token)?;
+        let tiered = TieredResumableToken::decode(&session.backend_token)?;
         let inner_session = tiered.into_inner_session(session);
         self.delete_upload_marker(&inner_session.object_id).await?;
         if let Err(error) = self.inner.long_term.cancel_upload(&inner_session).await {
@@ -1298,7 +1298,7 @@ mod tests {
         (storage, hv, lt, changelog)
     }
 
-    async fn upload_session(
+    async fn resumable_token(
         storage: &TieredStorage,
         id: &ObjectId,
         metadata: &Metadata,
@@ -1317,18 +1317,19 @@ mod tests {
     }
 
     fn upload_revision(session: &Session) -> ObjectId {
-        TieredUploadToken::decode(&session.backend_token)
+        TieredResumableToken::decode(&session.backend_token)
             .unwrap()
             .into_inner_session(session)
             .object_id
     }
 
     #[tokio::test]
-    async fn upload_inmemory() -> anyhow::Result<()> {
+    async fn resumable_inmemory() -> anyhow::Result<()> {
         let (storage, _, _, _) = make_tiered_storage();
         let id = make_id("tiered-resumable-inmemory");
         let payload = vec![b'a'; BACKEND_SIZE_THRESHOLD + 1];
-        let token = upload_session(&storage, &id, &Metadata::default(), payload.len() as u64).await;
+        let token =
+            resumable_token(&storage, &id, &Metadata::default(), payload.len() as u64).await;
 
         let revision = upload_revision(&token);
         assert!(
@@ -1403,7 +1404,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upload_bigtable_and_gcs() -> anyhow::Result<()> {
+    async fn resumable_bigtable_and_gcs() -> anyhow::Result<()> {
         let streams = ChangeStreamFactory::default();
         let lt = GcsBackend::new(
             GcsConfig {
@@ -1430,7 +1431,8 @@ mod tests {
         let storage = TieredStorage::new(Box::new(hv), Box::new(lt), Box::new(NoopChangeLog));
         let id = make_id(&format!("tiered-resumable-{}", uuid::Uuid::now_v7()));
         let payload = vec![b'a'; BACKEND_SIZE_THRESHOLD + 1];
-        let token = upload_session(&storage, &id, &Metadata::default(), payload.len() as u64).await;
+        let token =
+            resumable_token(&storage, &id, &Metadata::default(), payload.len() as u64).await;
 
         let error = storage
             .put_chunk(&token, 0, 1, stream::single("a"))
@@ -1517,11 +1519,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upload_invalid_chunks() {
+    async fn resumable_invalid_chunks() {
         let (storage, _, _, _) = make_tiered_storage();
         let id = make_id("resumable-invalid");
         let length = BACKEND_SIZE_THRESHOLD as u64 + 1;
-        let token = upload_session(&storage, &id, &Metadata::default(), length).await;
+        let token = resumable_token(&storage, &id, &Metadata::default(), length).await;
 
         // Overflow and future offsets are rejected.
         assert_eq!(
@@ -1547,10 +1549,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_upload() {
+    async fn resumable_cancel() {
         let (storage, hv, _, _) = make_tiered_storage();
         let id = make_id("resumable-invalid");
-        let token = upload_session(
+        let token = resumable_token(
             &storage,
             &id,
             &Metadata::default(),
@@ -2375,7 +2377,7 @@ mod tests {
         let id = make_id("upload-cas-conflict");
         let payload = vec![0xAB; BACKEND_SIZE_THRESHOLD + 1];
         let session =
-            upload_session(&storage, &id, &Metadata::default(), payload.len() as u64).await;
+            resumable_token(&storage, &id, &Metadata::default(), payload.len() as u64).await;
 
         assert_eq!(
             storage
@@ -2503,7 +2505,7 @@ mod tests {
         let id = make_id("upload-cas-failure");
         let payload = vec![0xAB; BACKEND_SIZE_THRESHOLD + 1];
         let session =
-            upload_session(&storage, &id, &Metadata::default(), payload.len() as u64).await;
+            resumable_token(&storage, &id, &Metadata::default(), payload.len() as u64).await;
 
         assert_eq!(
             storage
