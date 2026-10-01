@@ -2,15 +2,16 @@ use crate::change_stream::ChangeStream;
 use async_trait::async_trait;
 use objectstore_types::time::Timestamp;
 use serde::{Deserialize, Serialize};
+use sqlx::SqlitePool;
+use sqlx::error::BoxDynError;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode};
-use sqlx::{Connection, SqlitePool};
-use std::fmt;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
-#[expect(dead_code)]
+#[allow(dead_code)]
 pub struct SqliteGarbageCollectorConfig {
     pub path: String,
 }
@@ -23,13 +24,14 @@ impl Default for SqliteGarbageCollectorConfig {
     }
 }
 
-#[expect(dead_code)]
+#[allow(dead_code)]
+#[derive(Debug)]
 pub struct SqliteGarbageCollectorStream {
     pool: SqlitePool,
     active_tasks: Arc<AtomicUsize>,
 }
 
-#[expect(dead_code)]
+#[allow(dead_code)]
 impl SqliteGarbageCollectorStream {
     pub async fn new(config: &SqliteGarbageCollectorConfig) -> Result<Self, sqlx::Error> {
         let opts = SqliteConnectOptions::from_str(&config.path)?
@@ -46,12 +48,6 @@ impl SqliteGarbageCollectorStream {
     }
 }
 
-impl fmt::Debug for SqliteGarbageCollectorStream {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SqliteGarbageCollector").finish()
-    }
-}
-
 #[async_trait]
 impl ChangeStream for SqliteGarbageCollectorStream {
     fn write(&self, id: &crate::id::ObjectId, _size: u64, expires_at: Option<Timestamp>) {
@@ -64,16 +60,11 @@ impl ChangeStream for SqliteGarbageCollectorStream {
 
         tokio::spawn(async move {
             let _ = async {
-                let mut connection = pool.acquire().await?;
-                let mut tx_db = connection.begin().await?;
-
-                sqlx::query("INSERT INTO garbage_collector (object_id, expires_at) VALUES (?, ?)")
+                sqlx::query("INSERT INTO garbage_collector (object_id, expires_at) VALUES (?, ?) ON CONFLICT (object_id) DO UPDATE SET expires_at = excluded.expires_at")
                     .bind(id.as_storage_path().to_string())
                     .bind(expires_at.map(|t| i64::try_from(t.as_secs()).ok()))
-                    .execute(&mut *tx_db)
+                    .execute(&pool)
                     .await?;
-
-                tx_db.commit().await?;
 
                 Ok::<(), sqlx::Error>(())
             }
@@ -94,16 +85,11 @@ impl ChangeStream for SqliteGarbageCollectorStream {
 
         tokio::spawn(async move {
             let _ = async {
-                let mut connection = pool.acquire().await?;
-                let mut tx_db = connection.begin().await?;
-
                 sqlx::query("UPDATE garbage_collector SET expires_at = ? WHERE object_id = ?")
                     .bind(expires_at.map(|t| i64::try_from(t.as_secs()).ok()))
                     .bind(id.as_storage_path().to_string())
-                    .execute(&mut *tx_db)
+                    .execute(&pool)
                     .await?;
-
-                tx_db.commit().await?;
 
                 Ok::<(), sqlx::Error>(())
             }
@@ -123,15 +109,10 @@ impl ChangeStream for SqliteGarbageCollectorStream {
 
         tokio::spawn(async move {
             let _ = async {
-                let mut connection = pool.acquire().await?;
-                let mut tx_db = connection.begin().await?;
-
                 sqlx::query("DELETE FROM garbage_collector WHERE object_id = ?")
                     .bind(id.as_storage_path().to_string())
-                    .execute(&mut *tx_db)
+                    .execute(&pool)
                     .await?;
-
-                tx_db.commit().await?;
 
                 Ok::<(), sqlx::Error>(())
             }
@@ -421,14 +402,5 @@ mod tests {
         // Should complete almost immediately (task is fast)
         assert!(elapsed < Duration::from_secs(1));
         assert_eq!(stream.active_tasks.load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
-    async fn test_debug_impl() {
-        let config = create_test_config();
-        let stream = SqliteGarbageCollectorStream::new(&config).await.unwrap();
-
-        let debug_str = format!("{:?}", stream);
-        assert!(debug_str.contains("SqliteGarbageCollector"));
     }
 }
