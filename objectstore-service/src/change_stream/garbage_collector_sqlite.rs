@@ -100,9 +100,9 @@ impl ChangeStream for SqliteGarbageCollectorStream {
         });
     }
 
-    async fn join(&self, _timeout: std::time::Duration) {
+    async fn join(&self, timeout: std::time::Duration) {
         self.task_tracker.close();
-        self.task_tracker.wait().await;
+        let _ = tokio::time::timeout(timeout, self.task_tracker.wait()).await;
     }
 }
 
