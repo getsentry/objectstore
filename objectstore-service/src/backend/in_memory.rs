@@ -360,27 +360,38 @@ impl super::common::Backend for InMemoryBackend {
 
 #[async_trait::async_trait]
 impl HighVolumeBackend for InMemoryBackend {
-    async fn create_upload_marker(&self, id: &ObjectId, time_expires: Timestamp) -> Result<()> {
+    async fn create_upload_marker(
+        &self,
+        revision: &ObjectId,
+        time_expires: Timestamp,
+    ) -> Result<()> {
         self.upload_markers
             .lock()
             .unwrap()
-            .insert(id.clone(), time_expires);
+            .insert(revision.clone(), time_expires);
         Ok(())
     }
 
-    async fn has_upload_marker(&self, id: &ObjectId, access_time: Timestamp) -> Result<bool> {
+    async fn has_upload_marker(&self, revision: &ObjectId, access_time: Timestamp) -> Result<bool> {
         Ok(self
             .upload_markers
             .lock()
             .unwrap()
-            .get(id)
+            .get(revision)
             .is_some_and(|expiry| *expiry >= access_time))
     }
 
-    async fn delete_upload_marker(&self, id: &ObjectId, access_time: Timestamp) -> Result<bool> {
+    async fn delete_upload_marker(
+        &self,
+        revision: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<bool> {
         let mut markers = self.upload_markers.lock().unwrap();
-        if markers.get(id).is_some_and(|expiry| *expiry >= access_time) {
-            markers.remove(id);
+        if markers
+            .get(revision)
+            .is_some_and(|expiry| *expiry >= access_time)
+        {
+            markers.remove(revision);
             Ok(true)
         } else {
             Ok(false)

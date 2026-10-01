@@ -148,30 +148,30 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
     async fn create_upload_marker(
         &self,
         inner: &InMemoryBackend,
-        id: &ObjectId,
+        revision: &ObjectId,
         time_expires: Timestamp,
     ) -> Result<()> {
-        inner.create_upload_marker(id, time_expires).await
+        inner.create_upload_marker(revision, time_expires).await
     }
 
     /// Intercepts [`HighVolumeBackend::has_upload_marker`]. Default delegates to `inner`.
     async fn has_upload_marker(
         &self,
         inner: &InMemoryBackend,
-        id: &ObjectId,
+        revision: &ObjectId,
         access_time: Timestamp,
     ) -> Result<bool> {
-        inner.has_upload_marker(id, access_time).await
+        inner.has_upload_marker(revision, access_time).await
     }
 
     /// Intercepts [`HighVolumeBackend::delete_upload_marker`]. Default delegates to `inner`.
     async fn delete_upload_marker(
         &self,
         inner: &InMemoryBackend,
-        id: &ObjectId,
+        revision: &ObjectId,
         access_time: Timestamp,
     ) -> Result<bool> {
-        inner.delete_upload_marker(id, access_time).await
+        inner.delete_upload_marker(revision, access_time).await
     }
 
     /// Intercepts [`HighVolumeBackend::put_non_tombstone`]. Default delegates to `inner`.
@@ -499,21 +499,29 @@ impl<H: Hooks> Backend for TestBackend<H> {
 
 #[async_trait::async_trait]
 impl<H: Hooks> HighVolumeBackend for TestBackend<H> {
-    async fn create_upload_marker(&self, id: &ObjectId, time_expires: Timestamp) -> Result<()> {
+    async fn create_upload_marker(
+        &self,
+        revision: &ObjectId,
+        time_expires: Timestamp,
+    ) -> Result<()> {
         self.hooks
-            .create_upload_marker(&self.inner, id, time_expires)
+            .create_upload_marker(&self.inner, revision, time_expires)
             .await
     }
 
-    async fn has_upload_marker(&self, id: &ObjectId, access_time: Timestamp) -> Result<bool> {
+    async fn has_upload_marker(&self, revision: &ObjectId, access_time: Timestamp) -> Result<bool> {
         self.hooks
-            .has_upload_marker(&self.inner, id, access_time)
+            .has_upload_marker(&self.inner, revision, access_time)
             .await
     }
 
-    async fn delete_upload_marker(&self, id: &ObjectId, access_time: Timestamp) -> Result<bool> {
+    async fn delete_upload_marker(
+        &self,
+        revision: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<bool> {
         self.hooks
-            .delete_upload_marker(&self.inner, id, access_time)
+            .delete_upload_marker(&self.inner, revision, access_time)
             .await
     }
 

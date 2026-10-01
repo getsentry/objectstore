@@ -403,18 +403,26 @@ pub trait MultipartUploadBackend: Backend + fmt::Debug + Send + Sync + 'static {
 pub trait HighVolumeBackend: Backend {
     /// Creates an upload marker separate from the logical object row.
     ///
-    /// `id` is the upload's unique LT revision. The fixed deadline is independent
+    /// `revision` is the upload's unique LT revision. The fixed deadline is independent
     /// of object expiration and must not be refreshed by subsequent requests.
-    async fn create_upload_marker(&self, id: &ObjectId, time_expires: Timestamp) -> Result<()>;
+    async fn create_upload_marker(
+        &self,
+        revision: &ObjectId,
+        time_expires: Timestamp,
+    ) -> Result<()>;
 
     /// Returns whether an upload marker exists and is live at `access_time`.
-    async fn has_upload_marker(&self, id: &ObjectId, access_time: Timestamp) -> Result<bool>;
+    async fn has_upload_marker(&self, revision: &ObjectId, access_time: Timestamp) -> Result<bool>;
 
     /// Atomically deletes a live upload marker, consuming permission to finish or cancel it.
     ///
     /// Returns `true` only when this call deletes a live marker. Missing and expired
     /// markers return `false`, including on a repeated deletion.
-    async fn delete_upload_marker(&self, id: &ObjectId, access_time: Timestamp) -> Result<bool>;
+    async fn delete_upload_marker(
+        &self,
+        revision: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<bool>;
 
     /// Writes the object only if NO redirect tombstone exists at this key.
     ///
