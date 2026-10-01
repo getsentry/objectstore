@@ -16,6 +16,10 @@ import zstandard
 from urllib3.connectionpool import HTTPConnectionPool
 
 from objectstore_client import presign, utils
+from objectstore_client._resumable import (
+    _create_upload,
+    _ResumableUpload,
+)
 from objectstore_client.auth import Permission, SecretKey, TokenProvider
 from objectstore_client.errors import (
     ExpiryExtensionRejected,
@@ -320,6 +324,31 @@ class Session:
             headers["x-os-auth"] = f"Bearer {token}"
         return headers
 
+    def _make_upload_metadata_headers(
+        self,
+        *,
+        content_type: str | None = None,
+        expiration_policy: ExpirationPolicy | None = None,
+        origin: str | None = None,
+        filename: str | None = None,
+        metadata: dict[str, str] | None = None,
+    ) -> dict[str, str]:
+        """Build upload metadata headers using the usecase's expiration default."""
+        headers: dict[str, str] = {}
+        if content_type:
+            headers["Content-Type"] = content_type
+        expiration_policy = expiration_policy or self._usecase._expiration_policy
+        if expiration_policy:
+            headers[HEADER_EXPIRATION] = format_expiration(expiration_policy)
+        if origin:
+            headers[HEADER_ORIGIN] = utils.encode_header_value(origin)
+        if filename is not None:
+            headers[HEADER_FILENAME] = utils.encode_header_value(filename)
+        if metadata:
+            for k, v in metadata.items():
+                headers[f"{HEADER_META_PREFIX}{k}"] = utils.encode_header_value(v)
+        return headers
+
     def _base_url(self) -> str:
         # urllib3 stores IPv6 hosts unbracketed (e.g. "::1"); bracket them so
         # the result is a valid absolute URL.
@@ -418,22 +447,15 @@ class Session:
             body = cctx.stream_reader(original_body)
             body = cast(IO[bytes], utils._ZstdCompressionReaderWrapper(body))
 
-        if content_type:
-            headers["Content-Type"] = content_type
-
-        expiration_policy = expiration_policy or self._usecase._expiration_policy
-        if expiration_policy:
-            headers[HEADER_EXPIRATION] = format_expiration(expiration_policy)
-
-        if origin:
-            headers[HEADER_ORIGIN] = utils.encode_header_value(origin)
-
-        if filename is not None:
-            headers[HEADER_FILENAME] = utils.encode_header_value(filename)
-
-        if metadata:
-            for k, v in metadata.items():
-                headers[f"{HEADER_META_PREFIX}{k}"] = utils.encode_header_value(v)
+        headers.update(
+            self._make_upload_metadata_headers(
+                content_type=content_type,
+                expiration_policy=expiration_policy,
+                origin=origin,
+                filename=filename,
+                metadata=metadata,
+            )
+        )
 
         if key == "":
             key = None
@@ -779,6 +801,35 @@ class Session:
             )
             raise_for_status(response)
 
+    def _create_upload(
+        self,
+        object_length: int,
+        *,
+        key: str | None = None,
+        compression: Compression | None = None,
+        content_type: str | None = None,
+        metadata: dict[str, str] | None = None,
+        expiration_policy: ExpirationPolicy | None = None,
+        origin: str | None = None,
+        filename: str | None = None,
+    ) -> _ResumableUpload | None:
+        """Create a private resumable upload, or return None if declined."""
+        return _create_upload(
+            self,
+            object_length,
+            key=key,
+            compression=compression,
+            content_type=content_type,
+            metadata=metadata,
+            expiration_policy=expiration_policy,
+            origin=origin,
+            filename=filename,
+        )
+
+    def _resume_upload(self, key: str, token: str) -> _ResumableUpload:
+        """Reconstruct a private upload handle without contacting the server."""
+        return _ResumableUpload(self, key, token)
+
     def initiate_multipart_upload(
         self,
         *,
@@ -811,22 +862,15 @@ class Session:
         if compression and compression != "none":
             headers["Content-Encoding"] = compression
 
-        if content_type:
-            headers["Content-Type"] = content_type
-
-        expiration_policy = expiration_policy or self._usecase._expiration_policy
-        if expiration_policy:
-            headers[HEADER_EXPIRATION] = format_expiration(expiration_policy)
-
-        if origin:
-            headers[HEADER_ORIGIN] = utils.encode_header_value(origin)
-
-        if filename is not None:
-            headers[HEADER_FILENAME] = utils.encode_header_value(filename)
-
-        if metadata:
-            for k, v in metadata.items():
-                headers[f"{HEADER_META_PREFIX}{k}"] = utils.encode_header_value(v)
+        headers.update(
+            self._make_upload_metadata_headers(
+                content_type=content_type,
+                expiration_policy=expiration_policy,
+                origin=origin,
+                filename=filename,
+                metadata=metadata,
+            )
+        )
 
         if key == "":
             key = None

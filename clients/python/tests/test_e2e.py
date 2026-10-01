@@ -12,6 +12,7 @@ from collections.abc import Generator
 from datetime import timedelta
 from io import BytesIO
 from pathlib import Path
+from typing import Any
 
 import pytest
 import urllib3
@@ -22,6 +23,10 @@ from objectstore_client import (
     ObjectNotFound,
     Session,
     Usecase,
+)
+from objectstore_client._resumable import (
+    _MalformedResponse,
+    _ResumableUploadUnavailable,
 )
 from objectstore_client.auth import Permission, SecretKey
 from objectstore_client.errors import RequestError
@@ -177,6 +182,128 @@ def test_full_cycle(server_url: str) -> None:
     session.delete(object_key)
 
     assert session.get(object_key) is None
+
+
+def test_resumable_upload(server_url: str) -> None:
+    client = Client(server_url, token=TestSecretKey.get())
+    policy = TimeToLive(timedelta(days=1))
+    session = client.session(
+        Usecase("test-usecase", expiration_policy=policy), org=42, project=1337
+    )
+    upload = session._create_upload(
+        6,
+        key="resumable/bytes",
+        content_type="text/plain",
+        origin="Ünknown-源",
+        filename="réport.txt",
+        metadata={"source": "résumé"},
+    )
+    assert upload is not None
+    assert upload.key == "resumable/bytes"
+    assert upload.granularity == 0
+    assert upload.progress().offset == 0
+    assert session.get(upload.key) is None
+    assert upload.put(0, b"abc").offset == 3
+
+    resumed = session._resume_upload(upload.key, upload.token)
+    assert resumed.granularity is None
+    assert resumed.progress().offset == 3
+    # A rejected earlier offset is normalized into authoritative progress.
+    conflict = resumed.put(0, b"bad")
+    assert not conflict.complete
+    assert conflict.offset == 3
+    assert resumed.put(3, b"def").complete
+
+    result = session.get(upload.key)
+    assert result is not None
+    assert result.payload.read() == b"abcdef"
+    assert result.metadata.compression is None
+    assert result.metadata.content_type == "text/plain"
+    assert result.metadata.expiration_policy == policy
+    assert result.metadata.origin == "Ünknown-源"
+    assert result.metadata.filename == "réport.txt"
+    assert result.metadata.custom == {"source": "résumé"}
+
+
+def test_resumable_upload_streams(server_url: str) -> None:
+    client = Client(server_url, token=TestSecretKey.get())
+    session = client.session(Usecase("test-usecase"), org=42)
+    compressed = zstandard.ZstdCompressor().compress(b"streamed payload")
+    upload = session._create_upload(len(compressed), key="", compression="zstd")
+    assert upload is not None
+    assert upload.key
+    split = len(compressed) // 2
+    reader = BytesIO(b"skip" + compressed[:split])
+    reader.seek(4)
+    assert upload.put(0, (reader, split)).offset == split
+    assert upload.progress().offset == split
+    rest = UnrewindableStream(compressed[split:])
+    assert upload.put(split, (rest, len(compressed) - split)).complete
+
+    raw = session.get(upload.key, decompress=False)
+    assert raw is not None
+    assert raw.metadata.compression == "zstd"
+    assert raw.payload.read() == compressed
+    decoded = session.get(upload.key)
+    assert decoded is not None
+    assert decoded.payload.read() == b"streamed payload"
+
+
+@pytest.mark.parametrize("status", [200, 201])
+@pytest.mark.parametrize("body", [b"", b"<html>bad response</html>"])
+def test_resumable_upload_malformed_json(
+    server_url: str, monkeypatch: pytest.MonkeyPatch, status: int, body: bytes
+) -> None:
+    client = Client(server_url, token=TestSecretKey.get())
+    session = client.session(Usecase("test-usecase"), org=42)
+    upload = session._create_upload(2) if status == 201 else None
+    original_request = session._pool.request
+
+    def request(method: str, url: str, **kwargs: Any) -> urllib3.BaseHTTPResponse:
+        response = original_request(method, url, **kwargs)
+        # Send the real request to the server, then corrupt its successful body.
+        if response.status == status:
+            return urllib3.HTTPResponse(body=BytesIO(body), status=status)
+        return response
+
+    with monkeypatch.context() as patch:
+        patch.setattr(session._pool, "request", request)
+        with pytest.raises(_MalformedResponse) as error:
+            if status == 200:
+                session._create_upload(2)
+            else:
+                assert upload is not None
+                upload.put(0, b"ab")
+    assert isinstance(error.value, RequestError)
+    assert error.value.status == status
+    assert error.value.response == body.decode()
+    assert error.value.__cause__ is not None
+
+    if upload is not None:
+        # Parsing the completion response failed, but publication succeeded.
+        result = session.get(upload.key)
+        assert result is not None
+        assert result.payload.read() == b"ab"
+
+
+def test_resumable_upload_cancel(server_url: str) -> None:
+    client = Client(server_url, token=TestSecretKey.get())
+    session = client.session(Usecase("test-usecase"), org=42)
+    upload = session._create_upload(6, key="resumable/cancel")
+    assert upload is not None
+    assert upload.put(0, b"").offset == 0
+    assert upload.put(0, b"abc").offset == 3
+    upload.cancel()
+
+    with pytest.raises(_ResumableUploadUnavailable) as error:
+        upload.progress()
+    assert error.value.status in (404, 410)
+    assert isinstance(error.value, RequestError)
+    with pytest.raises(_ResumableUploadUnavailable):
+        upload.put(3, b"def")
+    with pytest.raises(_ResumableUploadUnavailable):
+        upload.cancel()
+    assert session.get(upload.key) is None
 
 
 def test_head(server_url: str) -> None:
