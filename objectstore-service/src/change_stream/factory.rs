@@ -3,17 +3,20 @@
 
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 #[cfg(feature = "storage-cogs")]
 use objectstore_inventory_tracker::SharedProducer;
 #[cfg(all(test, feature = "storage-cogs"))]
 use objectstore_inventory_tracker::test_utils;
+use objectstore_types::time::Timestamp;
 #[cfg(feature = "storage-cogs")]
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "storage-cogs")]
-use super::CostTrackerStream;
-use super::{ChangeStream, CostTrackerStreamConfig, NoopStream};
+use crate::change_stream::CostTrackerStream;
+use crate::change_stream::{ChangeStream, CostTrackerStreamConfig, NoopStream};
+use crate::id::ObjectId;
 
 /// Where every backend's change stream records are carried for cost tracking.
 ///
@@ -24,6 +27,49 @@ use super::{ChangeStream, CostTrackerStreamConfig, NoopStream};
 pub enum CostTrackerConfig {
     /// Reports onto a Kafka topic.
     Kafka(objectstore_inventory_tracker::kafka::KafkaConfig),
+}
+
+#[derive(Default, Debug)]
+struct MultiStream {
+    streams: Vec<Box<dyn ChangeStream>>,
+}
+
+impl MultiStream {
+    pub fn with_stream(mut self, stream: Box<dyn ChangeStream>) -> Self {
+        self.streams.push(stream);
+        self
+    }
+}
+
+#[async_trait::async_trait]
+impl ChangeStream for MultiStream {
+    fn write(&self, id: &ObjectId, size: u64, expires_at: Option<Timestamp>) {
+        for stream in self.streams.iter() {
+            stream.write(id, size, expires_at);
+        }
+    }
+
+    fn update(&self, id: &ObjectId, expires_at: Option<Timestamp>) {
+        for stream in self.streams.iter() {
+            stream.update(id, expires_at);
+        }
+    }
+
+    fn delete(&self, id: &ObjectId) {
+        for stream in self.streams.iter() {
+            stream.delete(id);
+        }
+    }
+
+    async fn join(&self, timeout: Duration) {
+        let _ = futures_util::future::join_all(
+            self.streams
+                .iter()
+                .map(|stream| stream.join(timeout))
+                .collect::<Vec<_>>(),
+        )
+        .await;
+    }
 }
 
 /// Builds the [`ChangeStream`] impl(s) a backend reports to.
@@ -124,6 +170,56 @@ pub(crate) fn dummy_factory() -> (ChangeStreamFactory, test_utils::DummyProducer
 mod tests {
     use super::*;
 
+    use std::sync::RwLock;
+
+    type SharedMessages = Arc<RwLock<Vec<(&'static str, &'static str, String)>>>;
+
+    #[derive(Default, Debug)]
+    struct RecordingStream {
+        name: &'static str,
+        pub messages: SharedMessages,
+    }
+
+    impl RecordingStream {
+        pub fn new(name: &'static str, messages: SharedMessages) -> Self {
+            Self { name, messages }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ChangeStream for RecordingStream {
+        fn write(&self, id: &ObjectId, _size: u64, _expires_at: Option<Timestamp>) {
+            self.messages.write().unwrap().push((
+                self.name,
+                "write",
+                id.as_storage_path().to_string(),
+            ));
+        }
+
+        fn update(&self, id: &ObjectId, _expires_at: Option<Timestamp>) {
+            self.messages.write().unwrap().push((
+                self.name,
+                "update",
+                id.as_storage_path().to_string(),
+            ));
+        }
+
+        fn delete(&self, id: &ObjectId) {
+            self.messages.write().unwrap().push((
+                self.name,
+                "delete",
+                id.as_storage_path().to_string(),
+            ));
+        }
+
+        async fn join(&self, _timeout: Duration) {
+            self.messages
+                .write()
+                .unwrap()
+                .push((self.name, "join", "".into()));
+        }
+    }
+
     fn config() -> CostTrackerStreamConfig {
         CostTrackerStreamConfig {
             shared_resource_id: "bigtable_objectstore".into(),
@@ -156,7 +252,7 @@ mod tests {
 
         assert!(reports(&stream));
 
-        stream.delete(&crate::id::ObjectId::from_storage_path("attachments/objects/abc").unwrap());
+        stream.delete(&ObjectId::from_storage_path("attachments/objects/abc").unwrap());
 
         let records = producer.records();
         assert_eq!(records.len(), 1);
@@ -174,5 +270,43 @@ mod tests {
         ));
 
         assert!(!reports(&factory.build(Some(&config()))));
+    }
+
+    #[tokio::test]
+    async fn test_multi_stream() {
+        // Create `MultiStream` with a pair of `RecordingStream`s that write messages to
+        // the same log
+        let messages = Arc::new(RwLock::new(vec![]));
+        let s1 = Box::new(RecordingStream::new("s1", messages.clone()));
+        let s2 = Box::new(RecordingStream::new("s2", messages.clone()));
+        let ms = MultiStream::default().with_stream(s1).with_stream(s2);
+
+        // Write one of each message type
+        ms.write(
+            &ObjectId::from_storage_path("foo/objects/bar").unwrap(),
+            0,
+            None,
+        );
+        ms.update(
+            &ObjectId::from_storage_path("foo/objects/bar").unwrap(),
+            None,
+        );
+        ms.delete(&ObjectId::from_storage_path("foo/objects/bar").unwrap());
+        ms.join(Duration::from_secs(3)).await;
+
+        // Ensure `s1` and `s2` each wrote one of each message
+        assert_eq!(
+            *messages.read().unwrap(),
+            [
+                ("s1", "write", "foo/objects/bar".into()),
+                ("s2", "write", "foo/objects/bar".into()),
+                ("s1", "update", "foo/objects/bar".into()),
+                ("s2", "update", "foo/objects/bar".into()),
+                ("s1", "delete", "foo/objects/bar".into()),
+                ("s2", "delete", "foo/objects/bar".into()),
+                ("s1", "join", "".into()),
+                ("s2", "join", "".into())
+            ]
+        );
     }
 }
