@@ -99,6 +99,7 @@ pub struct InMemoryBackend {
     store: Arc<Mutex<Store>>,
     multipart_store: Arc<Mutex<MultipartStore>>,
     resumable_store: Arc<Mutex<ResumableStore>>,
+    upload_markers: Arc<Mutex<HashMap<ObjectId, Timestamp>>>,
     change_stream: Arc<dyn ChangeStream>,
 }
 
@@ -110,6 +111,7 @@ impl InMemoryBackend {
             store: Arc::new(Mutex::new(HashMap::new())),
             multipart_store: Arc::new(Mutex::new(HashMap::new())),
             resumable_store: Arc::new(Mutex::new(HashMap::new())),
+            upload_markers: Arc::new(Mutex::new(HashMap::new())),
             change_stream: Arc::new(NoopStream),
         }
     }
@@ -358,6 +360,44 @@ impl super::common::Backend for InMemoryBackend {
 
 #[async_trait::async_trait]
 impl HighVolumeBackend for InMemoryBackend {
+    async fn create_upload_marker(
+        &self,
+        revision: &ObjectId,
+        time_expires: Timestamp,
+    ) -> Result<()> {
+        self.upload_markers
+            .lock()
+            .unwrap()
+            .insert(revision.clone(), time_expires);
+        Ok(())
+    }
+
+    async fn has_upload_marker(&self, revision: &ObjectId, access_time: Timestamp) -> Result<bool> {
+        Ok(self
+            .upload_markers
+            .lock()
+            .unwrap()
+            .get(revision)
+            .is_some_and(|expiry| *expiry >= access_time))
+    }
+
+    async fn delete_upload_marker(
+        &self,
+        revision: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<bool> {
+        let mut markers = self.upload_markers.lock().unwrap();
+        if markers
+            .get(revision)
+            .is_some_and(|expiry| *expiry >= access_time)
+        {
+            markers.remove(revision);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     async fn put_non_tombstone(
         &self,
         id: &ObjectId,
