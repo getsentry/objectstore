@@ -349,14 +349,14 @@ macro_rules! count {
         $crate::_macro_support::metrics::counter!(
             $name $(, stringify!($tag) => $tv)*
         )
-        .increment(1);
+        .increment(1)
     };
     // Explicit increment value
     ($name:literal += $value:expr $(, $tag:ident = $tv:expr)* $(,)?) => {
         $crate::_macro_support::metrics::counter!(
             $name $(, stringify!($tag) => $tv)*
         )
-        .increment($value as u64);
+        .increment($value as u64)
     };
 }
 
