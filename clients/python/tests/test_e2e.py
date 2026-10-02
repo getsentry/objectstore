@@ -23,6 +23,12 @@ from objectstore_client import (
     Session,
     Usecase,
 )
+from objectstore_client._resumable import (
+    _ResumableUploadUnavailable,
+    _UploadComplete,
+    _UploadIncomplete,
+    _UploadOffsetMismatch,
+)
 from objectstore_client.auth import Permission, SecretKey
 from objectstore_client.errors import RequestError
 from objectstore_client.metadata import TimeToLive
@@ -177,6 +183,105 @@ def test_full_cycle(server_url: str) -> None:
     session.delete(object_key)
 
     assert session.get(object_key) is None
+
+
+def test_resumable_upload(server_url: str) -> None:
+    session = Client(server_url, token=TestSecretKey.get()).session(
+        Usecase("test-usecase", expiration_policy=TimeToLive(timedelta(days=1))),
+        org=42,
+        project=1337,
+    )
+    upload = session._create_upload(
+        6,
+        key="resumable-python",
+        content_type="text/plain",
+        metadata={"source": "test"},
+        origin="203.0.113.42",
+        filename="example.txt",
+    )
+    assert upload is not None
+    assert upload.key == "resumable-python"
+    assert upload.granularity is not None
+    assert upload.progress() == _UploadIncomplete(0)
+    assert upload.put(0, b"abc") == _UploadIncomplete(3)
+
+    resumed = session._resume_upload(upload.key, upload.token)
+    assert resumed.granularity is None
+    assert resumed.progress() == _UploadIncomplete(3)
+    with pytest.raises(_UploadOffsetMismatch) as mismatch:
+        resumed.put(0, b"abc")
+    assert mismatch.value.status == 409
+    assert mismatch.value.offset == 3
+    with pytest.raises(RequestError) as oversized:
+        resumed.put(3, b"defg")
+    assert oversized.value.status == 400
+    stream = BytesIO(b"prefix-def-trailing")
+    stream.seek(7)
+    assert resumed.put(3, (stream, 3)) == _UploadComplete()
+    assert stream.read() == b"-trailing"
+
+    response = session.get(upload.key)
+    assert response is not None
+    # The usecase defaults to zstd, but resumable creation must not inherit it.
+    assert response.metadata.compression is None
+    assert response.payload.read() == b"abcdef"
+    assert response.metadata.content_type == "text/plain"
+    assert response.metadata.expiration_policy == TimeToLive(timedelta(days=1))
+    assert response.metadata.custom == {"source": "test"}
+    assert response.metadata.origin == "203.0.113.42"
+    assert response.metadata.filename == "example.txt"
+
+
+def test_resumable_upload_precompressed(server_url: str) -> None:
+    session = Client(server_url, token=TestSecretKey.get()).session(
+        Usecase("test-usecase", compression="none"), org=42, project=1337
+    )
+    payload = b"abcdef"
+    compressed = zstandard.ZstdCompressor().compress(payload)
+    upload = session._create_upload(len(compressed), compression="zstd")
+    assert upload is not None
+    split = len(compressed) // 2
+    assert upload.put(0, compressed[:split]) == _UploadIncomplete(split)
+    stream = UnrewindableStream(compressed[split:] + b"trailing")
+    assert upload.put(split, (stream, len(compressed) - split)) == _UploadComplete()
+    assert stream.read() == b"trailing"
+
+    response = session.get(upload.key, decompress=False)
+    assert response is not None
+    assert response.metadata.compression == "zstd"
+    assert response.payload.read() == compressed
+    response = session.get(upload.key)
+    assert response is not None
+    assert response.payload.read() == payload
+
+
+def test_resumable_upload_short_stream(server_url: str) -> None:
+    # Bound the wait if length checking regresses, so this test cannot hang.
+    session = Client(server_url, token=TestSecretKey.get(), timeout_ms=1000).session(
+        Usecase("test-usecase"), org=42, project=1337
+    )
+    upload = session._create_upload(6)
+    assert upload is not None
+    stream = BytesIO(b"abc")
+    with pytest.raises(EOFError, match="3 bytes remaining"):
+        upload.put(0, (stream, 6))
+    assert not stream.closed
+    assert session.get(upload.key) is None
+    upload.cancel()
+
+
+def test_resumable_upload_cancel(server_url: str) -> None:
+    session = Client(server_url, token=TestSecretKey.get()).session(
+        Usecase("test-usecase"), org=42, project=1337
+    )
+    upload = session._create_upload(6)
+    assert upload is not None
+    assert upload.put(0, b"abc") == _UploadIncomplete(3)
+    upload.cancel()
+
+    with pytest.raises(_ResumableUploadUnavailable):
+        upload.progress()
+    assert session.get(upload.key) is None
 
 
 def test_head(server_url: str) -> None:
