@@ -16,6 +16,7 @@ import zstandard
 from urllib3.connectionpool import HTTPConnectionPool
 
 from objectstore_client import presign, utils
+from objectstore_client._resumable import _ResumableUpload
 from objectstore_client.auth import Permission, SecretKey, TokenProvider
 from objectstore_client.errors import (
     ExpiryExtensionRejected,
@@ -320,6 +321,34 @@ class Session:
             headers["x-os-auth"] = f"Bearer {token}"
         return headers
 
+    def _metadata_headers(
+        self,
+        *,
+        compression: Compression | None,
+        content_type: str | None = None,
+        metadata: dict[str, str] | None = None,
+        expiration_policy: ExpirationPolicy | None = None,
+        origin: str | None = None,
+        filename: str | None = None,
+    ) -> dict[str, str]:
+        """Build upload headers with explicit compression and default expiration."""
+        headers = self._make_headers()
+        if compression and compression != "none":
+            headers["Content-Encoding"] = compression
+        if content_type:
+            headers["Content-Type"] = content_type
+        expiration_policy = expiration_policy or self._usecase._expiration_policy
+        if expiration_policy:
+            headers[HEADER_EXPIRATION] = format_expiration(expiration_policy)
+        if origin:
+            headers[HEADER_ORIGIN] = utils.encode_header_value(origin)
+        if filename is not None:
+            headers[HEADER_FILENAME] = utils.encode_header_value(filename)
+        if metadata:
+            for k, v in metadata.items():
+                headers[f"{HEADER_META_PREFIX}{k}"] = utils.encode_header_value(v)
+        return headers
+
     def _base_url(self) -> str:
         # urllib3 stores IPv6 hosts unbracketed (e.g. "::1"); bracket them so
         # the result is a valid absolute URL.
@@ -404,13 +433,10 @@ class Session:
         if precompressed and precompressed != "zstd":
             raise ValueError(f"Invalid compression: {precompressed}")
 
-        headers = self._make_headers()
         body = BytesIO(contents) if isinstance(contents, bytes) else contents
         original_body: IO[bytes] = body
 
         encoding = precompressed or compress or self._usecase._compression
-        if encoding != "none":
-            headers["Content-Encoding"] = encoding
 
         compress_with = encoding if precompressed is None else "none"
         if compress_with == "zstd":
@@ -418,22 +444,14 @@ class Session:
             body = cctx.stream_reader(original_body)
             body = cast(IO[bytes], utils._ZstdCompressionReaderWrapper(body))
 
-        if content_type:
-            headers["Content-Type"] = content_type
-
-        expiration_policy = expiration_policy or self._usecase._expiration_policy
-        if expiration_policy:
-            headers[HEADER_EXPIRATION] = format_expiration(expiration_policy)
-
-        if origin:
-            headers[HEADER_ORIGIN] = utils.encode_header_value(origin)
-
-        if filename is not None:
-            headers[HEADER_FILENAME] = utils.encode_header_value(filename)
-
-        if metadata:
-            for k, v in metadata.items():
-                headers[f"{HEADER_META_PREFIX}{k}"] = utils.encode_header_value(v)
+        headers = self._metadata_headers(
+            compression=encoding,
+            content_type=content_type,
+            metadata=metadata,
+            expiration_policy=expiration_policy,
+            origin=origin,
+            filename=filename,
+        )
 
         if key == "":
             key = None
@@ -779,6 +797,78 @@ class Session:
             )
             raise_for_status(response)
 
+    def _create_upload(
+        self,
+        object_length: int,
+        *,
+        key: str | None = None,
+        compression: Compression | None = None,
+        content_type: str | None = None,
+        metadata: dict[str, str] | None = None,
+        expiration_policy: ExpirationPolicy | None = None,
+        origin: str | None = None,
+        filename: str | None = None,
+    ) -> _ResumableUpload | None:
+        """Create a private resumable upload, or return None if the server declines.
+
+        Compression only describes the already-compressed object and does not
+        inherit the usecase default. The caller must compress the complete object
+        before splitting it into chunks; `object_length` counts the resulting bytes.
+        Expiration inherits the usecase default unless explicitly supplied.
+        Only HTTP 501 declines creation; other HTTP failures raise RequestError.
+        """
+        if object_length < 0:
+            raise ValueError("Object length must not be negative")
+        if compression is not None and compression not in ("none", "zstd"):
+            raise ValueError(f"Invalid compression: {compression}")
+
+        headers = self._metadata_headers(
+            compression=compression,
+            content_type=content_type,
+            metadata=metadata,
+            expiration_policy=expiration_policy,
+            origin=origin,
+            filename=filename,
+        )
+        headers["Upload-Length"] = str(object_length)
+
+        key = key or None
+        with (
+            storage_span(
+                "resumable.create", self._usecase, self._scope, key=key
+            ) as span,
+            measure_storage_operation(
+                self._metrics_backend, "resumable.create", self._usecase.name
+            ),
+        ):
+            response = self._pool.request(
+                "PUT" if key else "POST",
+                f"{self._make_url(key)}?upload_type=resumable",
+                headers=headers,
+                preload_content=True,
+                decode_content=True,
+            )
+            if response.status == 501:
+                return None
+            raise_for_status(response)
+            res = response.json()
+            span.set_attribute("objectstore.key", res["key"])
+            return _ResumableUpload(
+                self,
+                res["key"],
+                res["session"],
+                object_length,
+                res.get("granularity", 0),
+            )
+
+    def _resume_upload(self, key: str, token: str) -> _ResumableUpload:
+        """Reconstruct a private handle without contacting the server.
+
+        The key and token must belong to the same upload and scope. Total length
+        and granularity are unknown, so chunk validation is left to the server.
+        """
+        return _ResumableUpload(self, key, token)
+
     def initiate_multipart_upload(
         self,
         *,
@@ -805,28 +895,14 @@ class Session:
         if compression and compression not in ("none", "zstd"):
             raise ValueError(f"Invalid compression: {compression}")
 
-        headers = self._make_headers()
-
-        compression = compression or self._usecase._compression
-        if compression and compression != "none":
-            headers["Content-Encoding"] = compression
-
-        if content_type:
-            headers["Content-Type"] = content_type
-
-        expiration_policy = expiration_policy or self._usecase._expiration_policy
-        if expiration_policy:
-            headers[HEADER_EXPIRATION] = format_expiration(expiration_policy)
-
-        if origin:
-            headers[HEADER_ORIGIN] = utils.encode_header_value(origin)
-
-        if filename is not None:
-            headers[HEADER_FILENAME] = utils.encode_header_value(filename)
-
-        if metadata:
-            for k, v in metadata.items():
-                headers[f"{HEADER_META_PREFIX}{k}"] = utils.encode_header_value(v)
+        headers = self._metadata_headers(
+            compression=compression or self._usecase._compression,
+            content_type=content_type,
+            metadata=metadata,
+            expiration_policy=expiration_policy,
+            origin=origin,
+            filename=filename,
+        )
 
         if key == "":
             key = None
