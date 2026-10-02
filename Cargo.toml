@@ -39,7 +39,7 @@ arc-swap = "1.9.2"
 argh = "0.1.19"
 async-compression = "0.4.42"
 async-stream = "0.3.6"
-async-trait = "0.1.89"
+async-trait = "0.1.92"
 axum = "0.8.9"
 axum-extra = { version = "0.12.6", default-features = false }
 base64 = "0.22.1"
