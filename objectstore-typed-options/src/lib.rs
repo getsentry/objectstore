@@ -13,9 +13,9 @@
 //! - `path` — relative path (from the source file) to the `sentry-options/` directory;
 //!   the schema is resolved as `{path}/schemas/{namespace}/schema.json`
 //!
-//! Each struct field must implement [`serde::Deserialize`] and corresponds to a key of the
-//! same name within the namespace. To look up a key that differs from the field name, annotate
-//! the field with `#[sentry_options(rename = "...")]`.
+//! The struct must implement [`serde::Deserialize`] (typically via `#[derive(Deserialize)]`).
+//! Each field corresponds to a schema property of the same name within the namespace. To
+//! look up a key that differs from the field name, use `#[serde(rename = "...")]`.
 //!
 //! # Generated API
 //!
@@ -37,7 +37,8 @@
 //!
 //! ```rust,no_run
 //! # use objectstore_typed_options::SentryOptions;
-//! # #[derive(Debug, SentryOptions)]
+//! # use serde::Deserialize;
+//! # #[derive(Debug, Deserialize, SentryOptions)]
 //! # #[sentry_options(namespace = "objectstore", path = "../../sentry-options")]
 //! # struct Options {}
 //! #[cfg(test)]
@@ -55,16 +56,17 @@
 //!
 //! ```rust,no_run
 //! use objectstore_typed_options::SentryOptions;
+//! use serde::Deserialize;
 //!
 //! // `path` points to the sentry-options directory; the schema is resolved as
 //! // `{path}/schemas/{namespace}/schema.json` and embedded at compile time.
-//! #[derive(Debug, SentryOptions)]
+//! #[derive(Debug, Deserialize, SentryOptions)]
 //! #[sentry_options(
 //!     namespace = "objectstore",
 //!     path = "../../sentry-options"
 //! )]
 //! pub struct Options {
-//!     #[sentry_options(rename = "retries")]
+//!     #[serde(rename = "retries")]
 //!     max_retries: u32,
 //!     allowed_orgs: Vec<u32>,
 //! }
@@ -104,12 +106,14 @@ pub enum Error {
     Options(#[from] sentry_options::OptionsError),
     #[error("failed to deserialize option value")]
     Deserialize(#[from] serde_json::Error),
+    #[error("invalid options schema: {0}")]
+    InvalidSchema(String),
 }
 
 /// Trait implemented by option structs that are backed by sentry-options.
 ///
 /// Typically derived via `#[derive(SentryOptions)]` rather than implemented manually.
-pub trait SentryOptions: Sized + Send + Sync + 'static {
+pub trait SentryOptions: serde::de::DeserializeOwned + Send + Sync + 'static {
     /// The sentry-options namespace for this type.
     const NAMESPACE: &str;
 
@@ -117,5 +121,27 @@ pub trait SentryOptions: Sized + Send + Sync + 'static {
     const SCHEMA: &str;
 
     /// Deserializes an instance from the loaded sentry-options values.
-    fn deserialize(options: &sentry_options::Options) -> Result<Self, Error>;
+    ///
+    /// The default implementation parses [`SCHEMA`](Self::SCHEMA) to discover property
+    /// keys, fetches each value via [`Options::get`](sentry_options::Options::get), and
+    /// deserializes the resulting map into `Self` using serde. Field-level renames should
+    /// use `#[serde(rename = "...")]`.
+    fn deserialize(options: &sentry_options::Options) -> Result<Self, Error> {
+        let schema: serde_json::Value =
+            serde_json::from_str(Self::SCHEMA).map_err(|e| Error::InvalidSchema(e.to_string()))?;
+
+        let properties = schema
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .ok_or_else(|| Error::InvalidSchema("missing \"properties\" object".into()))?;
+
+        let mut map = serde_json::Map::with_capacity(properties.len());
+        for key in properties.keys() {
+            let value = options.get(Self::NAMESPACE, key)?;
+            map.insert(key.clone(), value);
+        }
+
+        let result = serde_json::from_value(serde_json::Value::Object(map))?;
+        Ok(result)
+    }
 }
