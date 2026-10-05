@@ -1195,3 +1195,27 @@ def test_compressed_file_upload(
         retrieved = session.get(key)
         assert retrieved is not None
         assert retrieved.payload.read() == contents
+
+
+@pytest.mark.parametrize(
+    "error", [None, RequestError("creation rejected", 403, "forbidden")]
+)
+def test_resumable_creation_fallback(
+    server_url: str, monkeypatch: pytest.MonkeyPatch, error: RequestError | None
+) -> None:
+    from objectstore_client import _resumable
+
+    monkeypatch.setattr(_resumable, "RESUMABLE_THRESHOLD_BYTES", 1)
+    session = Client(server_url, token=TestSecretKey.get()).session(
+        Usecase("test-usecase")
+    )
+    create = Mock(return_value=None, side_effect=error)
+    monkeypatch.setattr(session, "_create_upload", create)
+    source = BytesIO(b"prefixpayload")
+    source.seek(len(b"prefix"))
+    key = session.put(source, compress="none")
+    create.assert_called_once()
+    assert not source.closed
+    retrieved = session.get(key)
+    assert retrieved is not None
+    assert retrieved.payload.read() == b"payload"

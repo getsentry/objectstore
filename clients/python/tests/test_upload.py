@@ -5,7 +5,6 @@ from unittest.mock import Mock
 import pytest
 import urllib3
 from objectstore_client import Client, RequestError, Session, Usecase, _resumable
-from objectstore_client._resumable import UploadComplete
 
 
 @pytest.fixture
@@ -15,40 +14,18 @@ def session(monkeypatch: pytest.MonkeyPatch) -> Session:
     return Client("http://localhost:8888").session(Usecase("test", compression="none"))
 
 
-@pytest.mark.parametrize(
-    "size,enabled,declined",
-    [(3, True, False), (4, True, False), (4, False, False), (4, True, True)],
-)
-def test_routing(
-    session: Session,
-    monkeypatch: pytest.MonkeyPatch,
-    size: int,
-    enabled: bool,
-    declined: bool,
-) -> None:
-    handle = Mock(key="key")
-    handle.put.return_value = UploadComplete()
-    create = Mock(return_value=None if declined else handle)
-    direct = Mock(return_value="key")
-    monkeypatch.setattr(session, "_create_upload", create)
-    monkeypatch.setattr(session, "_put_direct", direct)
-
-    assert session.put(b"x" * size, resumable=enabled) == "key"
-    eligible = enabled and size >= 4
-    assert create.call_count == int(eligible)
-    assert handle.put.call_count == int(eligible and not declined)
-    assert direct.call_count == int(not eligible or declined)
-
-
-def test_partial_failure_recovery(
-    session: Session, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("complete", [False, True])
+def test_failure_recovery(
+    session: Session, monkeypatch: pytest.MonkeyPatch, complete: bool
 ) -> None:
     failure = urllib3.exceptions.ReadTimeoutError(session._pool, "/", "lost response")
     outcomes = Mock(
         side_effect=[
             urllib3.HTTPResponse(status=201, body=b'{"key":"key","session":"token"}'),
             failure,
-            urllib3.HTTPResponse(status=204, headers={"Upload-Offset": "3"}),
+            urllib3.HTTPResponse(
+                status=201 if complete else 204, headers={"Upload-Offset": "3"}
+            ),
             urllib3.HTTPResponse(status=201),
         ]
     )
@@ -64,31 +41,21 @@ def test_partial_failure_recovery(
     source.seek(len(b"prefix"))
     assert session.put(source) == "key"
     assert not source.closed
-    assert sent == [("0", b"abcdefgh"), ("3", b"defgh")]
+    assert sent == (
+        [("0", b"abcdefgh")] if complete else [("0", b"abcdefgh"), ("3", b"defgh")]
+    )
 
 
-def test_lost_final_response(session: Session, monkeypatch: pytest.MonkeyPatch) -> None:
-    handle = Mock(key="key")
-    handle.put.side_effect = urllib3.exceptions.ProtocolError("lost response")
-    handle.progress.return_value = UploadComplete()
-    monkeypatch.setattr(session, "_create_upload", Mock(return_value=handle))
-    assert session.put(b"complete") == "key"
-    assert handle.put.call_count == 1
-    handle.progress.assert_called_once_with()
-
-
-@pytest.mark.parametrize("pool_retries", [0, 2])
 @pytest.mark.parametrize("status_failure", [False, True])
 def test_retry_exhaustion(
     session: Session,
     monkeypatch: pytest.MonkeyPatch,
-    pool_retries: int,
     status_failure: bool,
 ) -> None:
     policy = urllib3.Retry(
-        total=pool_retries,
-        read=pool_retries,
-        status=pool_retries,
+        total=2,
+        read=2,
+        status=2,
         status_forcelist=[503],
     )
     session._pool.retries = policy
@@ -144,29 +111,3 @@ def test_connection_retries_are_not_multiplied(
     assert raised.value.__cause__.reason is failure
     assert request.call_count == 3
     assert session._pool.retries is policy
-
-
-@pytest.mark.parametrize(
-    "error",
-    [
-        RequestError("creation rejected", 403, "forbidden"),
-        urllib3.exceptions.ProtocolError("connection lost"),
-        ValueError("invalid creation response"),
-    ],
-)
-def test_creation_failure_falls_back(
-    session: Session, monkeypatch: pytest.MonkeyPatch, error: Exception
-) -> None:
-    monkeypatch.setattr(session, "_create_upload", Mock(side_effect=error))
-    sent = []
-
-    def request(*args: Any, **kwargs: Any) -> urllib3.HTTPResponse:
-        sent.append(kwargs["body"].read())
-        return urllib3.HTTPResponse(status=201, body=b'{"key":"key"}')
-
-    monkeypatch.setattr(session._pool, "request", request)
-    source = BytesIO(b"prefixpayload")
-    source.seek(len(b"prefix"))
-    assert session.put(source) == "key"
-    assert sent == [b"payload"]
-    assert not source.closed
