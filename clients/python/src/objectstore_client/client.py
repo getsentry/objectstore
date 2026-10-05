@@ -329,7 +329,7 @@ class Session:
         origin: str | None = None,
         filename: str | None = None,
     ) -> dict[str, str]:
-        """Build upload headers with explicit compression and default expiration."""
+        """Build upload headers with the given compression and usecase expiration."""
         headers = self._make_headers()
         if compression and compression != "none":
             headers["Content-Encoding"] = compression
