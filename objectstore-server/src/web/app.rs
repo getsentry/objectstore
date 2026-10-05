@@ -3,10 +3,12 @@ use std::net::SocketAddr;
 use anyhow::Result;
 use axum::ServiceExt;
 use axum::extract::Request;
+use objectstore_log::Level;
 use sentry::integrations::tower::{NewSentryLayer, SentryHttpLayer};
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
+use tower_http::trace::{DefaultOnFailure, TraceLayer};
 
 use crate::endpoints;
 use crate::state::ServiceState;
@@ -41,7 +43,12 @@ impl App {
             ))
             .layer(state.request_counter.layer())
             .layer(CatchPanicLayer::custom(m::handle_panic))
-            .layer(m::set_server_header());
+            .layer(m::set_server_header())
+            .layer(
+                TraceLayer::new_for_http()
+                    .make_span_with(objectstore_log::tracing::Span::none())
+                    .on_failure(DefaultOnFailure::new().level(Level::DEBUG)),
+            );
 
         let router = endpoints::routes()
             .layer(middleware)

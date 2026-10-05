@@ -1,10 +1,8 @@
 use std::any::Any;
-use std::net::SocketAddr;
-use std::time::Instant;
 
 use axum::RequestExt;
 use axum::body::Body;
-use axum::extract::{ConnectInfo, MatchedPath, RawPathParams, Request, State};
+use axum::extract::{MatchedPath, RawPathParams, Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -99,7 +97,7 @@ async fn get_usecase(request: &mut Request) -> Option<String> {
         })
 }
 
-/// Logs request start and completion, and emits web request metrics.
+/// A middleware that logs web request timings as metrics.
 ///
 /// Use this with [`from_fn`](axum::middleware::from_fn).
 ///
@@ -107,18 +105,8 @@ async fn get_usecase(request: &mut Request) -> Option<String> {
 /// the response body (see [`MetricsBody`]) so it is dropped only once the body has finished
 /// streaming, not when the handler produces the response headers.
 ///
-/// The completion log records status and latency when response headers are ready.
-/// Internal routes are excluded from metrics, but still logged.
+/// Internal routes are excluded from metrics.
 pub async fn emit_request_metrics(mut request: Request, next: Next) -> Response {
-    let start = Instant::now();
-    let method = request.method().clone();
-    let uri = request.uri().clone();
-    let version = request.version();
-    let client_addr = request
-        .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|ConnectInfo(addr)| addr.ip().to_string());
-
     let matched_path = request.extract_parts::<MatchedPath>().await;
     let route = matched_path.as_ref().map_or("unknown", |m| m.as_str());
     let service = request.extract_parts::<DownstreamService>().await.unwrap();
@@ -128,25 +116,7 @@ pub async fn emit_request_metrics(mut request: Request, next: Next) -> Response 
     let guard =
         should_emit.then(|| EmitMetricsGuard::new(route, request.method(), service, usecase));
 
-    objectstore_log::debug!(
-        %method,
-        %uri,
-        ?version,
-        client_addr = client_addr.as_deref(),
-        "started processing request"
-    );
-
     let response = next.run(request).await;
-
-    objectstore_log::debug!(
-        %method,
-        %uri,
-        ?version,
-        client_addr = client_addr.as_deref(),
-        status = response.status().as_u16(),
-        latency = %format_args!("{} ms", start.elapsed().as_millis()),
-        "finished processing request"
-    );
 
     // Move the guard into the response body so the duration metric is emitted only when the
     // body has finished streaming. The header status is applied on successful completion.

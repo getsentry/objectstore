@@ -49,7 +49,7 @@ thiserror = { workspace = true }
 thread_local = { workspace = true }
 tokio = { workspace = true, features = ["fs", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tower = { workspace = true }
-tower-http = { workspace = true, features = ["catch-panic", "metrics", "set-header"] }
+tower-http = { workspace = true, features = ["catch-panic", "metrics", "set-header", "trace"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 jemalloc_pprof = { workspace = true, optional = true }
