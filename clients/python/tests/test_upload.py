@@ -115,9 +115,11 @@ def test_retry_exhaustion(
     if status_failure:
         assert isinstance(raised.value.__cause__, RequestError)
         assert raised.value.__cause__.status == 503
+        assert raised.value.response == "unavailable"
     else:
         assert isinstance(raised.value.__cause__, urllib3.exceptions.MaxRetryError)
         assert raised.value.__cause__.reason is failure
+        assert raised.value.response is None
     # Creation, two progress queries, and three writes regardless of pool retries.
     assert make_request.call_count == 1 + 2 + 3
     assert session._pool.retries is policy

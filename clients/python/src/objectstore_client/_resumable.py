@@ -329,5 +329,5 @@ def upload(
             probing = False
     except Exception as error:
         status = error.status if isinstance(error, RequestError) else None
-        response = error.response if isinstance(error, RequestError) else ""
+        response = error.response if isinstance(error, RequestError) else None
         raise RequestError("upload failed", status, response) from error
