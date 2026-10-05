@@ -160,8 +160,9 @@ class ResumableUpload:
         headers = session._make_headers()
         headers["Upload-Offset"] = str(offset)
         headers["Content-Length"] = str(length)
-        # Only retry connection establishment here. Replaying a body requires
-        # querying the server's offset first, which the automatic uploader owns.
+        # We don't want the retry policy to retry sending the whole body as that
+        # defeats the purpose of using resumables, so we disable those retries
+        # in favor of our retry loop.
         retries = urllib3.Retry.from_int(session._pool.retries).new(
             read=0, status=0, other=0, raise_on_status=False
         )
@@ -219,11 +220,10 @@ class ResumableUpload:
             raise_for_status(response, error_type=error_type)
 
 
-RESUMABLE_THRESHOLD = 32 * 1024 * 1024
+RESUMABLE_THRESHOLD_BYTES = 32 * 1024 * 1024
 
 
-def remaining_size(contents: bytes | IO[bytes]) -> int | None:
-    """Inspect the remaining size without reading or changing the cursor."""
+def get_size(contents: bytes | IO[bytes]) -> int | None:
     if isinstance(contents, bytes):
         return len(contents)
     try:
@@ -241,14 +241,14 @@ def remaining_size(contents: bytes | IO[bytes]) -> int | None:
     return max(0, end - start)
 
 
-def _transient(error: Exception) -> bool:
+def is_transient(error: Exception) -> bool:
     if isinstance(error, urllib3.exceptions.MaxRetryError):
         # Exhausted status retries carry ResponseError rather than the response.
         return isinstance(error.reason, urllib3.exceptions.ResponseError) or (
-            isinstance(error.reason, Exception) and _transient(error.reason)
+            isinstance(error.reason, Exception) and is_transient(error.reason)
         )
     if isinstance(error, RequestError):
-        return error.status in (408, 429, 500, 502, 503, 504)
+        return error.status in (408, 429, 502, 503, 504)
     return isinstance(
         error,
         (
@@ -270,16 +270,6 @@ def upload(
     origin: str | None = None,
     filename: str | None = None,
 ) -> str | None:
-    """Resume with two recovery retries; the pool handles connection retries.
-
-    Restore the starting cursor and return None on any creation failure so the
-    caller can use a direct upload.
-    Once created, use progress to recover after transient failures without
-    switching protocols. The recovery budget spans the whole upload, including
-    failed progress queries, and waits 2 then 4 seconds plus up to 1 second of jitter.
-    Exhausted connection retries are terminal. Control requests retain the pool's
-    full retry policy.
-    """
     start = body.tell()
     try:
         handle = session._create_upload(
@@ -301,10 +291,10 @@ def upload(
     try:
         offset = 0
         retries = 0
-        probing = False
+        probe = False
         while True:
             try:
-                if probing:
+                if probe:
                     result = handle.progress()
                 else:
                     body.seek(start + offset)
@@ -312,21 +302,21 @@ def upload(
             except UploadOffsetMismatch as error:
                 result = UploadIncomplete(error.offset)
             except Exception as error:
-                if not _transient(error) or retries == 2:
+                if not is_transient(error) or retries == 2:
                     raise
                 time.sleep(2 ** (retries + 1) + random.uniform(0, 1))
                 retries += 1
-                probing = True
+                probe = True
                 continue
 
             if isinstance(result, UploadComplete):
                 return handle.key
             if not offset <= result.offset <= encoded_size:
                 raise ValueError("Invalid upload offset")
-            if result.offset == offset and not probing:
+            if result.offset == offset and not probe:
                 raise ValueError("Upload made no progress")
             offset = result.offset
-            probing = False
+            probe = False
     except Exception as error:
         status = error.status if isinstance(error, RequestError) else None
         response = error.response if isinstance(error, RequestError) else None

@@ -453,12 +453,12 @@ class Session:
         encoding = precompressed or compress or self._usecase._compression
 
         compress_with = encoding if precompressed is None else "none"
+
         # On-the-fly compression cannot report its encoded size or seek to an
         # encoded offset. Keep those streams on the direct path.
         replayable = isinstance(contents, bytes) or compress_with == "none"
-        source_size = (
-            _resumable.remaining_size(contents) if resumable and replayable else None
-        )
+        body_size = _resumable.get_size(contents) if resumable and replayable else None
+
         headers = self._metadata_headers(
             compression=encoding,
             content_type=content_type,
@@ -478,8 +478,8 @@ class Session:
             ) as metrics,
         ):
             if (
-                source_size is not None
-                and source_size >= _resumable.RESUMABLE_THRESHOLD
+                body_size is not None
+                and body_size >= _resumable.RESUMABLE_THRESHOLD_BYTES
             ):
                 if isinstance(contents, bytes):
                     encoded = (
@@ -491,7 +491,7 @@ class Session:
                     encoded_size = len(encoded)
                 else:
                     body = contents
-                    encoded_size = source_size
+                    encoded_size = body_size
                 try:
                     result_key = _resumable.upload(
                         self,
@@ -511,7 +511,7 @@ class Session:
                             body, key, headers, compress=False
                         )
                     if precompressed is None:
-                        metrics.record_uncompressed_size(source_size)
+                        metrics.record_uncompressed_size(body_size)
                     if encoding != "none":
                         metrics.record_compressed_size(encoded_size, encoding)
                 finally:

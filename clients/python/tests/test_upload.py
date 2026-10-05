@@ -10,7 +10,7 @@ from objectstore_client._resumable import UploadComplete
 
 @pytest.fixture
 def session(monkeypatch: pytest.MonkeyPatch) -> Session:
-    monkeypatch.setattr(_resumable, "RESUMABLE_THRESHOLD", 4)
+    monkeypatch.setattr(_resumable, "RESUMABLE_THRESHOLD_BYTES", 4)
     monkeypatch.setattr("objectstore_client._resumable.time.sleep", Mock())
     return Client("http://localhost:8888").session(Usecase("test", compression="none"))
 

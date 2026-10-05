@@ -1162,7 +1162,7 @@ def test_compressed_file_upload(
 ) -> None:
     from objectstore_client import _resumable
 
-    monkeypatch.setattr(_resumable, "RESUMABLE_THRESHOLD", 1)
+    monkeypatch.setattr(_resumable, "RESUMABLE_THRESHOLD_BYTES", 1)
     session = Client(server_url, token=TestSecretKey.get()).session(
         Usecase("test-usecase", expiration_policy=TimeToLive(timedelta(days=1))), org=42
     )
