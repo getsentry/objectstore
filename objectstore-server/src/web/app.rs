@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use anyhow::Result;
 use axum::ServiceExt;
 use axum::extract::Request;
-use objectstore_log::Level;
+use objectstore_log::{Level, tracing};
 use sentry::integrations::tower::{NewSentryLayer, SentryHttpLayer};
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
@@ -46,7 +46,7 @@ impl App {
             .layer(m::set_server_header())
             .layer(
                 TraceLayer::new_for_http()
-                    .make_span_with(objectstore_log::tracing::Span::none())
+                    .make_span_with(tracing::Span::none())
                     .on_failure(DefaultOnFailure::new().level(Level::DEBUG)),
             );
 
