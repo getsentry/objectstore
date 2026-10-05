@@ -23,6 +23,14 @@ content = result.payload.read()
 session.delete(key)
 ```
 
+`Session.put()` automatically uses resumable uploads for known remaining source
+sizes of at least 32 MiB when the encoded body is seekable; pass
+`resumable=False` to opt out. Seekable uncompressed or precompressed streams
+upload from their current cursor without staging; streams needing compression
+use direct uploads. Any resumable creation failure falls back to direct upload.
+Recovery stays within one call, with up to three recovery retries in addition to
+the pool's request retries. See `Session.put()` for `RequestError` error behavior.
+
 ## Core Concepts
 
 ### Usecases and Scopes

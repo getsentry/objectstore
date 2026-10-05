@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import random
+import time
 from dataclasses import dataclass
+from io import SEEK_END
 from typing import IO, TYPE_CHECKING
 from urllib.parse import urlencode
 
 import urllib3
 
 from objectstore_client.errors import RequestError, raise_for_status
+from objectstore_client.metadata import Compression, ExpirationPolicy
 from objectstore_client.metrics import measure_storage_operation
 from objectstore_client.tracing import storage_span
 
@@ -207,3 +211,116 @@ class ResumableUpload:
                 else RequestError
             )
             raise_for_status(response, error_type=error_type)
+
+
+RESUMABLE_THRESHOLD = 32 * 1024 * 1024
+
+
+def remaining_size(contents: bytes | IO[bytes]) -> int | None:
+    """Inspect the remaining size without reading or changing the cursor."""
+    if isinstance(contents, bytes):
+        return len(contents)
+    try:
+        if not contents.seekable():
+            return None
+        start = contents.tell()
+    except (OSError, ValueError):
+        return None
+    try:
+        end = contents.seek(0, SEEK_END)
+    except (OSError, ValueError):
+        return None
+    finally:
+        contents.seek(start)
+    return max(0, end - start)
+
+
+def _transient(error: Exception) -> bool:
+    if isinstance(error, urllib3.exceptions.MaxRetryError):
+        # Exhausted status retries carry ResponseError rather than the response.
+        return isinstance(error.reason, urllib3.exceptions.ResponseError) or (
+            isinstance(error.reason, Exception) and _transient(error.reason)
+        )
+    if isinstance(error, RequestError):
+        return error.status in (408, 429, 500, 502, 503, 504)
+    return isinstance(
+        error,
+        (
+            urllib3.exceptions.ConnectTimeoutError,
+            urllib3.exceptions.ReadTimeoutError,
+            urllib3.exceptions.ProtocolError,
+        ),
+    )
+
+
+def upload(
+    session: Session,
+    body: IO[bytes],
+    encoded_size: int,
+    key: str | None = None,
+    compression: Compression | None = None,
+    content_type: str | None = None,
+    metadata: dict[str, str] | None = None,
+    expiration_policy: ExpirationPolicy | None = None,
+    origin: str | None = None,
+    filename: str | None = None,
+) -> str | None:
+    """Resume with three recovery retries in addition to the pool's request retries.
+
+    Restore the starting cursor and return None on any creation failure so the
+    caller can use a direct upload.
+    Once created, use progress to recover after transient failures without
+    switching protocols. The recovery budget spans the whole upload, including
+    failed progress queries, and uses exponential backoff with jitter.
+    """
+    start = body.tell()
+    try:
+        handle = session._create_upload(
+            encoded_size,
+            key=key,
+            compression=compression,
+            content_type=content_type,
+            metadata=metadata,
+            expiration_policy=expiration_policy,
+            origin=origin,
+            filename=filename,
+        )
+    except Exception:
+        handle = None
+    if handle is None:
+        body.seek(start)
+        return None
+
+    try:
+        offset = 0
+        retries = 0
+        probing = False
+        while True:
+            try:
+                if probing:
+                    result = handle.progress()
+                else:
+                    body.seek(start + offset)
+                    result = handle.put(offset, (body, encoded_size - offset))
+            except UploadOffsetMismatch as error:
+                result = UploadIncomplete(error.offset)
+            except Exception as error:
+                if not _transient(error) or retries == 3:
+                    raise
+                time.sleep(random.uniform(0, min(0.1 * 2**retries, 2.0)))
+                retries += 1
+                probing = True
+                continue
+
+            if isinstance(result, UploadComplete):
+                return handle.key
+            if not offset <= result.offset <= encoded_size:
+                raise ValueError("Invalid upload offset")
+            if result.offset == offset and not probing:
+                raise ValueError("Upload made no progress")
+            offset = result.offset
+            probing = False
+    except Exception as error:
+        status = error.status if isinstance(error, RequestError) else None
+        response = error.response if isinstance(error, RequestError) else ""
+        raise RequestError("upload failed", status, response) from error

@@ -37,6 +37,7 @@ from objectstore_client.metadata import (
 from objectstore_client.metrics import (
     MetricsBackend,
     NoOpMetricsBackend,
+    StorageMetricEmitter,
     measure_storage_operation,
 )
 from objectstore_client.multipart import MultipartUpload
@@ -393,6 +394,7 @@ class Session:
         expiration_policy: ExpirationPolicy | None = None,
         origin: str | None = None,
         filename: str | None = None,
+        resumable: bool = True,
     ) -> str:
         """
         Uploads the given `contents` to blob storage.
@@ -411,6 +413,21 @@ class Session:
 
         You can use the utility function `objectstore_client.utils.guess_mime_type`
         to attempt to guess a `content_type` based on magic bytes.
+
+        By default, known remaining source sizes of at least 32 MiB use resumable
+        uploads when the encoded body is seekable: byte payloads are compressed
+        once in memory, while uncompressed or precompressed streams are uploaded
+        from their current cursor without staging. Caller-owned streams remain
+        open. Streams that need on-the-fly compression, smaller or unknown-size
+        inputs, and calls with ``resumable=False`` use direct uploads. Any session
+        creation failure falls back to a direct upload of the same bytes.
+        After creation, recovery stays within this one ``put()`` call and never
+        switches protocols. Requests honor the pool's retry policy; independently,
+        transient write or progress-query failures get up to three recovery retries
+        across the upload, with exponential backoff and jitter. Progress queries
+        confirm completion or supply the offset to resume from. Execution failures
+        raise ``RequestError`` with the cause chained; argument, preparation,
+        and direct-upload errors propagate unchanged.
 
         `compression` is deprecated in favor of `compress`.
         """
@@ -431,17 +448,15 @@ class Session:
         if precompressed and precompressed != "zstd":
             raise ValueError(f"Invalid compression: {precompressed}")
 
-        body = BytesIO(contents) if isinstance(contents, bytes) else contents
-        original_body: IO[bytes] = body
-
         encoding = precompressed or compress or self._usecase._compression
 
         compress_with = encoding if precompressed is None else "none"
-        if compress_with == "zstd":
-            cctx = zstandard.ZstdCompressor()
-            body = cctx.stream_reader(original_body)
-            body = cast(IO[bytes], utils._ZstdCompressionReaderWrapper(body))
-
+        # On-the-fly compression cannot report its encoded size or seek to an
+        # encoded offset. Keep those streams on the direct path.
+        replayable = isinstance(contents, bytes) or compress_with == "none"
+        source_size = (
+            _resumable.remaining_size(contents) if resumable and replayable else None
+        )
         headers = self._metadata_headers(
             compression=encoding,
             content_type=content_type,
@@ -460,8 +475,89 @@ class Session:
                 self._metrics_backend, "put", self._usecase.name
             ) as metrics,
         ):
-            retries = None  # by default use the pool's value, set by the Client
-            if compress_with != "none":
+            if (
+                source_size is not None
+                and source_size >= _resumable.RESUMABLE_THRESHOLD
+            ):
+                if isinstance(contents, bytes):
+                    encoded = (
+                        zstandard.ZstdCompressor().compress(contents)
+                        if compress_with == "zstd"
+                        else contents
+                    )
+                    body: IO[bytes] = BytesIO(encoded)
+                    encoded_size = len(encoded)
+                else:
+                    body = contents
+                    encoded_size = source_size
+                try:
+                    result_key = _resumable.upload(
+                        self,
+                        body,
+                        encoded_size,
+                        key=key,
+                        compression=encoding,
+                        content_type=content_type,
+                        metadata=metadata,
+                        expiration_policy=expiration_policy,
+                        origin=origin,
+                        filename=filename,
+                    )
+                    if result_key is None:
+                        headers["Content-Length"] = str(encoded_size)
+                        result_key = self._put_direct(
+                            body, key, headers, compress=False
+                        )
+                    if precompressed is None:
+                        metrics.record_uncompressed_size(source_size)
+                    if encoding != "none":
+                        metrics.record_compressed_size(encoded_size, encoding)
+                finally:
+                    if isinstance(contents, bytes):
+                        body.close()
+            else:
+                result_key = self._put_direct(
+                    contents,
+                    key,
+                    headers,
+                    compress=compress_with == "zstd",
+                    metrics=metrics,
+                    record_source=precompressed is None,
+                    encoding=encoding,
+                )
+
+            # Set after the response, since the key may be server-generated.
+            span.set_attribute("objectstore.key", result_key)
+            span.set_attribute("objectstore.compression", encoding)
+            if metrics.uncompressed_size is not None:
+                span.set_attribute(
+                    "objectstore.uncompressed_size", metrics.uncompressed_size
+                )
+            if metrics.compressed_size is not None:
+                span.set_attribute(
+                    "objectstore.compressed_size", metrics.compressed_size
+                )
+            return result_key
+
+    def _put_direct(
+        self,
+        contents: bytes | IO[bytes],
+        key: str | None,
+        headers: dict[str, str],
+        compress: bool,
+        metrics: StorageMetricEmitter | None = None,
+        record_source: bool = True,
+        encoding: Compression = "none",
+    ) -> str:
+        """Stream a direct upload, optionally compressing on the fly."""
+        body = BytesIO(contents) if isinstance(contents, bytes) else contents
+        original_body: IO[bytes] = body
+        retries = None  # by default use the pool's value, set by the Client
+        try:
+            if compress:
+                cctx = zstandard.ZstdCompressor()
+                body = cctx.stream_reader(original_body, closefd=False)
+                body = cast(IO[bytes], utils._ZstdCompressionReaderWrapper(body))
                 # For on-the-fly compression, don't attempt read retries,
                 # as the stream cannot be rewound after data has been consumed.
                 pool_retries = self._pool.retries
@@ -484,23 +580,17 @@ class Session:
 
             # Must do this after streaming `body` as that's what is responsible
             # for advancing the seek position in both streams
-            if precompressed is None:
-                metrics.record_uncompressed_size(original_body.tell())
-            if encoding != "none":
-                metrics.record_compressed_size(body.tell(), encoding)
-
-            # Set after the response, since the key may be server-generated.
-            span.set_attribute("objectstore.key", res["key"])
-            span.set_attribute("objectstore.compression", encoding)
-            if metrics.uncompressed_size is not None:
-                span.set_attribute(
-                    "objectstore.uncompressed_size", metrics.uncompressed_size
-                )
-            if metrics.compressed_size is not None:
-                span.set_attribute(
-                    "objectstore.compressed_size", metrics.compressed_size
-                )
+            if metrics is not None:
+                if record_source:
+                    metrics.record_uncompressed_size(original_body.tell())
+                if encoding != "none":
+                    metrics.record_compressed_size(body.tell(), encoding)
             return res["key"]
+        finally:
+            if body is not original_body:
+                body.close()
+            if isinstance(contents, bytes):
+                original_body.close()
 
     def get(
         self,

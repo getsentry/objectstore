@@ -4,9 +4,13 @@ import urllib3
 
 
 class RequestError(Exception):
-    """Exception raised if an API call to Objectstore fails."""
+    """Exception raised if an API call to Objectstore fails.
 
-    def __init__(self, message: str, status: int, response: str):
+    ``status`` is None and ``response`` is empty when no HTTP response is
+    available. Automatic upload failures chain the underlying cause.
+    """
+
+    def __init__(self, message: str, status: int | None, response: str):
         super().__init__(message)
         self.status = status
         self.response = response

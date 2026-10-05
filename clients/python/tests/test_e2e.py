@@ -12,6 +12,7 @@ from collections.abc import Generator
 from datetime import timedelta
 from io import BytesIO
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 import urllib3
@@ -1153,3 +1154,44 @@ def test_put_stores_under_literal_key(server_url: str) -> None:
     status, body = _fetch(url)
     assert status == 200
     assert body == payload
+
+
+@pytest.mark.parametrize("precompressed", [False, True])
+def test_compressed_file_upload(
+    server_url: str, monkeypatch: pytest.MonkeyPatch, precompressed: bool
+) -> None:
+    from objectstore_client import _resumable
+
+    monkeypatch.setattr(_resumable, "RESUMABLE_THRESHOLD", 1)
+    session = Client(server_url, token=TestSecretKey.get()).session(
+        Usecase("test-usecase", expiration_policy=TimeToLive(timedelta(days=1))), org=42
+    )
+    create = Mock(wraps=session._create_upload)
+    monkeypatch.setattr(session, "_create_upload", create)
+    contents = b"file contents\n" * 100
+    encoded = (
+        zstandard.ZstdCompressor().compress(contents) if precompressed else contents
+    )
+    with tempfile.TemporaryFile() as source:
+        source.write(b"skip this prefix" + encoded)
+        source.seek(len(b"skip this prefix"))
+        key = session.put(
+            source,
+            precompressed="zstd" if precompressed else None,
+            content_type="text/plain",
+            metadata={"source": "file"},
+            origin="203.0.113.42",
+            filename="example.txt",
+        )
+        assert create.call_count == int(precompressed)
+        assert not source.closed
+        stored = session.head(key)
+        assert stored is not None
+        assert stored.compression == "zstd"
+        assert stored.content_type == "text/plain"
+        assert stored.filename == "example.txt"
+        assert stored.origin == "203.0.113.42"
+        assert stored.custom == {"source": "file"}
+        retrieved = session.get(key)
+        assert retrieved is not None
+        assert retrieved.payload.read() == contents
