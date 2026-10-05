@@ -23,11 +23,11 @@ if TYPE_CHECKING:
     from objectstore_client.client import Session
 
 
-class _ResumableUploadUnavailable(RequestError):
+class ResumableUploadUnavailable(RequestError):
     """The upload session expired, was canceled, or could not be found."""
 
 
-class _UploadOffsetMismatch(RequestError):
+class UploadOffsetMismatch(RequestError):
     """The server rejected a chunk and reported its authoritative offset."""
 
     def __init__(self, offset: int, response: urllib3.BaseHTTPResponse):
@@ -39,26 +39,26 @@ class _UploadOffsetMismatch(RequestError):
         self.offset = offset
 
 
-class _ChunkTooSmall(ValueError):
+class ChunkTooSmall(ValueError):
     """A known non-final chunk is shorter than the upload granularity."""
 
 
 @dataclass(frozen=True)
-class _UploadIncomplete:
+class UploadIncomplete:
     """The upload expects more bytes, starting at the authoritative offset."""
 
     offset: int
 
 
 @dataclass(frozen=True)
-class _UploadComplete:
+class UploadComplete:
     """The upload is complete and the object is available through normal reads."""
 
 
-_UploadProgress = _UploadIncomplete | _UploadComplete
+UploadProgress = UploadIncomplete | UploadComplete
 
 
-class _BoundedReader(RawIOBase):
+class BoundedReader(RawIOBase):
     """Read a fixed-length slice without closing the caller's stream.
 
     Premature EOF raises EOFError. Positions are relative to the slice so urllib3
@@ -112,19 +112,19 @@ class _BoundedReader(RawIOBase):
         return offset
 
 
-def _parse_progress(response: urllib3.BaseHTTPResponse) -> _UploadProgress:
+def _parse_progress(response: urllib3.BaseHTTPResponse) -> UploadProgress:
     if response.status == 409:
-        raise _UploadOffsetMismatch(int(response.headers["Upload-Offset"]), response)
+        raise UploadOffsetMismatch(int(response.headers["Upload-Offset"]), response)
     if response.status in (404, 410):
-        raise_for_status(response, error_type=_ResumableUploadUnavailable)
+        raise_for_status(response, error_type=ResumableUploadUnavailable)
     raise_for_status(response)
     if response.status == 201:
         response.json()["key"]
-        return _UploadComplete()
-    return _UploadIncomplete(int(response.headers["Upload-Offset"]))
+        return UploadComplete()
+    return UploadIncomplete(int(response.headers["Upload-Offset"]))
 
 
-class _ResumableUpload:
+class ResumableUpload:
     """A handle bound to one object, scoped session, and resumable upload token."""
 
     def __init__(
@@ -154,7 +154,7 @@ class _ResumableUpload:
         """The persistence unit for non-final chunks, if known; zero means none."""
         return self._granularity
 
-    def progress(self) -> _UploadProgress:
+    def progress(self) -> UploadProgress:
         """Query authoritative progress"""
         session = self._session
         query = urlencode({"session": self.token})
@@ -179,7 +179,7 @@ class _ResumableUpload:
 
     def put(
         self, offset: int, contents: bytes | tuple[IO[bytes], int]
-    ) -> _UploadProgress:
+    ) -> UploadProgress:
         """Write a chunk verbatim and return authoritative progress.
 
         A stream tuple supplies the stream and the number of bytes to send from
@@ -188,17 +188,17 @@ class _ResumableUpload:
         Compression, if recorded at creation, applies to the complete object
         before it is split into chunks. Offsets and lengths count compressed bytes.
 
-        Raises `_UploadOffsetMismatch` only when the server rejects the offset,
-        `_ResumableUploadUnavailable` for an unavailable session, or `_ChunkTooSmall`
+        Raises `UploadOffsetMismatch` only when the server rejects the offset,
+        `ResumableUploadUnavailable` for an unavailable session, or `ChunkTooSmall`
         for a known non-final chunk shorter than the granularity. Zero-length and
         final chunks may be shorter than the granularity.
         """
         if isinstance(contents, bytes):
-            body: bytes | _BoundedReader = contents
+            body: bytes | BoundedReader = contents
             length = len(contents)
         else:
             stream, length = contents
-            body = _BoundedReader(stream, length)
+            body = BoundedReader(stream, length)
 
         if offset < 0 or length < 0:
             raise ValueError("Chunk offset and length must not be negative")
@@ -208,7 +208,7 @@ class _ResumableUpload:
             and 0 < length < self._granularity
             and offset + length < self._total_length
         ):
-            raise _ChunkTooSmall(
+            raise ChunkTooSmall(
                 f"Non-final chunk {length} is smaller than upload granularity "
                 f"{self._granularity}"
             )
@@ -264,7 +264,7 @@ class _ResumableUpload:
                 decode_content=True,
             )
             error_type = (
-                _ResumableUploadUnavailable
+                ResumableUploadUnavailable
                 if response.status in (404, 410)
                 else RequestError
             )

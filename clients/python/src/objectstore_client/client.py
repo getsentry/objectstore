@@ -15,8 +15,7 @@ import urllib3
 import zstandard
 from urllib3.connectionpool import HTTPConnectionPool
 
-from objectstore_client import presign, utils
-from objectstore_client._resumable import _ResumableUpload
+from objectstore_client import _resumable, presign, utils
 from objectstore_client.auth import Permission, SecretKey, TokenProvider
 from objectstore_client.errors import (
     ExpiryExtensionRejected,
@@ -323,7 +322,6 @@ class Session:
 
     def _metadata_headers(
         self,
-        *,
         compression: Compression | None,
         content_type: str | None = None,
         metadata: dict[str, str] | None = None,
@@ -800,7 +798,6 @@ class Session:
     def _create_upload(
         self,
         object_length: int,
-        *,
         key: str | None = None,
         compression: Compression | None = None,
         content_type: str | None = None,
@@ -808,7 +805,7 @@ class Session:
         expiration_policy: ExpirationPolicy | None = None,
         origin: str | None = None,
         filename: str | None = None,
-    ) -> _ResumableUpload | None:
+    ) -> _resumable.ResumableUpload | None:
         """Create a private resumable upload, or return None if the server declines.
 
         Compression only describes the already-compressed object and does not
@@ -853,7 +850,7 @@ class Session:
             raise_for_status(response)
             res = response.json()
             span.set_attribute("objectstore.key", res["key"])
-            return _ResumableUpload(
+            return _resumable.ResumableUpload(
                 self,
                 res["key"],
                 res["session"],
@@ -861,13 +858,13 @@ class Session:
                 res.get("granularity", 0),
             )
 
-    def _resume_upload(self, key: str, token: str) -> _ResumableUpload:
+    def _resume_upload(self, key: str, token: str) -> _resumable.ResumableUpload:
         """Reconstruct a private handle without contacting the server.
 
         The key and token must belong to the same upload and scope. Total length
         and granularity are unknown, so chunk validation is left to the server.
         """
-        return _ResumableUpload(self, key, token)
+        return _resumable.ResumableUpload(self, key, token)
 
     def initiate_multipart_upload(
         self,

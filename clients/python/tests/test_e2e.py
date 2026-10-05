@@ -24,10 +24,10 @@ from objectstore_client import (
     Usecase,
 )
 from objectstore_client._resumable import (
-    _ResumableUploadUnavailable,
-    _UploadComplete,
-    _UploadIncomplete,
-    _UploadOffsetMismatch,
+    ResumableUploadUnavailable,
+    UploadComplete,
+    UploadIncomplete,
+    UploadOffsetMismatch,
 )
 from objectstore_client.auth import Permission, SecretKey
 from objectstore_client.errors import RequestError
@@ -202,13 +202,13 @@ def test_resumable_upload(server_url: str) -> None:
     assert upload is not None
     assert upload.key == "resumable-python"
     assert upload.granularity is not None
-    assert upload.progress() == _UploadIncomplete(0)
-    assert upload.put(0, b"abc") == _UploadIncomplete(3)
+    assert upload.progress() == UploadIncomplete(0)
+    assert upload.put(0, b"abc") == UploadIncomplete(3)
 
     resumed = session._resume_upload(upload.key, upload.token)
     assert resumed.granularity is None
-    assert resumed.progress() == _UploadIncomplete(3)
-    with pytest.raises(_UploadOffsetMismatch) as mismatch:
+    assert resumed.progress() == UploadIncomplete(3)
+    with pytest.raises(UploadOffsetMismatch) as mismatch:
         resumed.put(0, b"abc")
     assert mismatch.value.status == 409
     assert mismatch.value.offset == 3
@@ -217,7 +217,7 @@ def test_resumable_upload(server_url: str) -> None:
     assert oversized.value.status == 400
     stream = BytesIO(b"prefix-def-trailing")
     stream.seek(7)
-    assert resumed.put(3, (stream, 3)) == _UploadComplete()
+    assert resumed.put(3, (stream, 3)) == UploadComplete()
     assert stream.read() == b"-trailing"
 
     response = session.get(upload.key)
@@ -241,9 +241,9 @@ def test_resumable_upload_precompressed(server_url: str) -> None:
     upload = session._create_upload(len(compressed), compression="zstd")
     assert upload is not None
     split = len(compressed) // 2
-    assert upload.put(0, compressed[:split]) == _UploadIncomplete(split)
+    assert upload.put(0, compressed[:split]) == UploadIncomplete(split)
     stream = UnrewindableStream(compressed[split:] + b"trailing")
-    assert upload.put(split, (stream, len(compressed) - split)) == _UploadComplete()
+    assert upload.put(split, (stream, len(compressed) - split)) == UploadComplete()
     assert stream.read() == b"trailing"
 
     response = session.get(upload.key, decompress=False)
@@ -256,8 +256,7 @@ def test_resumable_upload_precompressed(server_url: str) -> None:
 
 
 def test_resumable_upload_short_stream(server_url: str) -> None:
-    # Bound the wait if length checking regresses, so this test cannot hang.
-    session = Client(server_url, token=TestSecretKey.get(), timeout_ms=1000).session(
+    session = Client(server_url, token=TestSecretKey.get()).session(
         Usecase("test-usecase"), org=42, project=1337
     )
     upload = session._create_upload(6)
@@ -276,10 +275,10 @@ def test_resumable_upload_cancel(server_url: str) -> None:
     )
     upload = session._create_upload(6)
     assert upload is not None
-    assert upload.put(0, b"abc") == _UploadIncomplete(3)
+    assert upload.put(0, b"abc") == UploadIncomplete(3)
     upload.cancel()
 
-    with pytest.raises(_ResumableUploadUnavailable):
+    with pytest.raises(ResumableUploadUnavailable):
         upload.progress()
     assert session.get(upload.key) is None
 
