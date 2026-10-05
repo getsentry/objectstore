@@ -806,13 +806,14 @@ class Session:
         origin: str | None = None,
         filename: str | None = None,
     ) -> _resumable.ResumableUpload | None:
-        """Create a private resumable upload, or return None if the server declines.
+        """Create a resumable upload, or return None if the server declines.
 
-        Compression only describes the already-compressed object and does not
-        inherit the usecase default. The caller must compress the complete object
-        before splitting it into chunks; `object_length` counts the resulting bytes.
-        Expiration inherits the usecase default unless explicitly supplied.
-        Only HTTP 501 declines creation; other HTTP failures raise RequestError.
+        `object_length` is the total length of the object to be uploaded.
+        Unlike regular uploads, the client does not automatically compress chunk
+        contents.
+        The caller must pre-compress the object according to `compression`, then
+        create the upload with the post-compression `object_length`. Offsets
+        similarly refer to the bytes after compression.
         """
         if object_length < 0:
             raise ValueError("Object length must not be negative")
@@ -859,11 +860,7 @@ class Session:
             )
 
     def _resume_upload(self, key: str, token: str) -> _resumable.ResumableUpload:
-        """Reconstruct a private handle without contacting the server.
-
-        The key and token must belong to the same upload and scope. Total length
-        and granularity are unknown, so chunk validation is left to the server.
-        """
+        """Reconstruct a resumable upload handle, without contacting the server."""
         return _resumable.ResumableUpload(self, key, token)
 
     def initiate_multipart_upload(
