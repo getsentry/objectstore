@@ -103,12 +103,12 @@ def test_retry_exhaustion(
         session.put(b"payload")
     assert isinstance(raised.value.__cause__, urllib3.exceptions.MaxRetryError)
     assert raised.value.__cause__.reason is failure
-    # Creation, three progress queries, and four writes with their own pool retries.
-    assert make_request.call_count == 1 + 3 + 4 * (pool_retries + 1)
+    # Creation, two progress queries, and three writes with their own pool retries.
+    assert make_request.call_count == 1 + 2 + 3 * (pool_retries + 1)
     assert session._pool.retries is policy
-    assert sleep.call_count == 3
-    for call, limit in zip(sleep.call_args_list, [0.1, 0.2, 0.4], strict=True):
-        assert 0 <= call.args[0] <= limit
+    assert sleep.call_count == 2
+    for call, delay in zip(sleep.call_args_list, [2, 4], strict=True):
+        assert delay <= call.args[0] <= delay + 1
 
 
 @pytest.mark.parametrize(

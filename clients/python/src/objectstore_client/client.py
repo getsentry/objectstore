@@ -423,7 +423,7 @@ class Session:
         creation failure falls back to a direct upload of the same bytes.
         After creation, recovery stays within this one ``put()`` call and never
         switches protocols. Requests honor the pool's retry policy; independently,
-        transient write or progress-query failures get up to three recovery retries
+        transient write or progress-query failures get up to two recovery retries
         across the upload, with exponential backoff and jitter. Progress queries
         confirm completion or supply the offset to resume from. Execution failures
         raise ``RequestError`` with the cause chained; argument, preparation,

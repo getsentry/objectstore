@@ -265,13 +265,13 @@ def upload(
     origin: str | None = None,
     filename: str | None = None,
 ) -> str | None:
-    """Resume with three recovery retries in addition to the pool's request retries.
+    """Resume with two recovery retries in addition to the pool's request retries.
 
     Restore the starting cursor and return None on any creation failure so the
     caller can use a direct upload.
     Once created, use progress to recover after transient failures without
     switching protocols. The recovery budget spans the whole upload, including
-    failed progress queries, and uses exponential backoff with jitter.
+    failed progress queries, and waits 2 then 4 seconds plus up to 1 second of jitter.
     """
     start = body.tell()
     try:
@@ -305,9 +305,9 @@ def upload(
             except UploadOffsetMismatch as error:
                 result = UploadIncomplete(error.offset)
             except Exception as error:
-                if not _transient(error) or retries == 3:
+                if not _transient(error) or retries == 2:
                     raise
-                time.sleep(random.uniform(0, min(0.1 * 2**retries, 2.0)))
+                time.sleep(2 ** (retries + 1) + random.uniform(0, 1))
                 retries += 1
                 probing = True
                 continue
