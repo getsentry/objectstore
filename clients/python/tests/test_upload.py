@@ -78,10 +78,19 @@ def test_lost_final_response(session: Session, monkeypatch: pytest.MonkeyPatch) 
 
 
 @pytest.mark.parametrize("pool_retries", [0, 2])
+@pytest.mark.parametrize("status_failure", [False, True])
 def test_retry_exhaustion(
-    session: Session, monkeypatch: pytest.MonkeyPatch, pool_retries: int
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    pool_retries: int,
+    status_failure: bool,
 ) -> None:
-    policy = urllib3.Retry(total=pool_retries, read=pool_retries)
+    policy = urllib3.Retry(
+        total=pool_retries,
+        read=pool_retries,
+        status=pool_retries,
+        status_forcelist=[503],
+    )
     session._pool.retries = policy
     failure = urllib3.exceptions.ReadTimeoutError(session._pool, "/", "lost response")
     sleep = Mock()
@@ -95,20 +104,44 @@ def test_retry_exhaustion(
             )
         if headers["Upload-Offset"] == "*":
             return urllib3.HTTPResponse(status=204, headers={"Upload-Offset": "0"})
+        if status_failure:
+            return urllib3.HTTPResponse(status=503, body=b"unavailable")
         raise failure
 
     make_request = Mock(side_effect=request)
     monkeypatch.setattr(session._pool, "_make_request", make_request)
     with pytest.raises(RequestError, match="^upload failed$") as raised:
         session.put(b"payload")
-    assert isinstance(raised.value.__cause__, urllib3.exceptions.MaxRetryError)
-    assert raised.value.__cause__.reason is failure
-    # Creation, two progress queries, and three writes with their own pool retries.
-    assert make_request.call_count == 1 + 2 + 3 * (pool_retries + 1)
+    if status_failure:
+        assert isinstance(raised.value.__cause__, RequestError)
+        assert raised.value.__cause__.status == 503
+    else:
+        assert isinstance(raised.value.__cause__, urllib3.exceptions.MaxRetryError)
+        assert raised.value.__cause__.reason is failure
+    # Creation, two progress queries, and three writes regardless of pool retries.
+    assert make_request.call_count == 1 + 2 + 3
     assert session._pool.retries is policy
     assert sleep.call_count == 2
     for call, delay in zip(sleep.call_args_list, [2, 4], strict=True):
         assert delay <= call.args[0] <= delay + 1
+
+
+def test_connection_retries_are_not_multiplied(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    policy = urllib3.Retry(total=2, connect=2)
+    session._pool.retries = policy
+    handle = session._resume_upload("key", "token")
+    monkeypatch.setattr(session, "_create_upload", Mock(return_value=handle))
+    failure = urllib3.exceptions.ConnectTimeoutError("connection timed out")
+    request = Mock(side_effect=failure)
+    monkeypatch.setattr(session._pool, "_make_request", request)
+    with pytest.raises(RequestError) as raised:
+        session.put(b"payload")
+    assert isinstance(raised.value.__cause__, urllib3.exceptions.MaxRetryError)
+    assert raised.value.__cause__.reason is failure
+    assert request.call_count == 3
+    assert session._pool.retries is policy
 
 
 @pytest.mark.parametrize(

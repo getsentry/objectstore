@@ -160,6 +160,11 @@ class ResumableUpload:
         headers = session._make_headers()
         headers["Upload-Offset"] = str(offset)
         headers["Content-Length"] = str(length)
+        # Only retry connection establishment here. Replaying a body requires
+        # querying the server's offset first, which the automatic uploader owns.
+        retries = urllib3.Retry.from_int(session._pool.retries).new(
+            read=0, status=0, other=0, raise_on_status=False
+        )
         with (
             storage_span(
                 "resumable.put",
@@ -178,6 +183,8 @@ class ResumableUpload:
                 f"{session._make_url(self.key)}?{query}",
                 headers=headers,
                 body=body,
+                retries=retries,
+                redirect=False,
                 preload_content=True,
                 decode_content=True,
             )
@@ -246,7 +253,6 @@ def _transient(error: Exception) -> bool:
     return isinstance(
         error,
         (
-            urllib3.exceptions.ConnectTimeoutError,
             urllib3.exceptions.ReadTimeoutError,
             urllib3.exceptions.ProtocolError,
         ),
@@ -265,13 +271,15 @@ def upload(
     origin: str | None = None,
     filename: str | None = None,
 ) -> str | None:
-    """Resume with two recovery retries in addition to the pool's request retries.
+    """Resume with two recovery retries; the pool handles connection retries.
 
     Restore the starting cursor and return None on any creation failure so the
     caller can use a direct upload.
     Once created, use progress to recover after transient failures without
     switching protocols. The recovery budget spans the whole upload, including
     failed progress queries, and waits 2 then 4 seconds plus up to 1 second of jitter.
+    Exhausted connection retries are terminal. Control requests retain the pool's
+    full retry policy.
     """
     start = body.tell()
     try:
