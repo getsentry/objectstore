@@ -49,7 +49,7 @@ thiserror = { workspace = true }
 thread_local = { workspace = true }
 tokio = { workspace = true, features = ["fs", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tower = { workspace = true }
-tower-http = { workspace = true, features = ["catch-panic", "metrics", "set-header", "trace"] }
+tower-http = { workspace = true, features = ["catch-panic", "metrics", "set-header"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 jemalloc_pprof = { workspace = true, optional = true }
@@ -63,9 +63,11 @@ profiling = ["dep:jemalloc_pprof", "tikv-jemallocator/profiling"]
 nix = { workspace = true, features = ["signal"] }
 objectstore-options = { workspace = true, features = ["testing"] }
 objectstore-test = { workspace = true }
+sentry = { workspace = true, features = ["test"] }
 stresstest = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
+tracing-subscriber = { workspace = true }
 
 [[bin]]
 name = "objectstore"

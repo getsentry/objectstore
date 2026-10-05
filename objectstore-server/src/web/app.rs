@@ -3,12 +3,10 @@ use std::net::SocketAddr;
 use anyhow::Result;
 use axum::ServiceExt;
 use axum::extract::Request;
-use objectstore_log::Level;
 use sentry::integrations::tower::{NewSentryLayer, SentryHttpLayer};
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
-use tower_http::trace::{DefaultOnFailure, TraceLayer};
 
 use crate::endpoints;
 use crate::state::ServiceState;
@@ -43,12 +41,7 @@ impl App {
             ))
             .layer(state.request_counter.layer())
             .layer(CatchPanicLayer::custom(m::handle_panic))
-            .layer(m::set_server_header())
-            .layer(
-                TraceLayer::new_for_http()
-                    .make_span_with(m::make_http_span)
-                    .on_failure(DefaultOnFailure::new().level(Level::DEBUG)),
-            );
+            .layer(m::set_server_header());
 
         let router = endpoints::routes()
             .layer(middleware)
@@ -91,5 +84,171 @@ impl App {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Method, StatusCode};
+    use objectstore_log::tracing;
+    use objectstore_service::backend::local_fs::FileSystemConfig;
+    use sentry::protocol::{Context, EnvelopeItem, TraceContext, Transaction};
+    use tower::ServiceExt;
+    use tracing_subscriber::prelude::*;
+
+    use super::*;
+    use crate::config::{AuthZ, Config, StorageConfig};
+    use crate::state::Services;
+
+    fn trace<'a>(transaction: &'a Transaction<'_>) -> &'a TraceContext {
+        let Some(Context::Trace(trace)) = transaction.contexts.get("trace") else {
+            panic!("transaction is missing its trace context");
+        };
+        trace
+    }
+
+    #[test]
+    fn request_and_body_tasks_preserve_sentry_context() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let subscriber = tracing_subscriber::registry().with(
+            sentry::integrations::tracing::layer()
+                .span_filter(|metadata| *metadata.level() != tracing::Level::TRACE),
+        );
+        let trace_ids = [
+            "11111111111111111111111111111111",
+            "22222222222222222222222222222222",
+        ];
+        let caller_span = "aaaaaaaaaaaaaaaa";
+
+        let envelopes = sentry::test::with_captured_envelopes_options(
+            || {
+                tracing::subscriber::with_default(subscriber, || {
+                    runtime.block_on(async {
+                        let directory = tempfile::tempdir().unwrap();
+                        let state = Services::spawn(Config {
+                            storage: StorageConfig::FileSystem(FileSystemConfig {
+                                path: directory.path().into(),
+                                cogs: None,
+                            }),
+                            auth: AuthZ {
+                                enforce: false,
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        })
+                        .await
+                        .unwrap();
+                        let app = App::new(state);
+
+                        // HEAD starts its task in the handler; batch starts its task only
+                        // when the response body is polled, after the HTTP transaction ends.
+                        let requests = [
+                            Request::builder()
+                                .method(Method::HEAD)
+                                .uri("/v1/objects/test/org=1/missing")
+                                .body(Body::empty())
+                                .unwrap(),
+                            Request::builder()
+                                .method(Method::POST)
+                                .uri("/v1/objects:batch/test/org=2/")
+                                .header("content-type", "multipart/form-data; boundary=boundary")
+                                .body(Body::from(concat!(
+                                    "--boundary\r\n",
+                                    "x-sn-batch-operation-key: missing\r\n",
+                                    "x-sn-batch-operation-kind: head\r\n",
+                                    "\r\n\r\n--boundary--\r\n",
+                                )))
+                                .unwrap(),
+                        ];
+
+                        for (index, mut request) in requests.into_iter().enumerate() {
+                            request.headers_mut().insert(
+                                "sentry-trace",
+                                format!("{}-{caller_span}-1", trace_ids[index])
+                                    .parse()
+                                    .unwrap(),
+                            );
+                            let response = app.router.clone().oneshot(request).await.unwrap();
+                            assert_eq!(
+                                response.status(),
+                                if index == 0 {
+                                    StatusCode::NOT_FOUND
+                                } else {
+                                    StatusCode::OK
+                                },
+                            );
+                            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                            if index == 1 {
+                                assert!(String::from_utf8_lossy(&body).contains("404 Not Found"));
+                            }
+                        }
+                    });
+                });
+            },
+            sentry::ClientOptions {
+                traces_sample_rate: 1.0,
+                ..Default::default()
+            },
+        );
+
+        let transactions: Vec<_> = envelopes
+            .iter()
+            .flat_map(|envelope| envelope.items())
+            .filter_map(|item| match item {
+                EnvelopeItem::Transaction(transaction) => Some(transaction),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            transactions.len(),
+            4,
+            "one HTTP and one task transaction per request"
+        );
+
+        for (index, trace_id) in trace_ids.into_iter().enumerate() {
+            let request_transactions: Vec<_> = transactions
+                .iter()
+                .copied()
+                .filter(|transaction| trace(transaction).trace_id.to_string() == trace_id)
+                .collect();
+            assert_eq!(
+                request_transactions.len(),
+                2,
+                "task must keep the incoming trace ID"
+            );
+            let http = request_transactions
+                .iter()
+                .find(|t| trace(t).op.as_deref() == Some("http.server"))
+                .unwrap();
+            let task = request_transactions
+                .iter()
+                .find(|t| trace(t).op.as_deref() == Some("tokio.task"))
+                .unwrap();
+            assert_eq!(trace(http).parent_span_id.unwrap().to_string(), caller_span);
+            assert_eq!(
+                trace(task).parent_span_id,
+                Some(trace(http).span_id),
+                "task parent must be the emitted HTTP span"
+            );
+            assert_eq!(
+                task.name.as_deref(),
+                Some(if index == 0 { "get_metadata" } else { "head" })
+            );
+
+            for transaction in request_transactions {
+                assert_eq!(
+                    transaction.tags.get("usecase").map(String::as_str),
+                    Some("test")
+                );
+                assert_eq!(
+                    transaction.tags.get("scope.org"),
+                    Some(&(index + 1).to_string())
+                );
+            }
+        }
     }
 }

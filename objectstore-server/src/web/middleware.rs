@@ -1,5 +1,6 @@
 use std::any::Any;
 use std::net::SocketAddr;
+use std::time::Instant;
 
 use axum::RequestExt;
 use axum::body::Body;
@@ -7,7 +8,6 @@ use axum::extract::{ConnectInfo, MatchedPath, RawPathParams, Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use objectstore_log::tracing;
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::endpoints;
@@ -54,25 +54,6 @@ pub fn set_server_header() -> SetResponseHeaderLayer<HeaderValue> {
     SetResponseHeaderLayer::overriding(header::SERVER, HeaderValue::from_static(SERVER))
 }
 
-/// Create a tracing span for an HTTP request.
-///
-/// As opposed to `DefaultMakeSpan`, this also records the client IP address if available.
-pub fn make_http_span(request: &Request) -> tracing::Span {
-    let span = tracing::debug_span!(
-        "request",
-        method = %request.method(),
-        uri = %request.uri(),
-        version = ?request.version(),
-        client_addr = tracing::field::Empty,
-    );
-
-    if let Some(ConnectInfo(addr)) = request.extensions().get::<ConnectInfo<SocketAddr>>() {
-        span.record("client_addr", tracing::field::display(addr.ip()));
-    }
-
-    span
-}
-
 /// A panic handler that logs the panic and turns it into a 500 response.
 ///
 /// Use with the [`CatchPanicLayer`](tower_http::catch_panic::CatchPanicLayer) middleware.
@@ -91,15 +72,18 @@ pub fn handle_panic(err: Box<dyn Any + Send + 'static>) -> Response {
     response.into_response()
 }
 
-/// Wraps the response body so the request's Sentry hub stays active during polling.
+/// Wraps the response body with a fork of the request's Sentry hub for polling.
 ///
 /// Use this with [`from_fn`](axum::middleware::from_fn). Place it below the Sentry
 /// tower layers so that `Hub::current()` returns the request-scoped hub.
 pub async fn bind_sentry_body(request: Request, next: Next) -> Response {
     let hub = sentry::Hub::current();
-    next.run(request)
-        .await
-        .map(|body| Body::new(SentryBody::new(hub, body)))
+    let response = next.run(request).await;
+
+    // Preserve handler scope changes and the active span before the outer Sentry
+    // middleware clears it. This does not extend the transaction's lifetime.
+    let body_hub = sentry::Hub::new_from_top(hub);
+    response.map(|body| Body::new(SentryBody::new(body_hub.into(), body)))
 }
 
 async fn get_usecase(request: &mut Request) -> Option<String> {
@@ -115,7 +99,7 @@ async fn get_usecase(request: &mut Request) -> Option<String> {
         })
 }
 
-/// A middleware that logs web request timings as metrics.
+/// Logs request start and completion, and emits web request metrics.
 ///
 /// Use this with [`from_fn`](axum::middleware::from_fn).
 ///
@@ -123,8 +107,18 @@ async fn get_usecase(request: &mut Request) -> Option<String> {
 /// the response body (see [`MetricsBody`]) so it is dropped only once the body has finished
 /// streaming, not when the handler produces the response headers.
 ///
-/// Internal routes are excluded from metrics.
+/// The completion log records status and latency when response headers are ready.
+/// Internal routes are excluded from metrics, but still logged.
 pub async fn emit_request_metrics(mut request: Request, next: Next) -> Response {
+    let start = Instant::now();
+    let method = request.method().clone();
+    let uri = request.uri().clone();
+    let version = request.version();
+    let client_addr = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| addr.ip().to_string());
+
     let matched_path = request.extract_parts::<MatchedPath>().await;
     let route = matched_path.as_ref().map_or("unknown", |m| m.as_str());
     let service = request.extract_parts::<DownstreamService>().await.unwrap();
@@ -134,7 +128,25 @@ pub async fn emit_request_metrics(mut request: Request, next: Next) -> Response 
     let guard =
         should_emit.then(|| EmitMetricsGuard::new(route, request.method(), service, usecase));
 
+    objectstore_log::debug!(
+        %method,
+        %uri,
+        ?version,
+        client_addr = client_addr.as_deref(),
+        "started processing request"
+    );
+
     let response = next.run(request).await;
+
+    objectstore_log::debug!(
+        %method,
+        %uri,
+        ?version,
+        client_addr = client_addr.as_deref(),
+        status = response.status().as_u16(),
+        latency = %format_args!("{} ms", start.elapsed().as_millis()),
+        "finished processing request"
+    );
 
     // Move the guard into the response body so the duration metric is emitted only when the
     // body has finished streaming. The header status is applied on successful completion.
