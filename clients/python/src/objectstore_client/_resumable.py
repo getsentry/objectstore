@@ -184,7 +184,6 @@ class ResumableUpload:
                 headers=headers,
                 body=body,
                 retries=retries,
-                redirect=False,
                 preload_content=True,
                 decode_content=True,
             )
