@@ -9,7 +9,6 @@ received from the server.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from io import SEEK_CUR, SEEK_END, SEEK_SET, RawIOBase, UnsupportedOperation
 from typing import IO, TYPE_CHECKING
 from urllib.parse import urlencode
 
@@ -58,60 +57,6 @@ class UploadComplete:
 UploadProgress = UploadIncomplete | UploadComplete
 
 
-class BoundedReader(RawIOBase):
-    """Read a fixed-length slice without closing the caller's stream.
-
-    Premature EOF raises EOFError. Positions are relative to the slice so urllib3
-    can rewind seekable streams for retries without losing the length bound.
-    """
-
-    def __init__(self, stream: IO[bytes], length: int):
-        self._stream = stream
-        self._length = length
-        self._position = 0
-        try:
-            self._start: int | None = stream.tell()
-        except OSError:
-            self._start = None
-
-    def read(self, size: int = -1, /) -> bytes:
-        remaining = self._length - self._position
-        size = remaining if size < 0 else min(size, remaining)
-        if size == 0:
-            return b""
-        data = self._stream.read(size)
-        if not data:
-            raise EOFError(f"Upload stream ended with {remaining} bytes remaining")
-        self._position += len(data)
-        return data
-
-    def readable(self) -> bool:
-        return True
-
-    def seekable(self) -> bool:
-        return self._start is not None and self._stream.seekable()
-
-    def tell(self) -> int:
-        if self._start is None:
-            raise UnsupportedOperation("Stream position is unavailable")
-        return self._position
-
-    def seek(self, offset: int, whence: int = SEEK_SET, /) -> int:
-        if self._start is None:
-            raise UnsupportedOperation("Stream position is unavailable")
-        if whence == SEEK_CUR:
-            offset += self._position
-        elif whence == SEEK_END:
-            offset += self._length
-        elif whence != SEEK_SET:
-            raise ValueError("Invalid seek origin")
-        if not 0 <= offset <= self._length:
-            raise ValueError("Seek position is outside the upload chunk")
-        self._stream.seek(self._start + offset)
-        self._position = offset
-        return offset
-
-
 def _parse_progress(response: urllib3.BaseHTTPResponse) -> UploadProgress:
     if response.status == 409:
         raise UploadOffsetMismatch(int(response.headers["Upload-Offset"]), response)
@@ -119,7 +64,6 @@ def _parse_progress(response: urllib3.BaseHTTPResponse) -> UploadProgress:
         raise_for_status(response, error_type=ResumableUploadUnavailable)
     raise_for_status(response)
     if response.status == 201:
-        response.json()["key"]
         return UploadComplete()
     return UploadIncomplete(int(response.headers["Upload-Offset"]))
 
@@ -182,9 +126,9 @@ class ResumableUpload:
     ) -> UploadProgress:
         """Write a chunk verbatim and return authoritative progress.
 
-        A stream tuple supplies the stream and the number of bytes to send from
-        its current position. Trailing bytes remain unread, and premature EOF
-        raises EOFError. The caller's stream remains open.
+        A stream tuple supplies the stream and its exact byte length. The stream
+        must yield exactly that many bytes from its current position through EOF.
+        The caller is responsible for providing a stream with the declared length.
         Compression, if recorded at creation, applies to the complete object
         before it is split into chunks. Offsets and lengths count compressed bytes.
 
@@ -194,11 +138,10 @@ class ResumableUpload:
         final chunks may be shorter than the granularity.
         """
         if isinstance(contents, bytes):
-            body: bytes | BoundedReader = contents
+            body: bytes | IO[bytes] = contents
             length = len(contents)
         else:
-            stream, length = contents
-            body = BoundedReader(stream, length)
+            body, length = contents
 
         if offset < 0 or length < 0:
             raise ValueError("Chunk offset and length must not be negative")

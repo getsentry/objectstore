@@ -215,10 +215,9 @@ def test_resumable_upload(server_url: str) -> None:
     with pytest.raises(RequestError) as oversized:
         resumed.put(3, b"defg")
     assert oversized.value.status == 400
-    stream = BytesIO(b"prefix-def-trailing")
+    stream = BytesIO(b"prefix-def")
     stream.seek(7)
     assert resumed.put(3, (stream, 3)) == UploadComplete()
-    assert stream.read() == b"-trailing"
 
     response = session.get(upload.key)
     assert response is not None
@@ -242,9 +241,8 @@ def test_resumable_upload_precompressed(server_url: str) -> None:
     assert upload is not None
     split = len(compressed) // 2
     assert upload.put(0, compressed[:split]) == UploadIncomplete(split)
-    stream = UnrewindableStream(compressed[split:] + b"trailing")
+    stream = UnrewindableStream(compressed[split:])
     assert upload.put(split, (stream, len(compressed) - split)) == UploadComplete()
-    assert stream.read() == b"trailing"
 
     response = session.get(upload.key, decompress=False)
     assert response is not None
@@ -253,20 +251,6 @@ def test_resumable_upload_precompressed(server_url: str) -> None:
     response = session.get(upload.key)
     assert response is not None
     assert response.payload.read() == payload
-
-
-def test_resumable_upload_short_stream(server_url: str) -> None:
-    session = Client(server_url, token=TestSecretKey.get()).session(
-        Usecase("test-usecase"), org=42, project=1337
-    )
-    upload = session._create_upload(6)
-    assert upload is not None
-    stream = BytesIO(b"abc")
-    with pytest.raises(EOFError, match="3 bytes remaining"):
-        upload.put(0, (stream, 6))
-    assert not stream.closed
-    assert session.get(upload.key) is None
-    upload.cancel()
 
 
 def test_resumable_upload_cancel(server_url: str) -> None:
