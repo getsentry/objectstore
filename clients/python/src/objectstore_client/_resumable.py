@@ -285,7 +285,6 @@ def upload(
     except Exception:
         handle = None
     if handle is None:
-        body.seek(start)
         return None
 
     try:
