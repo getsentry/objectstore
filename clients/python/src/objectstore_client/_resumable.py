@@ -1,11 +1,3 @@
-"""Private, single-request operations for resumable uploads.
-
-Chunks contain the final stored bytes; compression and recovery belong to the caller.
-Always continue from the server's authoritative offset, which may acknowledge only
-a prefix of the submitted chunk. The upload token is opaque and remains encoded as
-received from the server.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -27,7 +19,7 @@ class ResumableUploadUnavailable(RequestError):
 
 
 class UploadOffsetMismatch(RequestError):
-    """The server rejected a chunk and reported its authoritative offset."""
+    """The server rejected a chunk and reported its offset."""
 
     def __init__(self, offset: int, response: urllib3.BaseHTTPResponse):
         super().__init__(
@@ -39,25 +31,25 @@ class UploadOffsetMismatch(RequestError):
 
 
 class ChunkTooSmall(ValueError):
-    """A known non-final chunk is shorter than the upload granularity."""
+    """A non-final chunk is shorter than the upload granularity."""
 
 
 @dataclass(frozen=True)
 class UploadIncomplete:
-    """The upload expects more bytes, starting at the authoritative offset."""
+    """The upload expects more bytes, starting at the given offset."""
 
     offset: int
 
 
 @dataclass(frozen=True)
 class UploadComplete:
-    """The upload is complete and the object is available through normal reads."""
+    """The upload is complete."""
 
 
 UploadProgress = UploadIncomplete | UploadComplete
 
 
-def _parse_progress(response: urllib3.BaseHTTPResponse) -> UploadProgress:
+def parse_progress_response(response: urllib3.BaseHTTPResponse) -> UploadProgress:
     if response.status == 409:
         raise UploadOffsetMismatch(int(response.headers["Upload-Offset"]), response)
     if response.status in (404, 410):
@@ -69,7 +61,7 @@ def _parse_progress(response: urllib3.BaseHTTPResponse) -> UploadProgress:
 
 
 class ResumableUpload:
-    """A handle bound to one object, scoped session, and resumable upload token."""
+    """A handle bound to one resumable upload session."""
 
     def __init__(
         self,
@@ -95,11 +87,14 @@ class ResumableUpload:
 
     @property
     def granularity(self) -> int | None:
-        """The persistence unit for non-final chunks, if known; zero means none."""
+        """The persistence unit for non-final chunks, if known."""
         return self._granularity
 
     def progress(self) -> UploadProgress:
-        """Query authoritative progress"""
+        """Query the server's authoritative offset.
+
+        Raises `ResumableUploadUnavailable` for an unavailable session.
+        """
         session = self._session
         query = urlencode({"session": self.token})
         headers = session._make_headers()
@@ -119,23 +114,23 @@ class ResumableUpload:
                 preload_content=True,
                 decode_content=True,
             )
-            return _parse_progress(response)
+            return parse_progress_response(response)
 
     def put(
         self, offset: int, contents: bytes | tuple[IO[bytes], int]
     ) -> UploadProgress:
-        """Write a chunk verbatim and return authoritative progress.
+        """Uploads `contents` starting at `offset`.
 
-        A stream tuple supplies the stream and its exact byte length. The stream
-        must yield exactly that many bytes from its current position through EOF.
-        The caller is responsible for providing a stream with the declared length.
-        Compression, if recorded at creation, applies to the complete object
-        before it is split into chunks. Offsets and lengths count compressed bytes.
+        For streaming payloads, supply a tuple of the stream and its exact length
+        in bytes.
 
-        Raises `UploadOffsetMismatch` only when the server rejects the offset,
+        This method doesn't perform any automatic compression of the payload, so
+        the caller is responsible for applying compression to the entire payload
+        beforehand and passing chunks of the already compressed payload.
+
+        Raises `UploadOffsetMismatch` when the server rejects the offset,
         `ResumableUploadUnavailable` for an unavailable session, or `ChunkTooSmall`
-        for a known non-final chunk shorter than the granularity. Zero-length and
-        final chunks may be shorter than the granularity.
+        for a non-final chunk shorter than the granularity.
         """
         if isinstance(contents, bytes):
             body: bytes | IO[bytes] = contents
@@ -182,12 +177,12 @@ class ResumableUpload:
                 preload_content=True,
                 decode_content=True,
             )
-            progress = _parse_progress(response)
+            progress = parse_progress_response(response)
             metrics.record_size(length)
             return progress
 
     def cancel(self) -> None:
-        """Discard uploaded bytes; unavailable sessions raise a private exception."""
+        """Cancels the upload session, discarding uploaded bytes."""
         session = self._session
         query = urlencode({"session": self.token})
         headers = session._make_headers()
