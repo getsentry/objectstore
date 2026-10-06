@@ -414,10 +414,10 @@ pub trait HighVolumeBackend: Backend {
     /// Returns whether an upload marker exists and is live at `access_time`.
     async fn has_upload_marker(&self, revision: &ObjectId, access_time: Timestamp) -> Result<bool>;
 
-    /// Atomically deletes a live upload marker, consuming permission to finish or cancel it.
+    /// Atomically deletes a live upload marker.
     ///
-    /// Returns `true` only when this call deletes a live marker. Missing and expired
-    /// markers return `false`, including on a repeated deletion.
+    /// Returns `true` only when this call deletes a live marker.
+    /// Missing and expired markers return `false`, including on a repeated deletion.
     async fn delete_upload_marker(
         &self,
         revision: &ObjectId,
