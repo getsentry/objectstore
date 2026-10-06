@@ -62,9 +62,13 @@ class ResumableRetryPolicy:
 
     ``retries`` counts recovery retries across the upload; zero disables resumable
     uploads.
-    ``delay`` is the initial backoff in seconds, doubling on each retry. ``jitter``
-    is the maximum random delay added in seconds. These limits are separate from
-    the pool's per-request retries; retryable failures are determined internally.
+
+    ``delay`` is the initial backoff in seconds, doubling on each retry.
+
+    ``jitter`` is the maximum random delay added in seconds.
+
+    These limits are separate from the pool's per-request retries; retryable
+    failures are determined internally.
     """
 
     retries: int = 2
@@ -86,8 +90,8 @@ class Usecase:
     suitable storage backend.
 
     ``resumable_threshold_bytes`` defaults to 32 MiB of remaining source bytes,
-    before any compression. ``None`` disables resumable uploads; zero allows any
-    eligible size. ``resumable_retries`` configures recovery via `ResumableRetryPolicy`.
+    before any compression. ``None`` disables resumable uploads.
+    ``resumable_retries`` configures recovery via `ResumableRetryPolicy`.
     """
 
     name: str
@@ -445,23 +449,8 @@ class Session:
         to attempt to guess a `content_type` based on magic bytes.
 
         ``resumable_threshold_bytes`` overrides the Usecase threshold when supplied;
-        ``None`` disables resumable uploads. A Usecase retry count of zero always
-        disables them. Eligible source sizes use resumable uploads when the encoded
-        body is seekable: byte payloads are compressed once in memory, while
-        uncompressed or precompressed streams upload from their current cursor
-        without staging.
-        Caller-owned streams remain open. Direct uploads are used for streams needing
-        on-the-fly compression, smaller or unknown-size inputs, or when resumable
-        uploads are disabled.
-        Any session creation failure falls back to a direct upload of the same bytes.
-        After creation, recovery stays within this one ``put()`` call and never
-        switches protocols. Writes use only the pool's connection retries; control
-        requests retain its full retry policy. Transient write or progress-query
-        failures use the Usecase's ``resumable_retries`` policy. Progress queries
-        confirm completion or supply the offset to resume from. Exhausted connection
-        retries are terminal. Execution failures
-        raise ``RequestError`` with the cause chained; argument, preparation,
-        and direct-upload errors propagate unchanged.
+        ``None`` disables resumable uploads. Eligible uploads use the Usecase's
+        ``resumable_retries`` policy; a retry count of zero disables resumable uploads.
 
         `compression` is deprecated in favor of `compress`.
         """
@@ -491,15 +480,14 @@ class Session:
 
         compress_with = encoding if precompressed is None else "none"
 
-        # On-the-fly compression cannot report its encoded size or seek to an
-        # encoded offset. Keep those streams on the direct path.
         replayable = isinstance(contents, bytes) or compress_with == "none"
-        body_size = (
-            _resumable.get_size(contents)
-            if resumable_threshold_bytes is not None
+        body_size = _resumable.get_size(contents)
+        use_resumable = (
+            body_size is not None
+            and resumable_threshold_bytes is not None
             and self._usecase._resumable_retries.retries > 0
             and replayable
-            else None
+            and body_size >= resumable_threshold_bytes
         )
 
         headers = self._metadata_headers(
@@ -520,11 +508,8 @@ class Session:
                 self._metrics_backend, "put", self._usecase.name
             ) as metrics,
         ):
-            if (
-                body_size is not None
-                and resumable_threshold_bytes is not None
-                and body_size >= resumable_threshold_bytes
-            ):
+            if use_resumable:
+                assert body_size is not None
                 if isinstance(contents, bytes):
                     encoded = (
                         zstandard.ZstdCompressor().compress(contents)

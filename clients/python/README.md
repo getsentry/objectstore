@@ -23,12 +23,6 @@ content = result.payload.read()
 session.delete(key)
 ```
 
-`Session.put()` automatically uses resumable uploads for eligible sources of at
-least 32 MiB. Set `resumable_threshold_bytes` on `Usecase` or override it on an
-individual `put()`; `None` disables resumable uploads. Configure recovery with
-`Usecase(resumable_retries=ResumableRetryPolicy(...))`; zero retries also disables
-resumable uploads. See `Session.put()` and `ResumableRetryPolicy` for details.
-
 ## Core Concepts
 
 ### Usecases and Scopes
@@ -105,6 +99,14 @@ session.put(video_data, compress="none")
 # upload as-is, but record the encoding so that downloads still decompress:
 session.put(zstd_data, precompressed="zstd")
 ```
+
+### Resumable Uploads
+
+`Session.put()` automatically uses resumable uploads for eligible sources of at
+least 32 MiB. Set `resumable_threshold_bytes` on `Usecase` or override it on an
+individual `put()`; `None` disables resumable uploads. Configure recovery with
+`Usecase(resumable_retries=ResumableRetryPolicy(...))`; zero retries also disables
+resumable uploads. See `Session.put()` and `ResumableRetryPolicy` for details.
 
 ### Custom Metadata
 
