@@ -76,12 +76,9 @@ pub fn handle_panic(err: Box<dyn Any + Send + 'static>) -> Response {
 /// tower layers so that `Hub::current()` returns the request-scoped hub.
 pub async fn bind_sentry_body(request: Request, next: Next) -> Response {
     let hub = sentry::Hub::current();
-    let response = next.run(request).await;
-
-    // Preserve handler scope changes and the active span before the outer Sentry
-    // middleware clears it. This does not extend the transaction's lifetime.
-    let body_hub = sentry::Hub::new_from_top(hub);
-    response.map(|body| Body::new(SentryBody::new(body_hub.into(), body)))
+    next.run(request)
+        .await
+        .map(|body| Body::new(SentryBody::new(sentry::Hub::new_from_top(hub).into(), body)))
 }
 
 async fn get_usecase(request: &mut Request) -> Option<String> {
