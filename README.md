@@ -276,7 +276,7 @@ docker cp tmp:/bin/entrypoint ./objectstore
 docker rm tmp
 ```
 
-To analyze profile dumps, use the standalone `pprof` tool. The go builtin tool
+To analyze profile dumps, use the standalone `pprof` tool. The Go builtin tool
 does not support symbolizing ELF files on macOS hosts:
 
 ```sh
