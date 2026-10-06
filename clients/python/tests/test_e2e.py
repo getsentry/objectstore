@@ -12,7 +12,7 @@ from collections.abc import Generator
 from datetime import timedelta
 from io import BytesIO
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 import urllib3
@@ -25,6 +25,7 @@ from objectstore_client import (
     Usecase,
 )
 from objectstore_client._resumable import (
+    ResumableUpload,
     ResumableUploadUnavailable,
     UploadComplete,
     UploadIncomplete,
@@ -1156,40 +1157,43 @@ def test_put_stores_under_literal_key(server_url: str) -> None:
     assert body == payload
 
 
-@pytest.mark.parametrize("precompressed", [False, True])
-def test_compressed_file_upload(
-    server_url: str, monkeypatch: pytest.MonkeyPatch, precompressed: bool
-) -> None:
+@pytest.mark.parametrize("source_kind", ["bytes", "precompressed_bytes", "stream"])
+def test_automatic_resumable_upload(server_url: str, source_kind: str) -> None:
     session = Client(server_url, token=TestSecretKey.get()).session(
         Usecase(
             "test-usecase",
+            compression="none",
             expiration_policy=TimeToLive(timedelta(days=1)),
             resumable_threshold_bytes=1,
         ),
         org=42,
     )
-    create = Mock(wraps=session._create_upload)
-    monkeypatch.setattr(session, "_create_upload", create)
     contents = b"file contents\n" * 100
+    precompressed = source_kind == "precompressed_bytes"
     encoded = (
         zstandard.ZstdCompressor().compress(contents) if precompressed else contents
     )
-    with tempfile.TemporaryFile() as source:
+    with (
+        tempfile.TemporaryFile() as source,
+        patch.object(
+            ResumableUpload, "put", autospec=True, side_effect=ResumableUpload.put
+        ) as put,
+    ):
         source.write(b"skip this prefix" + encoded)
         source.seek(len(b"skip this prefix"))
         key = session.put(
-            source,
+            source if source_kind == "stream" else encoded,
             precompressed="zstd" if precompressed else None,
             content_type="text/plain",
             metadata={"source": "file"},
             origin="203.0.113.42",
             filename="example.txt",
         )
-        assert create.call_count == int(precompressed)
+        put.assert_called_once()
         assert not source.closed
         stored = session.head(key)
         assert stored is not None
-        assert stored.compression == "zstd"
+        assert stored.compression == ("zstd" if precompressed else None)
         assert stored.content_type == "text/plain"
         assert stored.filename == "example.txt"
         assert stored.origin == "203.0.113.42"
