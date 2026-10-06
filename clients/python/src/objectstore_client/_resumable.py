@@ -160,9 +160,9 @@ class ResumableUpload:
         headers = session._make_headers()
         headers["Upload-Offset"] = str(offset)
         headers["Content-Length"] = str(length)
-        # We don't want the retry policy to retry sending the whole body as that
-        # defeats the purpose of using resumables, so we disable those retries
-        # in favor of our retry loop.
+        # Disable pool retries that replay the body. The resumable upload loop
+        # uses the Usecase's recovery policy and probes the persisted offset
+        # before resending data; connection retries retain the pool's policy.
         retries = urllib3.Retry.from_int(session._pool.retries).new(
             read=0, status=0, other=0, raise_on_status=False
         )
