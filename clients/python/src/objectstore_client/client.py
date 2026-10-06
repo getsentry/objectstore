@@ -99,7 +99,6 @@ class Usecase:
         name: str,
         compression: Compression = "zstd",
         expiration_policy: ExpirationPolicy | None = None,
-        *,
         resumable_threshold_bytes: int | None = 32 * 1024 * 1024,
         resumable_retries: ResumableRetryPolicy = ResumableRetryPolicy(),
     ):
