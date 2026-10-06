@@ -386,16 +386,12 @@ impl HighVolumeBackend for InMemoryBackend {
         revision: &ObjectId,
         access_time: Timestamp,
     ) -> Result<bool> {
-        let mut markers = self.upload_markers.lock().unwrap();
-        if markers
-            .get(revision)
-            .is_some_and(|expiry| *expiry >= access_time)
-        {
-            markers.remove(revision);
-            Ok(true)
-        } else {
-            Ok(false)
-        }
+        Ok(self
+            .upload_markers
+            .lock()
+            .unwrap()
+            .remove(revision)
+            .is_some_and(|expiry| expiry >= access_time))
     }
 
     async fn put_non_tombstone(
