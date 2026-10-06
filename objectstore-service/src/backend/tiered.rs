@@ -528,7 +528,6 @@ impl Backend for TieredStorage {
         let inner_session = tiered.into_inner_session(session);
         let id = &session.object_id;
         let revision = &inner_session.object_id;
-        self.check_upload_marker(revision).await?;
         let end = offset
             .checked_add(content_length)
             .filter(|end| *end <= session.upload_length.get())
