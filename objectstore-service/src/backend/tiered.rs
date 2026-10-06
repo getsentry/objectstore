@@ -575,6 +575,9 @@ impl Backend for TieredStorage {
             UploadProgress::Incomplete { .. } => {}
         }
         let current = match current? {
+            TieredMetadata::Tombstone(t) if t.target == *revision => {
+                return Ok(UploadProgress::Complete);
+            }
             TieredMetadata::Tombstone(t) => Some(t.target),
             _ => None,
         };
