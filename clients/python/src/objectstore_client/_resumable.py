@@ -220,9 +220,6 @@ class ResumableUpload:
             raise_for_status(response, error_type=error_type)
 
 
-RESUMABLE_THRESHOLD_BYTES = 32 * 1024 * 1024
-
-
 def get_size(contents: bytes | IO[bytes]) -> int | None:
     if isinstance(contents, bytes):
         return len(contents)
@@ -270,6 +267,7 @@ def upload(
     origin: str | None = None,
     filename: str | None = None,
 ) -> str | None:
+    policy = session._usecase._resumable_retries
     start = body.tell()
     try:
         handle = session._create_upload(
@@ -301,9 +299,9 @@ def upload(
             except UploadOffsetMismatch as error:
                 result = UploadIncomplete(error.offset)
             except Exception as error:
-                if not is_transient(error) or retries == 2:
+                if not is_transient(error) or retries >= policy.retries:
                     raise
-                time.sleep(2 ** (retries + 1) + random.uniform(0, 1))
+                time.sleep(policy.delay * 2**retries + random.uniform(0, policy.jitter))
                 retries += 1
                 probe = True
                 continue

@@ -56,6 +56,26 @@ class GetResponse(NamedTuple):
     payload: IO[bytes]
 
 
+@dataclass(frozen=True)
+class ResumableRetryPolicy:
+    """Recovery limits for one resumable upload, including progress queries.
+
+    ``retries`` counts recovery retries across the upload; zero disables resumable
+    uploads.
+    ``delay`` is the initial backoff in seconds, doubling on each retry. ``jitter``
+    is the maximum random delay added in seconds. These limits are separate from
+    the pool's per-request retries; retryable failures are determined internally.
+    """
+
+    retries: int = 2
+    delay: float = 2.0
+    jitter: float = 1.0
+
+    def __post_init__(self) -> None:
+        if self.retries < 0 or self.delay < 0 or self.jitter < 0:
+            raise ValueError("Resumable upload retry settings must be non-negative")
+
+
 class Usecase:
     """
     An identifier for a workload in Objectstore, along with defaults to use for all
@@ -64,6 +84,10 @@ class Usecase:
     Usecases need to be statically defined in Objectstore's configuration server-side.
     Objectstore can make decisions based on the Usecase. For example, choosing the most
     suitable storage backend.
+
+    ``resumable_threshold_bytes`` defaults to 32 MiB of remaining source bytes,
+    before any compression. ``None`` disables resumable uploads; zero allows any
+    eligible size. ``resumable_retries`` configures recovery via `ResumableRetryPolicy`.
     """
 
     name: str
@@ -75,10 +99,17 @@ class Usecase:
         name: str,
         compression: Compression = "zstd",
         expiration_policy: ExpirationPolicy | None = None,
+        *,
+        resumable_threshold_bytes: int | None = 32 * 1024 * 1024,
+        resumable_retries: ResumableRetryPolicy = ResumableRetryPolicy(),
     ):
+        if resumable_threshold_bytes is not None and resumable_threshold_bytes < 0:
+            raise ValueError("resumable_threshold_bytes must be non-negative")
         self.name = name
         self._compression = compression
         self._expiration_policy = expiration_policy
+        self._resumable_threshold_bytes = resumable_threshold_bytes
+        self._resumable_retries = resumable_retries
 
 
 # Connect timeout used unless overridden in connection parameters.
@@ -394,7 +425,7 @@ class Session:
         expiration_policy: ExpirationPolicy | None = None,
         origin: str | None = None,
         filename: str | None = None,
-        resumable: bool = True,
+        resumable_threshold_bytes: int | None | Literal["unset"] = "unset",
     ) -> str:
         """
         Uploads the given `contents` to blob storage.
@@ -414,18 +445,20 @@ class Session:
         You can use the utility function `objectstore_client.utils.guess_mime_type`
         to attempt to guess a `content_type` based on magic bytes.
 
-        By default, known remaining source sizes of at least 32 MiB use resumable
-        uploads when the encoded body is seekable: byte payloads are compressed
-        once in memory, while uncompressed or precompressed streams are uploaded
-        from their current cursor without staging. Caller-owned streams remain
-        open. Streams that need on-the-fly compression, smaller or unknown-size
-        inputs, and calls with ``resumable=False`` use direct uploads. Any session
-        creation failure falls back to a direct upload of the same bytes.
+        ``resumable_threshold_bytes`` overrides the Usecase threshold when supplied;
+        ``None`` disables resumable uploads. A Usecase retry count of zero always
+        disables them. Eligible source sizes use resumable uploads when the encoded
+        body is seekable: byte payloads are compressed once in memory, while
+        uncompressed or precompressed streams upload from their current cursor
+        without staging.
+        Caller-owned streams remain open. Direct uploads are used for streams needing
+        on-the-fly compression, smaller or unknown-size inputs, or when resumable
+        uploads are disabled.
+        Any session creation failure falls back to a direct upload of the same bytes.
         After creation, recovery stays within this one ``put()`` call and never
         switches protocols. Writes use only the pool's connection retries; control
         requests retain its full retry policy. Transient write or progress-query
-        failures get up to two recovery retries
-        across the upload, with exponential backoff and jitter. Progress queries
+        failures use the Usecase's ``resumable_retries`` policy. Progress queries
         confirm completion or supply the offset to resume from. Exhausted connection
         retries are terminal. Execution failures
         raise ``RequestError`` with the cause chained; argument, preparation,
@@ -450,6 +483,11 @@ class Session:
         if precompressed and precompressed != "zstd":
             raise ValueError(f"Invalid compression: {precompressed}")
 
+        if resumable_threshold_bytes == "unset":
+            resumable_threshold_bytes = self._usecase._resumable_threshold_bytes
+        if resumable_threshold_bytes is not None and resumable_threshold_bytes < 0:
+            raise ValueError("resumable_threshold_bytes must be non-negative")
+
         encoding = precompressed or compress or self._usecase._compression
 
         compress_with = encoding if precompressed is None else "none"
@@ -457,7 +495,13 @@ class Session:
         # On-the-fly compression cannot report its encoded size or seek to an
         # encoded offset. Keep those streams on the direct path.
         replayable = isinstance(contents, bytes) or compress_with == "none"
-        body_size = _resumable.get_size(contents) if resumable and replayable else None
+        body_size = (
+            _resumable.get_size(contents)
+            if resumable_threshold_bytes is not None
+            and self._usecase._resumable_retries.retries > 0
+            and replayable
+            else None
+        )
 
         headers = self._metadata_headers(
             compression=encoding,
@@ -479,7 +523,8 @@ class Session:
         ):
             if (
                 body_size is not None
-                and body_size >= _resumable.RESUMABLE_THRESHOLD_BYTES
+                and resumable_threshold_bytes is not None
+                and body_size >= resumable_threshold_bytes
             ):
                 if isinstance(contents, bytes):
                     encoded = (

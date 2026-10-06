@@ -1160,11 +1160,13 @@ def test_put_stores_under_literal_key(server_url: str) -> None:
 def test_compressed_file_upload(
     server_url: str, monkeypatch: pytest.MonkeyPatch, precompressed: bool
 ) -> None:
-    from objectstore_client import _resumable
-
-    monkeypatch.setattr(_resumable, "RESUMABLE_THRESHOLD_BYTES", 1)
     session = Client(server_url, token=TestSecretKey.get()).session(
-        Usecase("test-usecase", expiration_policy=TimeToLive(timedelta(days=1))), org=42
+        Usecase(
+            "test-usecase",
+            expiration_policy=TimeToLive(timedelta(days=1)),
+            resumable_threshold_bytes=1,
+        ),
+        org=42,
     )
     create = Mock(wraps=session._create_upload)
     monkeypatch.setattr(session, "_create_upload", create)
@@ -1203,11 +1205,8 @@ def test_compressed_file_upload(
 def test_resumable_creation_fallback(
     server_url: str, monkeypatch: pytest.MonkeyPatch, error: RequestError | None
 ) -> None:
-    from objectstore_client import _resumable
-
-    monkeypatch.setattr(_resumable, "RESUMABLE_THRESHOLD_BYTES", 1)
     session = Client(server_url, token=TestSecretKey.get()).session(
-        Usecase("test-usecase")
+        Usecase("test-usecase", resumable_threshold_bytes=1)
     )
     create = Mock(return_value=None, side_effect=error)
     monkeypatch.setattr(session, "_create_upload", create)

@@ -2,6 +2,7 @@ from objectstore_client.auth import Permission, SecretKey, TokenGenerator, Token
 from objectstore_client.client import (
     Client,
     GetResponse,
+    ResumableRetryPolicy,
     Session,
     Usecase,
 )
@@ -23,6 +24,7 @@ from objectstore_client.utils import parse_accept_encoding
 __all__ = [
     "Client",
     "Usecase",
+    "ResumableRetryPolicy",
     "Session",
     "GetResponse",
     "RequestError",

@@ -4,14 +4,15 @@ from unittest.mock import Mock
 
 import pytest
 import urllib3
-from objectstore_client import Client, RequestError, Session, Usecase, _resumable
+from objectstore_client import Client, RequestError, Session, Usecase
 
 
 @pytest.fixture
 def session(monkeypatch: pytest.MonkeyPatch) -> Session:
-    monkeypatch.setattr(_resumable, "RESUMABLE_THRESHOLD_BYTES", 4)
     monkeypatch.setattr("objectstore_client._resumable.time.sleep", Mock())
-    return Client("http://localhost:8888").session(Usecase("test", compression="none"))
+    return Client("http://localhost:8888").session(
+        Usecase("test", compression="none", resumable_threshold_bytes=4)
+    )
 
 
 @pytest.mark.parametrize("complete", [False, True])
