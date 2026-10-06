@@ -66,6 +66,8 @@ def test_retry_exhaustion(
 
     def request(*args: Any, **kwargs: Any) -> urllib3.HTTPResponse:
         headers = kwargs["headers"]
+        if args[1] == "DELETE":
+            return urllib3.HTTPResponse(status=204)
         if "Upload-Length" in headers:
             return urllib3.HTTPResponse(
                 status=201, body=b'{"key":"key","session":"token"}'
@@ -88,8 +90,8 @@ def test_retry_exhaustion(
         assert isinstance(raised.value.__cause__, urllib3.exceptions.MaxRetryError)
         assert raised.value.__cause__.reason is failure
         assert raised.value.response is None
-    # Creation, two progress queries, and three writes regardless of pool retries.
-    assert make_request.call_count == 1 + 2 + 3
+    # Creation, two progress queries, three writes, and cancellation.
+    assert make_request.call_count == 1 + 2 + 3 + 1
     assert session._pool.retries is policy
     assert sleep.call_count == 2
     for call, delay in zip(sleep.call_args_list, [2, 4], strict=True):
@@ -110,5 +112,6 @@ def test_connection_retries_are_not_multiplied(
         session.put(b"payload")
     assert isinstance(raised.value.__cause__, urllib3.exceptions.MaxRetryError)
     assert raised.value.__cause__.reason is failure
-    assert request.call_count == 3
+    # Three connection attempts each for the upload and cancellation.
+    assert request.call_count == 6
     assert session._pool.retries is policy

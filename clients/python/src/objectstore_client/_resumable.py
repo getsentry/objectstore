@@ -315,6 +315,10 @@ def upload(
             offset = result.offset
             probe = False
     except Exception as error:
+        try:
+            handle.cancel()
+        except Exception:
+            pass
         status = error.status if isinstance(error, RequestError) else None
         response = error.response if isinstance(error, RequestError) else None
         raise RequestError("upload failed", status, response) from error
