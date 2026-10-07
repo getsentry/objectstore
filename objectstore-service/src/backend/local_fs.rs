@@ -42,7 +42,8 @@ use crate::backend::common::{
     SetExpiryResponse,
 };
 use crate::change_stream::{
-    ChangeStream, ChangeStreamFactory, CostTrackerStreamConfig, flush_change_stream,
+    ChangeStream, ChangeStreamFactory, ChangeTarget, CostTrackerStreamConfig, UPLOAD_SESSION_TTL,
+    flush_change_stream,
 };
 use crate::error::{Error, ErrorKind, Result, ResultExt as _};
 use crate::id::ObjectId;
@@ -192,7 +193,7 @@ impl Backend for LocalFsBackend {
         draft.publish().await?;
 
         self.change_stream
-            .write(id, stored_size, metadata.time_expires);
+            .write(id.into(), stored_size, metadata.time_expires);
 
         Ok(())
     }
@@ -283,7 +284,7 @@ impl Backend for LocalFsBackend {
         draft.prepare().await?;
         draft.publish().await?;
 
-        self.change_stream.update(id, Some(expire_at));
+        self.change_stream.update(id.into(), Some(expire_at));
 
         Ok(SetExpiryResponse::Satisfied(expire_at))
     }
@@ -299,7 +300,7 @@ impl Backend for LocalFsBackend {
         objectstore_log::debug!("Deleting from local_fs backend");
         let path = self.path(id);
         match tokio::fs::remove_file(path).await {
-            Ok(()) => self.change_stream.delete(id),
+            Ok(()) => self.change_stream.delete(id.into()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 objectstore_log::debug!("Object not found");
             }
@@ -316,7 +317,7 @@ impl Backend for LocalFsBackend {
         &self,
         id: &ObjectId,
         metadata: &Metadata,
-        _upload_length: NonZeroU64,
+        upload_length: NonZeroU64,
     ) -> Result<Option<BackendToken>> {
         let upload_id = uuid::Uuid::now_v7();
         let path = self.upload_path(upload_id);
@@ -325,7 +326,16 @@ impl Backend for LocalFsBackend {
             "creating local-fs object directory",
         )?;
         UploadFile::create(&path, metadata).await?;
-        Ok(Some(upload_id.to_string()))
+        let token = upload_id.to_string();
+        self.change_stream.write(
+            ChangeTarget::UploadSession {
+                object_id: id,
+                session_id: &token,
+            },
+            upload_length.get(),
+            Some(Timestamp::now() + UPLOAD_SESSION_TTL),
+        );
+        Ok(Some(token))
     }
 
     // In this backend, if all the bytes of a resumable upload have been written but publication failed,
@@ -377,7 +387,8 @@ impl Backend for LocalFsBackend {
             )?;
         let (stored_size, expires_at) = upload.publish(object_path).await?;
         self.change_stream
-            .write(&session.object_id, stored_size, expires_at);
+            .write((&session.object_id).into(), stored_size, expires_at);
+        self.change_stream.delete(session.into());
         Ok(UploadProgress::Complete)
     }
 
@@ -394,7 +405,10 @@ impl Backend for LocalFsBackend {
         let _guard = self.locks.acquire(&session.object_id).await?;
         let path = self.upload_path(upload_id);
         match tokio::fs::remove_file(&path).await {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                self.change_stream.delete(session.into());
+                Ok(())
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 Err(ErrorKind::UnknownUploadSession.into())
             }
@@ -741,7 +755,7 @@ impl MultipartUploadBackend for LocalFsBackend {
         drop(guard);
 
         self.change_stream
-            .write(id, stored_size, metadata.time_expires);
+            .write(id.into(), stored_size, metadata.time_expires);
 
         // Clean up multipart state
         tokio::fs::remove_dir_all(dir).await.context(
@@ -1232,6 +1246,9 @@ mod tests {
     #[tokio::test]
     async fn resumable_publication_can_be_retried() {
         for query_offset in [false, true] {
+            #[cfg(feature = "storage-cogs")]
+            let (_tempdir, backend, producer) = make_backend_with_change_stream();
+            #[cfg(not(feature = "storage-cogs"))]
             let (_tempdir, backend) = make_backend();
             let id = make_id();
             let token = upload_token(&backend, &id, 4).await;
@@ -1244,6 +1261,12 @@ mod tests {
                 .await
                 .unwrap_err();
             assert_eq!(error.kind(), ErrorKind::BackendFailure);
+            #[cfg(feature = "storage-cogs")]
+            assert_eq!(
+                producer.records().len(),
+                1,
+                "failed publication leaves the session record"
+            );
             tokio::fs::remove_dir(&object_path).await.unwrap();
 
             let progress = if query_offset {
@@ -1252,6 +1275,15 @@ mod tests {
                 backend.put_chunk(&token, 4, 0, stream::single("")).await
             };
             assert_eq!(progress.unwrap(), UploadProgress::Complete);
+            #[cfg(feature = "storage-cogs")]
+            {
+                let records = producer.records();
+                assert_eq!(
+                    records.iter().map(|r| r.op_type).collect::<Vec<_>>(),
+                    [OpType::Write, OpType::Write, OpType::Delete]
+                );
+                assert_eq!(records[0].record_id, records[2].record_id);
+            }
             let (_, _, payload) = backend
                 .get_object(&id, Timestamp::now(), None)
                 .await
@@ -2264,6 +2296,7 @@ mod tests {
         };
         let payload = b"oh hai!";
         let upload_length = NonZeroU64::new(payload.len() as u64).unwrap();
+        let before = Timestamp::now();
         let token = backend
             .create_upload_session(&id, &metadata, upload_length)
             .await
@@ -2275,17 +2308,30 @@ mod tests {
             backend_token: token,
         };
 
-        // Session creation alone does not report a stored object.
-        assert!(producer.records().is_empty());
+        let created = producer.records();
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0].size, Some(payload.len() as u64));
+        let expiration = created[0].expiration_time.unwrap() as u64;
+        assert!(
+            ((before + UPLOAD_SESSION_TTL).as_micros()
+                ..=(Timestamp::now() + UPLOAD_SESSION_TTL).as_micros())
+                .contains(&expiration)
+        );
+        backend
+            .put_chunk(&token, 0, 1, stream::single(payload[..1].to_vec()))
+            .await
+            .unwrap();
+        backend.upload_offset(&token).await.unwrap();
+        assert_eq!(producer.records().len(), 1);
 
         // Completing the upload reports the published file's full stored size.
         assert_eq!(
             backend
                 .put_chunk(
                     &token,
-                    0,
-                    payload.len() as u64,
-                    stream::single(payload.to_vec()),
+                    1,
+                    payload.len() as u64 - 1,
+                    stream::single(payload[1..].to_vec()),
                 )
                 .await
                 .unwrap(),
@@ -2296,10 +2342,27 @@ mod tests {
             .await
             .unwrap();
         let records = producer.records();
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].op_type, OpType::Write);
-        assert_eq!(records[0].size, Some(file.len() as u64));
-        assert!(records[0].expiration_time.is_some());
+        assert_eq!(records.len(), 3);
+        assert_eq!(
+            records.iter().map(|r| r.op_type).collect::<Vec<_>>(),
+            [OpType::Write, OpType::Write, OpType::Delete]
+        );
+        assert_eq!(records[0].record_id, records[2].record_id);
+        assert_ne!(records[0].record_id, records[1].record_id);
+        assert_eq!(records[1].size, Some(file.len() as u64));
+        assert_eq!(
+            records[1].expiration_time,
+            metadata.time_expires.map(|t| t.as_micros() as i64)
+        );
+
+        producer.clear();
+        let canceled = upload_token(&backend, &id, 10).await;
+        backend.cancel_upload(&canceled).await.unwrap();
+        assert!(backend.cancel_upload(&canceled).await.is_err());
+        let records = producer.records();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].op_type, OpType::Delete);
+        assert_eq!(records[0].record_id, records[1].record_id);
     }
 
     #[cfg(feature = "storage-cogs")]

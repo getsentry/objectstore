@@ -54,7 +54,7 @@ use crate::backend::common::{
     Tombstone,
 };
 use crate::change_stream::{
-    ChangeStream, ChangeStreamFactory, CostTrackerStreamConfig, flush_change_stream,
+    ChangeStream, ChangeStreamFactory, ChangeTarget, CostTrackerStreamConfig, flush_change_stream,
 };
 use crate::error::{Error, ErrorKind, Result, ResultExt as _};
 use crate::gcp_auth::PrefetchingTokenProvider;
@@ -1009,7 +1009,8 @@ impl Backend for BigTableBackend {
         let (_, size) = self
             .put_row(path, metadata.clone(), payload.into_bytes().into(), "put")
             .await?;
-        self.change_stream.write(id, size, metadata.time_expires);
+        self.change_stream
+            .write(id.into(), size, metadata.time_expires);
 
         Ok(())
     }
@@ -1063,7 +1064,7 @@ impl Backend for BigTableBackend {
 
         let path = id.as_storage_path().to_string().into_bytes();
         self.mutate(path, [delete_row_mutation()], "delete").await?;
-        self.change_stream.delete(id);
+        self.change_stream.delete(id.into());
 
         Ok(())
     }
@@ -1086,12 +1087,14 @@ impl HighVolumeBackend for BigTableBackend {
             timestamp_micros: time_expires.as_micros() as i64,
             value: vec![1],
         }))];
-        self.mutate(
-            revision.as_upload_path().to_string().into_bytes(),
-            mutations,
-            "create_upload_marker",
-        )
-        .await?;
+        let path = revision.as_upload_path().to_string().into_bytes();
+        let size = row_size(&path, &mutations);
+        self.mutate(path, mutations, "create_upload_marker").await?;
+        self.change_stream.write(
+            ChangeTarget::upload_marker(revision),
+            size,
+            Some(time_expires),
+        );
         Ok(())
     }
 
@@ -1118,13 +1121,22 @@ impl HighVolumeBackend for BigTableBackend {
         revision: &ObjectId,
         access_time: Timestamp,
     ) -> Result<bool> {
-        self.check_and_mutate(
-            revision.as_upload_path().to_string().into_bytes(),
-            MutatePredicate::Include(live_row_filter(column_filter(COLUMN_UPLOAD), access_time)),
-            vec![delete_row_mutation()],
-            "delete_upload_marker",
-        )
-        .await
+        let deleted = self
+            .check_and_mutate(
+                revision.as_upload_path().to_string().into_bytes(),
+                MutatePredicate::Include(live_row_filter(
+                    column_filter(COLUMN_UPLOAD),
+                    access_time,
+                )),
+                vec![delete_row_mutation()],
+                "delete_upload_marker",
+            )
+            .await?;
+        if deleted {
+            self.change_stream
+                .delete(ChangeTarget::upload_marker(revision));
+        }
+        Ok(deleted)
     }
 
     #[tracing::instrument(level = "debug", fields(?id), skip_all)]
@@ -1151,7 +1163,8 @@ impl HighVolumeBackend for BigTableBackend {
                 .await?;
 
             if write_succeeded {
-                self.change_stream.write(id, size, metadata.time_expires);
+                self.change_stream
+                    .write(id.into(), size, metadata.time_expires);
                 return Ok(None);
             }
 
@@ -1368,7 +1381,7 @@ impl HighVolumeBackend for BigTableBackend {
             .await?;
 
         if applied {
-            self.change_stream.update(id, Some(expire_at));
+            self.change_stream.update(id.into(), Some(expire_at));
         }
 
         Ok(if applied {
@@ -1399,7 +1412,7 @@ impl HighVolumeBackend for BigTableBackend {
                 .await?;
 
             if deleted {
-                self.change_stream.delete(id);
+                self.change_stream.delete(id.into());
                 return Ok(None);
             }
 
@@ -1487,10 +1500,10 @@ impl HighVolumeBackend for BigTableBackend {
             // We wrote something (the inner `expires_at` is `None` for manual GC)
             (true, Some(expires_at)) => {
                 self.change_stream
-                    .write(id, row_size(&path, &mutations), expires_at)
+                    .write(id.into(), row_size(&path, &mutations), expires_at)
             }
             // We deleted something
-            (true, None) => self.change_stream.delete(id),
+            (true, None) => self.change_stream.delete(id.into()),
         }
 
         Ok(written)

@@ -24,7 +24,8 @@ use crate::backend::common::{
 };
 use crate::backend::extensions::{ReqwestResultExt, ResponseExt, SendTraced};
 use crate::change_stream::{
-    ChangeStream, ChangeStreamFactory, CostTrackerStreamConfig, flush_change_stream,
+    ChangeStream, ChangeStreamFactory, ChangeTarget, CostTrackerStreamConfig, UPLOAD_SESSION_TTL,
+    flush_change_stream,
 };
 use crate::error::{Error, ErrorKind, Result, ResultExt as _};
 use crate::gcp_auth::PrefetchingTokenProvider;
@@ -752,7 +753,7 @@ impl GcsBackend {
         match stored_size {
             Some(stored_size) => {
                 self.change_stream
-                    .write(id, stored_size + metadata_size, expires_at)
+                    .write(id.into(), stored_size + metadata_size, expires_at)
             }
             None => {
                 objectstore_metrics::count!("change_stream.unreported", reason = "no_stored_size")
@@ -1100,7 +1101,7 @@ impl Backend for GcsBackend {
             .update_custom_time(object_url, expire_at, object.generations(), metadata)
             .await?;
         if matches!(outcome, SetExpiryResponse::Satisfied(_)) {
-            self.change_stream.update(id, Some(expire_at));
+            self.change_stream.update(id.into(), Some(expire_at));
         }
 
         Ok(outcome)
@@ -1140,7 +1141,7 @@ impl Backend for GcsBackend {
             .await?;
 
         if deleted {
-            self.change_stream.delete(id);
+            self.change_stream.delete(id.into());
         }
 
         Ok(())
@@ -1211,7 +1212,16 @@ impl Backend for GcsBackend {
                 "invalid Location URL in GCS resumable upload creation response",
             )
         })?;
-        Ok(Some(session_uri.into()))
+        let token = String::from(session_uri);
+        self.change_stream.write(
+            ChangeTarget::UploadSession {
+                object_id: id,
+                session_id: &token,
+            },
+            upload_length.get(),
+            Some(Timestamp::now() + UPLOAD_SESSION_TTL),
+        );
+        Ok(Some(token))
     }
 
     #[tracing::instrument(level = "debug", fields(?session, offset, content_length), skip_all)]
@@ -1270,6 +1280,7 @@ impl Backend for GcsBackend {
                 object.metadata_size(),
                 expires_at,
             );
+            self.change_stream.delete(session.into());
         }
         Ok(progress.into())
     }
@@ -1305,6 +1316,7 @@ impl Backend for GcsBackend {
                     object.metadata_size(),
                     expires_at,
                 );
+                self.change_stream.delete(session.into());
             }
             Ok(progress.into())
         })
@@ -1350,7 +1362,9 @@ impl Backend for GcsBackend {
                 }
             }
         })
-        .await
+        .await?;
+        self.change_stream.delete(session.into());
+        Ok(())
     }
 
     async fn join(&self) {
@@ -3245,9 +3259,22 @@ mod tests {
             time_expires: Some(Timestamp::now() + Duration::from_secs(3600)),
             ..Default::default()
         };
+        let before = Timestamp::now();
         let token = backend
             .create_upload_session(&id, &metadata, nonzero(payload.len() as u64))
             .await?;
+
+        let created = producer.records();
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0].size, Some(payload.len() as u64));
+        let expiration = created[0].expiration_time.unwrap() as u64;
+        assert!(
+            ((before + UPLOAD_SESSION_TTL).as_micros()
+                ..=(Timestamp::now() + UPLOAD_SESSION_TTL).as_micros())
+                .contains(&expiration)
+        );
+        backend.upload_offset(&token).await?;
+        assert_eq!(producer.records().len(), 1);
 
         assert_eq!(
             backend
@@ -3262,13 +3289,32 @@ mod tests {
         );
 
         let records = producer.records();
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].op_type, OpType::Write);
+        assert_eq!(records.len(), 3);
         assert_eq!(
-            records[0].size,
+            records.iter().map(|r| r.op_type).collect::<Vec<_>>(),
+            [OpType::Write, OpType::Write, OpType::Delete]
+        );
+        assert_eq!(records[0].record_id, records[2].record_id);
+        assert_ne!(records[0].record_id, records[1].record_id);
+        assert_eq!(
+            records[1].size,
             Some(payload.len() as u64 + GcsObject::from_metadata(&metadata).metadata_size())
         );
-        assert!(records[0].expiration_time.is_some());
+        assert_eq!(
+            records[1].expiration_time,
+            metadata.time_expires.map(|t| t.as_micros() as i64)
+        );
+        producer.clear();
+        let canceled = backend
+            .create_upload_session(&id, &metadata, nonzero(10))
+            .await?;
+        backend.cancel_upload(&canceled).await?;
+        backend.cancel_upload(&canceled).await?;
+        let records = producer.records();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[1].op_type, OpType::Delete);
+        assert_eq!(records[2].op_type, OpType::Delete);
+        assert!(records.iter().all(|r| r.record_id == records[0].record_id));
         Ok(())
     }
 
@@ -3306,10 +3352,15 @@ mod tests {
         );
 
         let records = producer.records();
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].op_type, OpType::Write);
+        assert_eq!(records.len(), 3);
         assert_eq!(
-            records[0].size,
+            records.iter().map(|r| r.op_type).collect::<Vec<_>>(),
+            [OpType::Write, OpType::Write, OpType::Delete]
+        );
+        assert_eq!(records[0].record_id, records[2].record_id);
+        assert_ne!(records[0].record_id, records[1].record_id);
+        assert_eq!(
+            records[1].size,
             Some(payload.len() as u64 + GcsObject::from_metadata(&metadata).metadata_size())
         );
         Ok(())
