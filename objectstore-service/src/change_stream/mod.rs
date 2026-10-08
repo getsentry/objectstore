@@ -11,9 +11,12 @@
 //! expiration. Partial chunks and incomplete offset queries emit nothing. Successful publication
 //! reports the object's actual stored size and expiration, followed by a session delete. Completion
 //! discovered through an offset query follows the same order. Successful cancellation also
-//! reports a session delete. The accounting deadline does not change backend cleanup behavior.
+//! reports a session delete. Session writes and deletes use `WRITE_SESSION` and `DELETE_SESSION`
+//! on the inventory wire, allowing consumers to exclude their estimates from cost attribution.
+//! The accounting deadline does not change backend cleanup behavior.
 //!
-//! High-volume markers report their stored size and actual deadline, set by
+//! High-volume markers use ordinary `WRITE`/`DELETE` operations to report their stored size
+//! and actual deadline, set by
 //! `backend::tiered::RESUMABLE_UPLOAD_TTL`. Only a successful
 //! conditional marker deletion emits a delete. Tiered deletes its marker to claim the upload
 //! before finalization, so that marker delete precedes the long-term object write and session
@@ -61,7 +64,9 @@ pub(crate) const UPLOAD_SESSION_TTL: Duration = Duration::from_hours(7 * 24);
 pub enum ChangeTarget<'a> {
     /// A published object, including a high-volume redirect tombstone.
     Object(&'a ObjectId),
-    /// An in-progress upload or its high-volume marker.
+    /// A stored high-volume upload marker, accounted for as an ordinary object.
+    UploadMarker(&'a ObjectId),
+    /// An in-progress upload, identified by its backend session token.
     UploadSession {
         /// Object identity supplying the usecase and scopes.
         object_id: &'a ObjectId,
@@ -73,10 +78,7 @@ pub enum ChangeTarget<'a> {
 impl<'a> ChangeTarget<'a> {
     /// Identifies the high-volume marker for an upload's unique revision.
     pub fn upload_marker(revision: &'a ObjectId) -> Self {
-        Self::UploadSession {
-            object_id: revision,
-            session_id: &revision.key,
-        }
+        Self::UploadMarker(revision)
     }
 }
 

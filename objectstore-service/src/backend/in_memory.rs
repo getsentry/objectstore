@@ -1168,7 +1168,7 @@ mod tests {
         assert_eq!(records.len(), 3);
         assert_eq!(
             records.iter().map(|r| r.op_type).collect::<Vec<_>>(),
-            [OpType::Write, OpType::Write, OpType::Delete]
+            [OpType::WriteSession, OpType::Write, OpType::DeleteSession]
         );
         assert_eq!(records[0].record_id, records[2].record_id);
         assert_ne!(records[0].record_id, records[1].record_id);
@@ -1192,8 +1192,8 @@ mod tests {
         assert_ne!(records[0].record_id, records[1].record_id);
         assert_eq!(records[0].record_id, records[2].record_id);
         assert_eq!(records[1].record_id, records[3].record_id);
-        assert_eq!(records[2].op_type, OpType::Delete);
-        assert_eq!(records[3].op_type, OpType::Delete);
+        assert_eq!(records[2].op_type, OpType::DeleteSession);
+        assert_eq!(records[3].op_type, OpType::DeleteSession);
     }
 
     #[tokio::test]

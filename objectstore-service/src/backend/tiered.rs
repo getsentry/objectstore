@@ -1549,7 +1549,9 @@ mod tests {
         assert_eq!(stream::read_to_vec(body).await?, payload);
         #[cfg(feature = "storage-cogs")]
         {
-            use objectstore_inventory_tracker::OpType::{Delete, Write};
+            use objectstore_inventory_tracker::OpType::{
+                Delete, DeleteSession, Write, WriteSession,
+            };
             let records = producer.records();
             assert_eq!(
                 records
@@ -1557,11 +1559,11 @@ mod tests {
                     .map(|r| (r.shared_resource_id.as_str(), r.op_type))
                     .collect::<Vec<_>>(),
                 [
-                    ("gcs_objectstore", Write),
+                    ("gcs_objectstore", WriteSession),
                     ("bigtable_objectstore", Write),
                     ("bigtable_objectstore", Delete),
                     ("gcs_objectstore", Write),
-                    ("gcs_objectstore", Delete),
+                    ("gcs_objectstore", DeleteSession),
                     ("bigtable_objectstore", Write),
                 ]
             );
@@ -1581,7 +1583,7 @@ mod tests {
             let records = producer.records();
             assert_eq!(
                 records.iter().map(|r| r.op_type).collect::<Vec<_>>(),
-                [Write, Write, Delete, Delete]
+                [WriteSession, Write, Delete, DeleteSession]
             );
             assert_eq!(records[0].record_id, records[3].record_id);
             assert_eq!(records[1].record_id, records[2].record_id);

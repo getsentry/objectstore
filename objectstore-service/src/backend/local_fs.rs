@@ -1280,7 +1280,7 @@ mod tests {
                 let records = producer.records();
                 assert_eq!(
                     records.iter().map(|r| r.op_type).collect::<Vec<_>>(),
-                    [OpType::Write, OpType::Write, OpType::Delete]
+                    [OpType::WriteSession, OpType::Write, OpType::DeleteSession]
                 );
                 assert_eq!(records[0].record_id, records[2].record_id);
             }
@@ -2345,7 +2345,7 @@ mod tests {
         assert_eq!(records.len(), 3);
         assert_eq!(
             records.iter().map(|r| r.op_type).collect::<Vec<_>>(),
-            [OpType::Write, OpType::Write, OpType::Delete]
+            [OpType::WriteSession, OpType::Write, OpType::DeleteSession]
         );
         assert_eq!(records[0].record_id, records[2].record_id);
         assert_ne!(records[0].record_id, records[1].record_id);
@@ -2361,7 +2361,7 @@ mod tests {
         assert!(backend.cancel_upload(&canceled).await.is_err());
         let records = producer.records();
         assert_eq!(records.len(), 2);
-        assert_eq!(records[1].op_type, OpType::Delete);
+        assert_eq!(records[1].op_type, OpType::DeleteSession);
         assert_eq!(records[0].record_id, records[1].record_id);
     }
 

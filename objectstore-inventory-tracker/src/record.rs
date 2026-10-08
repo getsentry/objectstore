@@ -1,9 +1,8 @@
 //! The wire format emitted onto the inventory topic.
 //!
 //! These types mirror the `shared-resources-inventory` schema registered in
-//! [sentry-kafka-schemas]. The schema sets `additionalProperties: false`, so adding a
-//! field here without a corresponding schema version bump produces messages that
-//! consumers reject.
+//! [sentry-kafka-schemas]. New fields or operation types require a coordinated schema
+//! update and rollout to validating consumers before producers emit them.
 //!
 //! [sentry-kafka-schemas]: https://github.com/getsentry/sentry-kafka-schemas
 
@@ -11,9 +10,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-/// The kind of change a record describes. `WRITE`, `UPDATE`, or `DELETE`.
+/// The kind of object or upload-session change a record describes.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "UPPERCASE")]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum OpType {
     /// The record was created, or replaced with new contents.
     Write,
@@ -23,6 +22,10 @@ pub enum OpType {
     Update,
     /// The record was removed.
     Delete,
+    /// An upload session was created, or its estimated size was replaced.
+    WriteSession,
+    /// An upload session completed or was canceled.
+    DeleteSession,
 }
 
 /// A single inventory change event.
@@ -61,7 +64,9 @@ pub struct InventoryRecord {
     /// sample rate.
     pub sample_rate: f64,
 
-    /// Stored size in bytes. Always set for [`OpType::Write`].
+    /// Stored or estimated size in bytes.
+    ///
+    /// Always set for [`OpType::Write`] and [`OpType::WriteSession`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
 
@@ -162,6 +167,8 @@ mod tests {
             (OpType::Write, "WRITE"),
             (OpType::Update, "UPDATE"),
             (OpType::Delete, "DELETE"),
+            (OpType::WriteSession, "WRITE_SESSION"),
+            (OpType::DeleteSession, "DELETE_SESSION"),
         ] {
             assert_eq!(serde_json::to_value(op_type).unwrap(), json!(expected));
         }

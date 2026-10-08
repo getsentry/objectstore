@@ -6,7 +6,9 @@
 //!   is meant to be, for example, a specific GCS bucket or Bigtable instance.
 //! - `record_id`: identifies each record. `InventoryTracker` populates this with a hash
 //!   of the identifier passed in by the caller.
-//! - `size`: the size of the record in bytes (including metadata).
+//! - `op_type`: `WRITE`, `UPDATE`, or `DELETE` for stored objects; `WRITE_SESSION` or
+//!   `DELETE_SESSION` for upload sessions that consumers may exclude from accounting.
+//! - `size`: stored bytes (including metadata), or the estimated upload-session size.
 //! - `expiration_time`: a timestamp (unixtime microseconds) describing when the record is
 //!   meant to be deleted.
 //!
@@ -33,6 +35,10 @@
 //! inventory derived from your change stream can be joined with billing data to
 //! analyze costs. If you have multiple buckets, or multiple storage backends, it's
 //! recommended that you configure each of them with their own `InventoryTracker`.
+//!
+//! Use [`InventoryTracker::write_session`] and [`InventoryTracker::delete_session`] for
+//! upload sessions, with a stable key distinct from the final object's key. Consumers
+//! must support the session operation types before producers start emitting them.
 //!
 //! # Sampling
 //!

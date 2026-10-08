@@ -154,6 +154,58 @@ impl<P: Producer> InventoryTracker<P> {
         organization_id: Option<u64>,
         project_id: Option<u64>,
     ) -> Result<(), P::Error> {
+        self.write_with_op(
+            OpType::Write,
+            storage_key,
+            app_feature,
+            size,
+            timestamp,
+            expiration_time,
+            organization_id,
+            project_id,
+        )
+    }
+
+    /// Emits a `WRITE_SESSION`: an upload session now occupies the estimated size.
+    ///
+    /// Use a stable session key distinct from the eventual object's key.
+    ///
+    /// Does nothing and returns `Ok(())` if `storage_key` is not sampled.
+    #[allow(clippy::too_many_arguments)]
+    pub fn write_session(
+        &self,
+        storage_key: &str,
+        app_feature: &str,
+        size: u64,
+        timestamp: SystemTime,
+        expiration_time: Option<SystemTime>,
+        organization_id: Option<u64>,
+        project_id: Option<u64>,
+    ) -> Result<(), P::Error> {
+        self.write_with_op(
+            OpType::WriteSession,
+            storage_key,
+            app_feature,
+            size,
+            timestamp,
+            expiration_time,
+            organization_id,
+            project_id,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_with_op(
+        &self,
+        op_type: OpType,
+        storage_key: &str,
+        app_feature: &str,
+        size: u64,
+        timestamp: SystemTime,
+        expiration_time: Option<SystemTime>,
+        organization_id: Option<u64>,
+        project_id: Option<u64>,
+    ) -> Result<(), P::Error> {
         let Some(record_id) = self.sample(storage_key) else {
             return Ok(());
         };
@@ -161,7 +213,7 @@ impl<P: Producer> InventoryTracker<P> {
         self.emit(InventoryRecord {
             shared_resource_id: self.shared_resource_id.clone(),
             app_feature: app_feature.to_owned(),
-            op_type: OpType::Write,
+            op_type,
             record_id,
             timestamp: epoch_micros(timestamp),
             sample_rate: self.sample_rate,
@@ -212,6 +264,28 @@ impl<P: Producer> InventoryTracker<P> {
         app_feature: &str,
         timestamp: SystemTime,
     ) -> Result<(), P::Error> {
+        self.delete_with_op(OpType::Delete, storage_key, app_feature, timestamp)
+    }
+
+    /// Emits a `DELETE_SESSION`: an upload session completed or was canceled.
+    ///
+    /// Does nothing and returns `Ok(())` if `storage_key` is not sampled.
+    pub fn delete_session(
+        &self,
+        storage_key: &str,
+        app_feature: &str,
+        timestamp: SystemTime,
+    ) -> Result<(), P::Error> {
+        self.delete_with_op(OpType::DeleteSession, storage_key, app_feature, timestamp)
+    }
+
+    fn delete_with_op(
+        &self,
+        op_type: OpType,
+        storage_key: &str,
+        app_feature: &str,
+        timestamp: SystemTime,
+    ) -> Result<(), P::Error> {
         let Some(record_id) = self.sample(storage_key) else {
             return Ok(());
         };
@@ -219,7 +293,7 @@ impl<P: Producer> InventoryTracker<P> {
         self.emit(InventoryRecord {
             shared_resource_id: self.shared_resource_id.clone(),
             app_feature: app_feature.to_owned(),
-            op_type: OpType::Delete,
+            op_type,
             record_id,
             timestamp: epoch_micros(timestamp),
             sample_rate: self.sample_rate,
@@ -393,6 +467,10 @@ mod tests {
             .update("some/key", "f", now, Some(now), None, None)
             .unwrap();
         tracker.delete("some/key", "f", now).unwrap();
+        tracker
+            .write_session("session/key", "f", 4096, now, Some(now), Some(1), Some(2))
+            .unwrap();
+        tracker.delete_session("session/key", "f", now).unwrap();
 
         let records = producer.records();
         assert_eq!(records[0].op_type, OpType::Write);
@@ -401,6 +479,17 @@ mod tests {
         assert_eq!(records[1].size, None, "update means size unchanged");
         assert_eq!(records[2].op_type, OpType::Delete);
         assert_eq!(records[2].size, None);
+        assert_eq!(records.len(), 5);
+        assert_eq!(records[3].op_type, OpType::WriteSession);
+        assert_eq!(records[3].size, Some(4096));
+        assert_eq!(records[3].expiration_time, Some(epoch_micros(now)));
+        assert_eq!(records[3].organization_id, Some(1));
+        assert_eq!(records[3].project_id, Some(2));
+        assert_eq!(records[4].op_type, OpType::DeleteSession);
+        assert_eq!(records[4].size, None);
+        assert_eq!(records[4].expiration_time, None);
+        assert_eq!(records[3].record_id, records[4].record_id);
+        assert_ne!(records[0].record_id, records[3].record_id);
     }
 
     #[test]

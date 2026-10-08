@@ -56,3 +56,9 @@ recommended that you configure each of them with their own `InventoryTracker`.
 |---|---|
 | `kafka` | The `sentry_arroyo`-backed producer. Off by default, so the record types are usable without pulling in arroyo, librdkafka, and their native build. |
 | `test-utils` | Exposes the `test_utils` module and its `DummyProducer`, so downstream crates can assert on emitted records without a broker. |
+
+Upload sessions can be reported with `InventoryTracker::write_session` and
+`InventoryTracker::delete_session`. They emit `WRITE_SESSION` and `DELETE_SESSION`
+so downstream consumers can exclude session estimates from storage accounting.
+Use a stable session key distinct from the final object's key. Deploy the updated
+Kafka schema to validating consumers before emitting these operation types.

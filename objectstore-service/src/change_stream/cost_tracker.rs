@@ -25,6 +25,10 @@ use crate::id::ObjectId;
 /// can change the decision between a session write and delete. Object and session sampling
 /// decisions may differ. Neither raw paths nor session tokens are emitted.
 ///
+/// Sessions emit `WRITE_SESSION` and `DELETE_SESSION`. High-volume upload markers retain
+/// their existing identities but emit ordinary `WRITE` and `DELETE`, since their stored
+/// bytes contribute to cost attribution.
+///
 /// Logs, counts, and swallows errors returned by the [`InventoryTracker`].
 pub struct CostTrackerStream<P: Producer> {
     tracker: InventoryTracker<P>,
@@ -79,23 +83,20 @@ impl<P: Producer> fmt::Debug for CostTrackerStream<P> {
 impl<'a> ChangeTarget<'a> {
     /// Returns the attribution ID and stable input to inventory hashing and sampling.
     fn inventory_identity(self) -> (&'a ObjectId, String) {
-        match self {
-            Self::Object(id) => (id, id.as_storage_path().to_string()),
+        let (object_id, session_id) = match self {
+            Self::Object(id) => return (id, id.as_storage_path().to_string()),
+            Self::UploadMarker(revision) => (revision, revision.key.as_str()),
             Self::UploadSession {
                 object_id,
                 session_id,
-            } => {
-                // This tuple is the permanent session identity contract, just as the
-                // storage path is for objects. Neither the path nor token is emitted.
-                let key = serde_json::to_string(&(
-                    "upload_session",
-                    object_id.as_storage_path(),
-                    session_id,
-                ))
+            } => (object_id, session_id),
+        };
+        // Preserve the established identity for both sessions and markers. The operation
+        // type distinguishes session estimates from stored markers on the wire.
+        let key =
+            serde_json::to_string(&("upload_session", object_id.as_storage_path(), session_id))
                 .expect("session identity is serializable");
-                (object_id, key)
-            }
-        }
+        (object_id, key)
     }
 }
 
@@ -107,7 +108,12 @@ where
 {
     fn write(&self, target: ChangeTarget<'_>, size: u64, expires_at: Option<Timestamp>) {
         let (id, key) = target.inventory_identity();
-        let result = self.tracker.write(
+        let write = match target {
+            ChangeTarget::Object(_) | ChangeTarget::UploadMarker(_) => InventoryTracker::write,
+            ChangeTarget::UploadSession { .. } => InventoryTracker::write_session,
+        };
+        let result = write(
+            &self.tracker,
             &key,
             id.usecase(),
             size,
@@ -134,7 +140,15 @@ where
 
     fn delete(&self, target: ChangeTarget<'_>) {
         let (id, key) = target.inventory_identity();
-        let result = self.tracker.delete(&key, id.usecase(), SystemTime::now());
+        let result = match target {
+            ChangeTarget::Object(_) | ChangeTarget::UploadMarker(_) => {
+                self.tracker.delete(&key, id.usecase(), SystemTime::now())
+            }
+            ChangeTarget::UploadSession { .. } => {
+                self.tracker
+                    .delete_session(&key, id.usecase(), SystemTime::now())
+            }
+        };
         self.swallow("delete", result);
     }
 
@@ -301,8 +315,8 @@ mod tests {
             if !records.is_empty() {
                 sampled += 1;
                 assert_eq!(records.len(), 2);
-                assert_eq!(records[0].op_type, OpType::Write);
-                assert_eq!(records[1].op_type, OpType::Delete);
+                assert_eq!(records[0].op_type, OpType::WriteSession);
+                assert_eq!(records[1].op_type, OpType::DeleteSession);
                 assert_eq!(records[0].record_id, records[1].record_id);
                 assert!(record_ids.insert(records[0].record_id.clone()));
                 assert_eq!(records[0].organization_id, Some(17));

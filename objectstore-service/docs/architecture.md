@@ -164,9 +164,11 @@ backend. When using [`TieredStorage`](backend::tiered::TieredStorage)'s
 long-term backend the inventory table will contain _two rows_ for an object: a
 row for the actual object and its size in long-term backend, and a separate row
 for the tombstone and the tombstone's size in the high-volume backend.
-While a resumable upload is in progress, separate session rows account for its
-advertised size in the upload backend and its marker's stored size in high-volume
-storage. See the [change stream module](change_stream) for their lifetimes.
+While a resumable upload is in progress, `WRITE_SESSION` and `DELETE_SESSION` events
+track its advertised size separately from the published object. Consumers can exclude
+these estimates from cost attribution. High-volume markers still use ordinary
+`WRITE` and `DELETE` events for their actual stored bytes.
+See the [change stream module](change_stream) for their lifetimes.
 
 Because the change stream does not observe automatic garbage collection, expired
 records must be filtered out when querying the inventory table.
@@ -197,8 +199,8 @@ per-backend feed of three operations:
   unchanged. In practice this is a TTI bump.
 - `delete(target)`: `target` was deleted explicitly.
 
-[`ChangeTarget`](change_stream::ChangeTarget) identifies either an object or an upload
-session. An upload session carries its object's identity for attribution and a stable
+[`ChangeTarget`](change_stream::ChangeTarget) identifies an object, a stored upload
+marker, or an upload session. An upload session carries its object's identity for attribution and a stable
 session ID; [`Session`](resumable::Session) converts directly into a session target.
 
 The stream describes physical storage per backend. When using
