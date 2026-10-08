@@ -384,7 +384,7 @@ impl HighVolumeBackend for InMemoryBackend {
             .unwrap()
             .insert(revision.clone(), time_expires);
         self.change_stream
-            .write(ChangeTarget::upload_marker(revision), 1, Some(time_expires));
+            .write(revision.into(), 1, Some(time_expires));
         Ok(())
     }
 
@@ -409,8 +409,7 @@ impl HighVolumeBackend for InMemoryBackend {
             .remove(revision)
             .is_some_and(|expiry| expiry >= access_time);
         if deleted {
-            self.change_stream
-                .delete(ChangeTarget::upload_marker(revision));
+            self.change_stream.delete(revision.into());
         }
         Ok(deleted)
     }

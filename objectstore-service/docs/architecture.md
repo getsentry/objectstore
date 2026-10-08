@@ -194,15 +194,14 @@ per-backend feed of three operations:
   unchanged. In practice this is a TTI bump.
 - `delete(target)`: `target` was deleted explicitly.
 
-[`ChangeTarget`](change_stream::ChangeTarget) identifies an object, a stored upload
-marker, or an upload session.
+[`ChangeTarget`](change_stream::ChangeTarget) identifies an object or an upload session.
 
 The stream describes physical storage per backend. When using
 [`TieredStorage`](backend::tiered::TieredStorage), objects that are stored in
 long-term storage will emit a change record for the actual object in long-term
 storage as well as for the tombstone record in high-volume storage.
 
-For objects and markers, `size` is a count of bytes that the backend actually stores.
+For objects, `size` is a count of bytes that the backend actually stores.
 This includes object payloads, metadata, and sometimes backend-specific overhead.
 For upload sessions, `size` is the final `size` of the corresponding `object` that
 the upload will create when the upload is finalized.

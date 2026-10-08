@@ -15,13 +15,6 @@
 //! on the inventory wire, allowing consumers to exclude their estimates from cost attribution.
 //! The accounting deadline does not change backend cleanup behavior.
 //!
-//! High-volume markers use ordinary `WRITE`/`DELETE` operations to report their stored size
-//! and actual deadline, set by
-//! `backend::tiered::RESUMABLE_UPLOAD_TTL`. Only a successful
-//! conditional marker deletion emits a delete. Tiered deletes its marker to claim the upload
-//! before finalization, so that marker delete precedes the long-term object write and session
-//! delete. Failed operations leave accounting intact until successful cleanup or expiration.
-//!
 //! Behind the `storage-cogs` feature. Without it every backend gets a [`NoopStream`] and
 //! the transport is left out of the binary.
 
@@ -58,14 +51,11 @@ pub(crate) const UPLOAD_SESSION_TTL: Duration = Duration::from_hours(7 * 24);
 /// The object or upload session whose storage changed.
 ///
 /// Session identities are separate from objects, including concurrent uploads to the same object.
-/// Upload backends use their opaque backend token as `session_id`; high-volume markers use
-/// [`ChangeTarget::upload_marker`].
+/// Upload backends use their opaque backend token as `session_id`.
 #[derive(Clone, Copy, Debug)]
 pub enum ChangeTarget<'a> {
-    /// A published object, including a high-volume redirect tombstone.
+    /// An object stored by a backend.
     Object(&'a ObjectId),
-    /// A stored high-volume upload marker, accounted for as an ordinary object.
-    UploadMarker(&'a ObjectId),
     /// An in-progress upload, identified by its backend session token.
     UploadSession {
         /// Object identity supplying the usecase and scopes.
@@ -73,13 +63,6 @@ pub enum ChangeTarget<'a> {
         /// Stable identity for this particular upload.
         session_id: &'a str,
     },
-}
-
-impl<'a> ChangeTarget<'a> {
-    /// Identifies the high-volume marker for an upload's unique revision.
-    pub fn upload_marker(revision: &'a ObjectId) -> Self {
-        Self::UploadMarker(revision)
-    }
 }
 
 impl<'a> From<&'a ObjectId> for ChangeTarget<'a> {

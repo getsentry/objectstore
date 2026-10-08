@@ -73,14 +73,12 @@ impl<'a> ChangeTarget<'a> {
     fn inventory_identity(self) -> (&'a ObjectId, String) {
         let (object_id, session_id) = match self {
             Self::Object(id) => return (id, id.as_storage_path().to_string()),
-            Self::UploadMarker(revision) => (revision, revision.key.as_str()),
             Self::UploadSession {
                 object_id,
                 session_id,
             } => (object_id, session_id),
         };
-        // Preserve the established identity for both sessions and markers. The operation
-        // type distinguishes session estimates from stored markers on the wire.
+        // Keep session identities separate from objects and concurrent uploads to the same object.
         let key =
             serde_json::to_string(&("upload_session", object_id.as_storage_path(), session_id))
                 .expect("session identity is serializable");
@@ -97,7 +95,7 @@ where
     fn write(&self, target: ChangeTarget<'_>, size: u64, expires_at: Option<Timestamp>) {
         let (id, key) = target.inventory_identity();
         let write = match target {
-            ChangeTarget::Object(_) | ChangeTarget::UploadMarker(_) => InventoryTracker::write,
+            ChangeTarget::Object(_) => InventoryTracker::write,
             ChangeTarget::UploadSession { .. } => InventoryTracker::write_session,
         };
         let result = write(
@@ -129,9 +127,7 @@ where
     fn delete(&self, target: ChangeTarget<'_>) {
         let (id, key) = target.inventory_identity();
         let result = match target {
-            ChangeTarget::Object(_) | ChangeTarget::UploadMarker(_) => {
-                self.tracker.delete(&key, id.usecase(), SystemTime::now())
-            }
+            ChangeTarget::Object(_) => self.tracker.delete(&key, id.usecase(), SystemTime::now()),
             ChangeTarget::UploadSession { .. } => {
                 self.tracker
                     .delete_session(&key, id.usecase(), SystemTime::now())

@@ -54,7 +54,7 @@ use crate::backend::common::{
     Tombstone,
 };
 use crate::change_stream::{
-    ChangeStream, ChangeStreamFactory, ChangeTarget, CostTrackerStreamConfig, flush_change_stream,
+    ChangeStream, ChangeStreamFactory, CostTrackerStreamConfig, flush_change_stream,
 };
 use crate::error::{Error, ErrorKind, Result, ResultExt as _};
 use crate::gcp_auth::PrefetchingTokenProvider;
@@ -1090,11 +1090,8 @@ impl HighVolumeBackend for BigTableBackend {
         let path = revision.as_upload_path().to_string().into_bytes();
         let size = row_size(&path, &mutations);
         self.mutate(path, mutations, "create_upload_marker").await?;
-        self.change_stream.write(
-            ChangeTarget::upload_marker(revision),
-            size,
-            Some(time_expires),
-        );
+        self.change_stream
+            .write(revision.into(), size, Some(time_expires));
         Ok(())
     }
 
@@ -1133,8 +1130,7 @@ impl HighVolumeBackend for BigTableBackend {
             )
             .await?;
         if deleted {
-            self.change_stream
-                .delete(ChangeTarget::upload_marker(revision));
+            self.change_stream.delete(revision.into());
         }
         Ok(deleted)
     }
