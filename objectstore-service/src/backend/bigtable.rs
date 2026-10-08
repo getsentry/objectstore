@@ -1086,12 +1086,10 @@ impl HighVolumeBackend for BigTableBackend {
             timestamp_micros: time_expires.as_micros() as i64,
             value: vec![1],
         }))];
-        self.mutate(
-            revision.as_upload_path().to_string().into_bytes(),
-            mutations,
-            "create_upload_marker",
-        )
-        .await?;
+        let path = revision.as_upload_path().to_string().into_bytes();
+        let size = row_size(&path, &mutations);
+        self.mutate(path, mutations, "create_upload_marker").await?;
+        self.change_stream.write(revision, size, Some(time_expires));
         Ok(())
     }
 
@@ -1118,13 +1116,21 @@ impl HighVolumeBackend for BigTableBackend {
         revision: &ObjectId,
         access_time: Timestamp,
     ) -> Result<bool> {
-        self.check_and_mutate(
-            revision.as_upload_path().to_string().into_bytes(),
-            MutatePredicate::Include(live_row_filter(column_filter(COLUMN_UPLOAD), access_time)),
-            vec![delete_row_mutation()],
-            "delete_upload_marker",
-        )
-        .await
+        let deleted = self
+            .check_and_mutate(
+                revision.as_upload_path().to_string().into_bytes(),
+                MutatePredicate::Include(live_row_filter(
+                    column_filter(COLUMN_UPLOAD),
+                    access_time,
+                )),
+                vec![delete_row_mutation()],
+                "delete_upload_marker",
+            )
+            .await?;
+        if deleted {
+            self.change_stream.delete(revision);
+        }
+        Ok(deleted)
     }
 
     #[tracing::instrument(level = "debug", fields(?id), skip_all)]

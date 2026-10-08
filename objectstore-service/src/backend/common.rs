@@ -405,6 +405,8 @@ pub trait HighVolumeBackend: Backend {
     ///
     /// `revision` is the upload's unique LT revision. The fixed deadline is independent
     /// of object expiration and must not be refreshed by subsequent requests.
+    /// Reports a change-stream write keyed by `revision`, with the marker's stored size
+    /// and deadline.
     async fn create_upload_marker(
         &self,
         revision: &ObjectId,
@@ -418,6 +420,7 @@ pub trait HighVolumeBackend: Backend {
     ///
     /// Returns `true` only when this call deletes a live marker.
     /// Missing and expired markers return `false`, including on a repeated deletion.
+    /// Reports a change-stream delete keyed by `revision` only when a live marker is deleted.
     async fn delete_upload_marker(
         &self,
         revision: &ObjectId,
