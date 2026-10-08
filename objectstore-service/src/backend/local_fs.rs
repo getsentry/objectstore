@@ -327,7 +327,7 @@ impl Backend for LocalFsBackend {
         let metadata_size = UploadFile::create(&path, metadata).await?;
         let token = upload_id.to_string();
         self.change_stream.write(
-            ChangeTarget::UploadSession {
+            ChangeTarget::Session {
                 object_id: id,
                 session_id: &token,
             },

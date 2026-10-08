@@ -55,7 +55,7 @@ pub enum ChangeTarget<'a> {
     /// An object stored by a backend.
     Object(&'a ObjectId),
     /// An in-progress upload, identified by its backend session token.
-    UploadSession {
+    Session {
         /// Object identity supplying the usecase and scopes.
         object_id: &'a ObjectId,
         /// Stable identity for this particular upload.
@@ -71,7 +71,7 @@ impl<'a> From<&'a ObjectId> for ChangeTarget<'a> {
 
 impl<'a> From<&'a Session> for ChangeTarget<'a> {
     fn from(session: &'a Session) -> Self {
-        Self::UploadSession {
+        Self::Session {
             object_id: &session.object_id,
             session_id: &session.backend_token,
         }

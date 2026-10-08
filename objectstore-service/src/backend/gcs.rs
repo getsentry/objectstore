@@ -1215,7 +1215,7 @@ impl Backend for GcsBackend {
         })?;
         let token = String::from(session_uri);
         self.change_stream.write(
-            ChangeTarget::UploadSession {
+            ChangeTarget::Session {
                 object_id: id,
                 session_id: &token,
             },

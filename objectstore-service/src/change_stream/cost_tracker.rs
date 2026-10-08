@@ -73,7 +73,7 @@ impl<'a> ChangeTarget<'a> {
     fn inventory_identity(self) -> (&'a ObjectId, String) {
         let (object_id, session_id) = match self {
             Self::Object(id) => return (id, id.as_storage_path().to_string()),
-            Self::UploadSession {
+            Self::Session {
                 object_id,
                 session_id,
             } => (object_id, session_id),
@@ -96,7 +96,7 @@ where
         let (id, key) = target.inventory_identity();
         let write = match target {
             ChangeTarget::Object(_) => InventoryTracker::write,
-            ChangeTarget::UploadSession { .. } => InventoryTracker::write_session,
+            ChangeTarget::Session { .. } => InventoryTracker::write_session,
         };
         let result = write(
             &self.tracker,
@@ -128,7 +128,7 @@ where
         let (id, key) = target.inventory_identity();
         let result = match target {
             ChangeTarget::Object(_) => self.tracker.delete(&key, id.usecase(), SystemTime::now()),
-            ChangeTarget::UploadSession { .. } => {
+            ChangeTarget::Session { .. } => {
                 self.tracker
                     .delete_session(&key, id.usecase(), SystemTime::now())
             }
@@ -289,7 +289,7 @@ mod tests {
         let mut record_ids = std::collections::HashSet::new();
         for i in 0..32 {
             let session_id = format!("session-{i}");
-            let target = ChangeTarget::UploadSession {
+            let target = ChangeTarget::Session {
                 object_id: &id,
                 session_id: &session_id,
             };

@@ -271,7 +271,7 @@ impl super::common::Backend for InMemoryBackend {
             Arc::new(tokio::sync::Mutex::new(Some(upload))),
         );
         self.change_stream.write(
-            ChangeTarget::UploadSession {
+            ChangeTarget::Session {
                 object_id: id,
                 session_id: &token,
             },
