@@ -461,7 +461,7 @@ pub struct Config {
     /// # Environment Variables
     ///
     /// - `OS__STORAGE__TYPE` — backend type (`filesystem`, `tiered`, `gcs`, `bigtable`,
-    ///   `s3compatible`)
+    ///   `cql`, `s3compatible`)
     /// - Additional fields depending on the type (see [`StorageConfig`])
     ///
     /// For tiered storage, sub-backend fields are nested under `high_volume` and `long_term`:
@@ -1086,7 +1086,9 @@ mod tests {
             let StorageConfig::Tiered(c) = &dbg!(&config).storage else {
                 panic!("expected tiered storage");
             };
-            let HighVolumeStorageConfig::BigTable(hv) = &c.high_volume;
+            let HighVolumeStorageConfig::BigTable(hv) = &c.high_volume else {
+                panic!("expected bigtable high_volume");
+            };
             assert_eq!(hv.project_id, "my-project");
             assert_eq!(hv.rpc_timeout, Duration::from_secs(2));
             let MultipartUploadStorageConfig::Gcs(lt) = &c.long_term else {
@@ -1115,7 +1117,9 @@ mod tests {
             let StorageConfig::Tiered(c) = &dbg!(&config).storage else {
                 panic!("expected tiered storage");
             };
-            let HighVolumeStorageConfig::BigTable(hv) = &c.high_volume;
+            let HighVolumeStorageConfig::BigTable(hv) = &c.high_volume else {
+                panic!("expected bigtable high_volume");
+            };
             assert_eq!(hv.project_id, "my-project");
             assert_eq!(hv.instance_name, "my-instance");
             assert_eq!(hv.table_name, "my-table");
@@ -1125,6 +1129,58 @@ mod tests {
             };
             assert_eq!(lt.path, Path::new("/data/lt"));
 
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn cql_storage_via_yaml() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "cql.yaml",
+                r#"
+storage:
+  type: cql
+  nodes: [localhost:9042]
+  keyspace: objectstore
+  table_name: objects
+  local_datacenter: datacenter1
+"#,
+            )?;
+            let config = Config::load(Some(Path::new("cql.yaml"))).unwrap();
+            let StorageConfig::Cql(cql) = config.storage else {
+                panic!("expected CQL")
+            };
+            assert_eq!(cql.nodes, ["localhost:9042"]);
+            assert_eq!(cql.request_timeout, Duration::from_secs(5));
+            assert!(cql.username.is_none());
+            assert!(cql.tls_ca_bundle.is_none());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn tiered_cql_storage_via_env() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("OS__STORAGE__TYPE", "tiered");
+            jail.set_env("OS__STORAGE__HIGH_VOLUME__TYPE", "cql");
+            jail.set_env("OS__STORAGE__HIGH_VOLUME__NODES", "[localhost:9042]");
+            jail.set_env("OS__STORAGE__HIGH_VOLUME__KEYSPACE", "objectstore");
+            jail.set_env("OS__STORAGE__HIGH_VOLUME__TABLE_NAME", "objects");
+            jail.set_env("OS__STORAGE__HIGH_VOLUME__LOCAL_DATACENTER", "datacenter1");
+            jail.set_env("OS__STORAGE__HIGH_VOLUME__REQUEST_TIMEOUT", "3s");
+            jail.set_env("OS__STORAGE__LONG_TERM__TYPE", "filesystem");
+            jail.set_env("OS__STORAGE__LONG_TERM__PATH", "/data/lt");
+            let config = Config::load(None).unwrap();
+            let StorageConfig::Tiered(tiered) = config.storage else {
+                panic!("expected tiered")
+            };
+            let HighVolumeStorageConfig::Cql(cql) = tiered.high_volume else {
+                panic!("expected CQL")
+            };
+            assert_eq!(cql.local_datacenter, "datacenter1");
+            assert_eq!(cql.nodes, ["localhost:9042"]);
+            assert_eq!(cql.request_timeout, Duration::from_secs(3));
             Ok(())
         });
     }

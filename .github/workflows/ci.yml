@@ -101,6 +101,20 @@ jobs:
             google/cloud-sdk \
             /run-bigtable.sh
 
+      - name: Start Cassandra
+        run: |
+          docker run -d \
+            --name cassandra \
+            -p 9042:9042 \
+            -e CASSANDRA_DC=datacenter1 \
+            -e CASSANDRA_ENDPOINT_SNITCH=GossipingPropertyFileSnitch \
+            -e CASSANDRA_BROADCAST_RPC_ADDRESS=127.0.0.1 \
+            -e MAX_HEAP_SIZE=512M \
+            -e HEAP_NEWSIZE=100M \
+            -v $PWD/devservices/run-cassandra.sh:/run-cassandra.sh:ro \
+            -v $PWD/objectstore-service/src/backend/cql/schema.cql:/schema.cql:ro \
+            cassandra:5.0.9 /bin/bash /run-cassandra.sh
+
       - name: Build GCS Emulator
         run: |
           docker build -t gcs-emulator-local https://github.com/getsentry/google-cloud-storage-testbench.git#main
@@ -136,6 +150,17 @@ jobs:
           key: ${{ github.job }}
 
       - uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Wait for Cassandra schema
+        run: |
+          deadline=$((SECONDS + 180))
+          until docker exec cassandra cqlsh --connect-timeout=2 --request-timeout=5 localhost -e 'SELECT revision FROM objectstore.objects LIMIT 1'; do
+            if (( SECONDS >= deadline )); then
+              docker logs cassandra
+              exit 1
+            fi
+            sleep 2
+          done
 
       - name: Run Rust doctests
         run: cargo test --workspace --all-features --doc --locked

@@ -1,0 +1,28 @@
+# Requires devservices full mode; use a port different from the containerized server.
+http_addr: 0.0.0.0:18888
+
+storage:
+  type: tiered
+  high_volume:
+    type: cql
+    nodes: [localhost:9042]
+    keyspace: objectstore
+    table_name: objects
+    local_datacenter: datacenter1
+    request_timeout: 5s
+    # Optional authentication and verified TLS:
+    # username: objectstore
+    # password: provided-through-environment
+    # tls_ca_bundle: /etc/objectstore/cql-ca.pem
+    # Certificates must include the node IP addresses as subject alternative names.
+  long_term:
+    type: gcs
+    endpoint: http://localhost:8087
+    bucket: test-bucket
+
+auth:
+  enforce: false
+
+logging:
+  level: debug
+  format: auto

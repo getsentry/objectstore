@@ -187,8 +187,7 @@ fn new_long_term_revision(id: &ObjectId) -> ObjectId {
 pub struct TieredStorageConfig {
     /// Backend for high-volume, small objects.
     ///
-    /// Must be a backend that implements [`HighVolumeBackend`] (currently
-    /// only BigTable).
+    /// Must be a backend that implements [`HighVolumeBackend`] (BigTable or CQL).
     pub high_volume: HighVolumeStorageConfig,
     /// Backend for large, long-term objects.
     ///

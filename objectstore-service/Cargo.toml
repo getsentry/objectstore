@@ -30,6 +30,8 @@ quick-xml = { workspace = true, features = ["serialize"] }
 regex = { workspace = true }
 reqwest = { workspace = true, features = ["charset", "http2", "hickory-dns", "json", "multipart", "native-tls-no-alpn", "stream", "system-proxy"] }
 ring = { workspace = true }
+rustls = { workspace = true, features = ["ring", "std", "tls12"] }
+scylla = { workspace = true }
 sentry = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
