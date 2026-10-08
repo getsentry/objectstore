@@ -7,7 +7,8 @@
 //! # Resumable uploads
 //!
 //! Upload backends report a session write after creation with the advertised upload length
-//! plus backend metadata bytes, and an accounting expiration set by `UPLOAD_SESSION_TTL`,
+//! plus backend metadata bytes, and an accounting expiration set by
+//! [`UPLOAD_SESSION_TTL`](crate::backend::common::UPLOAD_SESSION_TTL),
 //! independent of object expiration. Partial chunks and incomplete offset queries emit nothing. Successful publication
 //! reports the object's actual stored size and expiration, followed by a session delete. Completion
 //! discovered through an offset query follows the same order. Successful cancellation also
@@ -44,9 +45,6 @@ pub(crate) use factory::dummy_factory;
 
 /// How long a backend waits for reported records to be handed off during shutdown.
 pub const FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// Accounting lifetime for an upload's estimated stored size, independent of backend cleanup.
-pub(crate) const UPLOAD_SESSION_TTL: Duration = Duration::from_hours(7 * 24);
 
 /// The object or upload session whose storage changed.
 ///

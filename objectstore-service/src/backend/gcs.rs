@@ -20,12 +20,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::backend::common::{
     self, Backend, DeleteResponse, ExpiryUpdate, GetResponse, MetadataResponse,
-    MultipartUploadBackend, PutResponse, SetExpiryResponse,
+    MultipartUploadBackend, PutResponse, SetExpiryResponse, UPLOAD_SESSION_TTL,
 };
 use crate::backend::extensions::{ReqwestResultExt, ResponseExt, SendTraced};
 use crate::change_stream::{
-    ChangeStream, ChangeStreamFactory, ChangeTarget, CostTrackerStreamConfig, UPLOAD_SESSION_TTL,
-    flush_change_stream,
+    ChangeStream, ChangeStreamFactory, ChangeTarget, CostTrackerStreamConfig, flush_change_stream,
 };
 use crate::error::{Error, ErrorKind, Result, ResultExt as _};
 use crate::gcp_auth::PrefetchingTokenProvider;

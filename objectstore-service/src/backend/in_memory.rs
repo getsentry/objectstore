@@ -20,11 +20,9 @@ use objectstore_types::metadata::Metadata;
 use crate::backend::common::{
     self, DeleteResponse, ExpiryUpdate, GetResponse, HighVolumeBackend, MultipartUploadBackend,
     PutResponse, SetExpiryResponse, TieredGet, TieredMetadata, TieredUpdate, TieredWrite,
-    Tombstone,
+    Tombstone, UPLOAD_SESSION_TTL,
 };
-use crate::change_stream::{
-    ChangeStream, ChangeTarget, NoopStream, UPLOAD_SESSION_TTL, flush_change_stream,
-};
+use crate::change_stream::{ChangeStream, ChangeTarget, NoopStream, flush_change_stream};
 use crate::error::{Error, ErrorKind, Result};
 use crate::id::ObjectId;
 use crate::multipart::{
