@@ -8,7 +8,8 @@
 //!   of the identifier passed in by the caller.
 //! - `op_type`: `WRITE`, `UPDATE`, or `DELETE` for stored objects; `WRITE_SESSION` or
 //!   `DELETE_SESSION` for upload sessions.
-//! - `size`: stored bytes (including metadata), or the estimated upload-session size.
+//! - `size`: stored bytes (including metadata). For sessions, this is optimistically the
+//!   final size that the object will have when the upload is completed.
 //! - `expiration_time`: a timestamp (unixtime microseconds) describing when the record is
 //!   meant to be deleted.
 //!
