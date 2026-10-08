@@ -1009,7 +1009,8 @@ impl Backend for BigTableBackend {
         let (_, size) = self
             .put_row(path, metadata.clone(), payload.into_bytes().into(), "put")
             .await?;
-        self.change_stream.write(id, size, metadata.time_expires);
+        self.change_stream
+            .write(id.into(), size, metadata.time_expires);
 
         Ok(())
     }
@@ -1063,7 +1064,7 @@ impl Backend for BigTableBackend {
 
         let path = id.as_storage_path().to_string().into_bytes();
         self.mutate(path, [delete_row_mutation()], "delete").await?;
-        self.change_stream.delete(id);
+        self.change_stream.delete(id.into());
 
         Ok(())
     }
@@ -1151,7 +1152,8 @@ impl HighVolumeBackend for BigTableBackend {
                 .await?;
 
             if write_succeeded {
-                self.change_stream.write(id, size, metadata.time_expires);
+                self.change_stream
+                    .write(id.into(), size, metadata.time_expires);
                 return Ok(None);
             }
 
@@ -1368,7 +1370,7 @@ impl HighVolumeBackend for BigTableBackend {
             .await?;
 
         if applied {
-            self.change_stream.update(id, Some(expire_at));
+            self.change_stream.update(id.into(), Some(expire_at));
         }
 
         Ok(if applied {
@@ -1399,7 +1401,7 @@ impl HighVolumeBackend for BigTableBackend {
                 .await?;
 
             if deleted {
-                self.change_stream.delete(id);
+                self.change_stream.delete(id.into());
                 return Ok(None);
             }
 
@@ -1487,10 +1489,10 @@ impl HighVolumeBackend for BigTableBackend {
             // We wrote something (the inner `expires_at` is `None` for manual GC)
             (true, Some(expires_at)) => {
                 self.change_stream
-                    .write(id, row_size(&path, &mutations), expires_at)
+                    .write(id.into(), row_size(&path, &mutations), expires_at)
             }
             // We deleted something
-            (true, None) => self.change_stream.delete(id),
+            (true, None) => self.change_stream.delete(id.into()),
         }
 
         Ok(written)

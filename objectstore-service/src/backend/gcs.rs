@@ -24,7 +24,8 @@ use crate::backend::common::{
 };
 use crate::backend::extensions::{ReqwestResultExt, ResponseExt, SendTraced};
 use crate::change_stream::{
-    ChangeStream, ChangeStreamFactory, CostTrackerStreamConfig, flush_change_stream,
+    ChangeStream, ChangeStreamFactory, CostTrackerStreamConfig, UPLOAD_SESSION_TTL,
+    flush_change_stream,
 };
 use crate::error::{Error, ErrorKind, Result, ResultExt as _};
 use crate::gcp_auth::PrefetchingTokenProvider;
@@ -517,7 +518,8 @@ impl GcsBackend {
             bucket,
             cogs,
         } = config;
-        let change_stream = streams.build(cogs.as_ref());
+        // Incomplete GCS uploads do not contribute to storage COGS.
+        let change_stream = streams.build_with_upload_sessions(cogs.as_ref(), false);
 
         let token_provider = if endpoint.is_none() {
             Some(PrefetchingTokenProvider::gcp_auth(TOKEN_SCOPES).await?)
@@ -752,7 +754,7 @@ impl GcsBackend {
         match stored_size {
             Some(stored_size) => {
                 self.change_stream
-                    .write(id, stored_size + metadata_size, expires_at)
+                    .write(id.into(), stored_size + metadata_size, expires_at)
             }
             None => {
                 objectstore_metrics::count!("change_stream.unreported", reason = "no_stored_size")
@@ -1100,7 +1102,7 @@ impl Backend for GcsBackend {
             .update_custom_time(object_url, expire_at, object.generations(), metadata)
             .await?;
         if matches!(outcome, SetExpiryResponse::Satisfied(_)) {
-            self.change_stream.update(id, Some(expire_at));
+            self.change_stream.update(id.into(), Some(expire_at));
         }
 
         Ok(outcome)
@@ -1140,7 +1142,7 @@ impl Backend for GcsBackend {
             .await?;
 
         if deleted {
-            self.change_stream.delete(id);
+            self.change_stream.delete(id.into());
         }
 
         Ok(())
@@ -1211,7 +1213,17 @@ impl Backend for GcsBackend {
                 "invalid Location URL in GCS resumable upload creation response",
             )
         })?;
-        Ok(Some(session_uri.into()))
+        let session = Session {
+            object_id: id.clone(),
+            upload_length,
+            backend_token: session_uri.into(),
+        };
+        self.change_stream.write(
+            (&session).into(),
+            upload_length.get(),
+            Some(Timestamp::now() + UPLOAD_SESSION_TTL),
+        );
+        Ok(Some(session.backend_token))
     }
 
     #[tracing::instrument(level = "debug", fields(?session, offset, content_length), skip_all)]
@@ -1270,6 +1282,7 @@ impl Backend for GcsBackend {
                 object.metadata_size(),
                 expires_at,
             );
+            self.change_stream.delete(session.into());
         }
         Ok(progress.into())
     }
@@ -1305,6 +1318,7 @@ impl Backend for GcsBackend {
                     object.metadata_size(),
                     expires_at,
                 );
+                self.change_stream.delete(session.into());
             }
             Ok(progress.into())
         })
@@ -1350,7 +1364,9 @@ impl Backend for GcsBackend {
                 }
             }
         })
-        .await
+        .await?;
+        self.change_stream.delete(session.into());
+        Ok(())
     }
 
     async fn join(&self) {
@@ -3248,6 +3264,11 @@ mod tests {
         let token = backend
             .create_upload_session(&id, &metadata, nonzero(payload.len() as u64))
             .await?;
+
+        assert!(
+            producer.records().is_empty(),
+            "GCS sessions are excluded from COGS"
+        );
 
         assert_eq!(
             backend

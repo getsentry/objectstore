@@ -22,7 +22,7 @@ use crate::backend::common::{
     PutResponse, SetExpiryResponse, TieredGet, TieredMetadata, TieredUpdate, TieredWrite,
     Tombstone,
 };
-use crate::change_stream::{ChangeStream, NoopStream, flush_change_stream};
+use crate::change_stream::{ChangeStream, NoopStream, UPLOAD_SESSION_TTL, flush_change_stream};
 use crate::error::{Error, ErrorKind, Result};
 use crate::id::ObjectId;
 use crate::multipart::{
@@ -181,7 +181,7 @@ impl super::common::Backend for InMemoryBackend {
         let size = entry.stored_size();
         self.store.lock().unwrap().insert(id.clone(), entry);
         self.change_stream
-            .write(id, size as u64, metadata.time_expires);
+            .write(id.into(), size as u64, metadata.time_expires);
         Ok(())
     }
 
@@ -238,7 +238,7 @@ impl super::common::Backend for InMemoryBackend {
         };
 
         if let ExpiryOutcome::Extended(expire_at) = outcome {
-            self.change_stream.update(id, Some(expire_at));
+            self.change_stream.update(id.into(), Some(expire_at));
         }
 
         Ok(outcome.response())
@@ -250,7 +250,7 @@ impl super::common::Backend for InMemoryBackend {
         _access_time: Timestamp,
     ) -> Result<DeleteResponse> {
         if self.store.lock().unwrap().remove(id).is_some() {
-            self.change_stream.delete(id);
+            self.change_stream.delete(id.into());
         }
         Ok(())
     }
@@ -259,7 +259,7 @@ impl super::common::Backend for InMemoryBackend {
         &self,
         id: &ObjectId,
         metadata: &Metadata,
-        _upload_length: NonZeroU64,
+        upload_length: NonZeroU64,
     ) -> Result<Option<BackendToken>> {
         let token = uuid::Uuid::now_v7().to_string();
         let upload = ResumableUpload {
@@ -270,7 +270,17 @@ impl super::common::Backend for InMemoryBackend {
             (id.clone(), token.clone()),
             Arc::new(tokio::sync::Mutex::new(Some(upload))),
         );
-        Ok(Some(token))
+        let session = Session {
+            object_id: id.clone(),
+            upload_length,
+            backend_token: token,
+        };
+        self.change_stream.write(
+            (&session).into(),
+            upload_length.get(),
+            Some(Timestamp::now() + UPLOAD_SESSION_TTL),
+        );
+        Ok(Some(session.backend_token))
     }
 
     async fn put_chunk(
@@ -324,11 +334,12 @@ impl super::common::Backend for InMemoryBackend {
             .insert(session.object_id.clone(), entry);
 
         self.change_stream
-            .write(&session.object_id, size as u64, expires_at);
+            .write((&session.object_id).into(), size as u64, expires_at);
         self.resumable_store
             .lock()
             .unwrap()
             .remove(&(session.object_id.clone(), session.backend_token.clone()));
+        self.change_stream.delete(session.into());
 
         Ok(UploadProgress::Complete)
     }
@@ -350,6 +361,7 @@ impl super::common::Backend for InMemoryBackend {
             .lock()
             .unwrap()
             .remove(&(session.object_id.clone(), session.backend_token.clone()));
+        self.change_stream.delete(session.into());
         Ok(())
     }
 
@@ -414,7 +426,7 @@ impl HighVolumeBackend for InMemoryBackend {
         let entry = StoreEntry::Object(metadata, payload);
         let size = entry.stored_size();
         store.insert(id.clone(), entry);
-        self.change_stream.write(id, size as u64, expires_at);
+        self.change_stream.write(id.into(), size as u64, expires_at);
         Ok(None)
     }
 
@@ -475,7 +487,7 @@ impl HighVolumeBackend for InMemoryBackend {
         }
 
         if store.remove(id).is_some() {
-            self.change_stream.delete(id);
+            self.change_stream.delete(id.into());
         }
         Ok(None)
     }
@@ -504,7 +516,7 @@ impl HighVolumeBackend for InMemoryBackend {
         };
 
         if let ExpiryOutcome::Extended(expire_at) = outcome {
-            self.change_stream.update(id, Some(expire_at));
+            self.change_stream.update(id.into(), Some(expire_at));
         }
 
         Ok(outcome.response())
@@ -530,18 +542,18 @@ impl HighVolumeBackend for InMemoryBackend {
                     let entry = StoreEntry::Tombstone(tombstone);
                     let size = entry.stored_size();
                     store.insert(id.clone(), entry);
-                    self.change_stream.write(id, size as u64, expires_at);
+                    self.change_stream.write(id.into(), size as u64, expires_at);
                 }
                 TieredWrite::Object(metadata, payload) => {
                     let expires_at = metadata.time_expires;
                     let entry = StoreEntry::Object(metadata, payload);
                     let size = entry.stored_size();
                     store.insert(id.clone(), entry);
-                    self.change_stream.write(id, size as u64, expires_at);
+                    self.change_stream.write(id.into(), size as u64, expires_at);
                 }
                 TieredWrite::Delete => {
                     if store.remove(id).is_some() {
-                        self.change_stream.delete(id);
+                        self.change_stream.delete(id.into());
                     }
                 }
             }
@@ -729,7 +741,7 @@ impl MultipartUploadBackend for InMemoryBackend {
         let entry = StoreEntry::Object(metadata, payload);
         let size = entry.stored_size();
         self.store.lock().unwrap().insert(id.clone(), entry);
-        self.change_stream.write(id, size as u64, expires_at);
+        self.change_stream.write(id.into(), size as u64, expires_at);
 
         self.multipart_store.lock().unwrap().remove(&key);
 
@@ -1118,26 +1130,45 @@ mod tests {
 
     #[cfg(feature = "storage-cogs")]
     #[tokio::test]
-    async fn resumable_emits_only_publication() {
+    async fn resumable_reports_session_lifecycle() {
         let (backend, producer) = backend_with_change_stream();
         let id = make_id();
         let token = create_session(&backend, &id, 2).await;
 
-        // Partial session state is not reported as a stored object.
+        let created = producer.records();
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0].op_type, OpType::Write);
+        assert_eq!(created[0].size, Some(2));
+        assert!(created[0].expiration_time.is_some());
+
+        // Chunks do not change the optimistic declared-length estimate.
         backend
             .put_chunk(&token, 0, 1, stream::single("a"))
             .await
             .unwrap();
-        assert!(producer.records().is_empty());
+        assert_eq!(producer.records().len(), 1);
 
-        // Completion emits exactly one write for the published object.
+        // Completion publishes the object and removes the separate session record.
         backend
             .put_chunk(&token, 1, 1, stream::single("b"))
             .await
             .unwrap();
         let records = producer.records();
-        assert_eq!(records.len(), 1);
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[1].op_type, OpType::Write);
+        assert_eq!(records[2].op_type, OpType::Delete);
+        assert_eq!(records[0].record_id, records[2].record_id);
+        assert_ne!(records[0].record_id, records[1].record_id);
+
+        producer.clear();
+        let canceled = create_session(&backend, &id, 2).await;
+        backend.cancel_upload(&canceled).await.unwrap();
+        let records = producer.records();
+        assert_eq!(records.len(), 2);
         assert_eq!(records[0].op_type, OpType::Write);
+        assert_eq!(records[1].op_type, OpType::Delete);
+        assert_eq!(records[0].record_id, records[1].record_id);
+        assert_ne!(records[0].record_id, created[0].record_id);
     }
 
     #[tokio::test]

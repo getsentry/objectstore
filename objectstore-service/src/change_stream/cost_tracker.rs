@@ -6,19 +6,26 @@ use std::time::{Duration, SystemTime};
 use objectstore_inventory_tracker::{BoxError, InventoryTracker, Producer};
 
 use crate::change_stream::{
-    ChangeStream, CostTrackerStreamConfig, SCOPE_ORGANIZATION, SCOPE_PROJECT, scope_id,
+    ChangeStream, ChangeTarget, CostTrackerStreamConfig, SCOPE_ORGANIZATION, SCOPE_PROJECT,
+    scope_id,
 };
 use objectstore_types::time::Timestamp;
 
+#[cfg(test)]
 use crate::id::ObjectId;
 
-/// Reports through an [`InventoryTracker`], which hashes each [`ObjectId`] both to
+/// Reports through an [`InventoryTracker`], which hashes each target's storage key both to
 /// anonymize it and to decide whether it is sampled. See [`objectstore_inventory_tracker`]
 /// for the record format.
+///
+/// Upload sessions are tracked by default, using a session-prefixed key containing
+/// the object path and backend token. GCS disables session accounting at construction;
+/// its lifecycle events remain available to other change stream implementations.
 ///
 /// Logs, counts, and swallows errors returned by the [`InventoryTracker`].
 pub struct CostTrackerStream<P: Producer> {
     tracker: InventoryTracker<P>,
+    pub(super) track_upload_sessions: bool,
 }
 
 impl<P: Producer> CostTrackerStream<P> {
@@ -30,6 +37,25 @@ impl<P: Producer> CostTrackerStream<P> {
                 &config.shared_resource_id,
                 config.sample_rate,
             ),
+            track_upload_sessions: true,
+        }
+    }
+
+    /// Returns the inventory key, or skips sessions excluded from accounting.
+    fn storage_key(&self, target: ChangeTarget<'_>) -> Option<String> {
+        match target {
+            ChangeTarget::Object(id) => Some(id.as_storage_path().to_string()),
+            ChangeTarget::Resumable(session) if self.track_upload_sessions => {
+                // Encode the fields separately so paths and opaque tokens cannot collide
+                // through embedded separators. The tracker hashes this before emission.
+                let key = serde_json::to_string(&(
+                    session.object_id.as_storage_path().to_string(),
+                    &session.backend_token,
+                ))
+                .expect("serializing strings cannot fail");
+                Some(format!("session:{key}"))
+            }
+            ChangeTarget::Resumable(_) => None,
         }
     }
 
@@ -63,6 +89,7 @@ impl<P: Producer> fmt::Debug for CostTrackerStream<P> {
         f.debug_struct("CostTrackerStream")
             .field("shared_resource_id", &self.tracker.shared_resource_id())
             .field("sample_rate", &self.tracker.sample_rate())
+            .field("track_upload_sessions", &self.track_upload_sessions)
             .finish()
     }
 }
@@ -73,9 +100,13 @@ where
     P: Producer + Clone + Send + Sync + 'static,
     P::Error: Into<BoxError> + Send + 'static,
 {
-    fn write(&self, id: &ObjectId, size: u64, expires_at: Option<Timestamp>) {
+    fn write(&self, target: ChangeTarget<'_>, size: u64, expires_at: Option<Timestamp>) {
+        let Some(key) = self.storage_key(target) else {
+            return;
+        };
+        let id = target.object_id();
         let result = self.tracker.write(
-            &id.as_storage_path().to_string(),
+            &key,
             id.usecase(),
             size,
             SystemTime::now(),
@@ -86,9 +117,13 @@ where
         self.swallow("write", result);
     }
 
-    fn update(&self, id: &ObjectId, expires_at: Option<Timestamp>) {
+    fn update(&self, target: ChangeTarget<'_>, expires_at: Option<Timestamp>) {
+        let Some(key) = self.storage_key(target) else {
+            return;
+        };
+        let id = target.object_id();
         let result = self.tracker.update(
-            &id.as_storage_path().to_string(),
+            &key,
             id.usecase(),
             SystemTime::now(),
             expires_at.map(Into::into),
@@ -98,12 +133,12 @@ where
         self.swallow("update", result);
     }
 
-    fn delete(&self, id: &ObjectId) {
-        let result = self.tracker.delete(
-            &id.as_storage_path().to_string(),
-            id.usecase(),
-            SystemTime::now(),
-        );
+    fn delete(&self, target: ChangeTarget<'_>) {
+        let Some(key) = self.storage_key(target) else {
+            return;
+        };
+        let id = target.object_id();
+        let result = self.tracker.delete(&key, id.usecase(), SystemTime::now());
         self.swallow("delete", result);
     }
 
@@ -140,7 +175,7 @@ mod tests {
         let (producer, stream) = stream(1.0);
         let id = object_id("attachments/org.17/project.42/objects/abc");
 
-        stream.write(&id, 4096, None);
+        stream.write((&id).into(), 4096, None);
 
         let record = &producer.records()[0];
         assert_eq!(record.shared_resource_id, "bigtable_objectstore");
@@ -156,7 +191,7 @@ mod tests {
         let (producer, stream) = stream(1.0);
         let id = object_id("attachments/org.17/project.42/objects/abc");
 
-        stream.write(&id, 4096, None);
+        stream.write((&id).into(), 4096, None);
 
         let record_id = &producer.records()[0].record_id;
         assert_ne!(record_id, &id.as_storage_path().to_string());
@@ -172,7 +207,7 @@ mod tests {
             "attachments/organization.17/objects/abc",
             "attachments/org.not-a-number/project.42/objects/abc",
         ] {
-            stream.write(&object_id(path), 1, None);
+            stream.write((&object_id(path)).into(), 1, None);
         }
 
         let records = producer.records();
@@ -205,9 +240,9 @@ mod tests {
         let (producer, stream) = stream(1.0);
         let id = object_id("attachments/org.1/project.2/objects/abc");
 
-        stream.write(&id, 10, None);
-        stream.update(&id, Some(Timestamp::now()));
-        stream.delete(&id);
+        stream.write((&id).into(), 10, None);
+        stream.update((&id).into(), Some(Timestamp::now()));
+        stream.delete((&id).into());
 
         let records = producer.records();
         assert_eq!(records.len(), 3);
@@ -220,12 +255,12 @@ mod tests {
         let (producer, stream) = stream(1.0);
 
         stream.write(
-            &object_id("attachments/org.1/project.2/objects/abc/0199aaaa"),
+            (&object_id("attachments/org.1/project.2/objects/abc/0199aaaa")).into(),
             1,
             None,
         );
         stream.write(
-            &object_id("attachments/org.1/project.2/objects/abc/0199bbbb"),
+            (&object_id("attachments/org.1/project.2/objects/abc/0199bbbb")).into(),
             1,
             None,
         );
@@ -240,8 +275,8 @@ mod tests {
         let id = object_id("attachments/org.1/project.2/objects/abc");
 
         let expires = Timestamp::from_unix_micros(1_800_000_000_123_456).unwrap();
-        stream.update(&id, Some(expires));
-        stream.delete(&id);
+        stream.update((&id).into(), Some(expires));
+        stream.delete((&id).into());
 
         let records = producer.records();
         assert_eq!(records[0].op_type, OpType::Update);
@@ -253,14 +288,65 @@ mod tests {
     }
 
     #[test]
+    fn upload_sessions_have_distinct_identities_and_can_be_excluded() {
+        use crate::resumable::Session;
+
+        let (producer, mut stream) = stream(1.0);
+        let first = Session {
+            object_id: object_id("attachments/org.17/project.42/objects/abc"),
+            upload_length: 10.try_into().unwrap(),
+            backend_token: "first-upload".into(),
+        };
+        let second = Session {
+            backend_token: "second-upload".into(),
+            ..first.clone()
+        };
+        stream.write((&first).into(), 10, None);
+        stream.update((&first).into(), None);
+        stream.delete((&first).into());
+        stream.write((&second).into(), 10, None);
+        stream.write((&first.object_id).into(), 10, None);
+
+        let records = producer.records();
+        assert_eq!(records.len(), 5);
+        assert_eq!(records[0].record_id, records[1].record_id);
+        assert_eq!(records[0].record_id, records[2].record_id);
+        assert_ne!(records[0].record_id, records[3].record_id);
+        assert_ne!(records[0].record_id, records[4].record_id);
+        assert_eq!(records[0].organization_id, Some(17));
+        assert_eq!(records[0].project_id, Some(42));
+        assert!(!records[0].record_id.contains(&first.backend_token));
+
+        producer.clear();
+        stream.track_upload_sessions = false;
+        stream.write((&first).into(), 10, None);
+        stream.update((&first).into(), None);
+        stream.delete((&first).into());
+        stream.write((&first.object_id).into(), 10, None);
+        stream.update((&first.object_id).into(), None);
+        stream.delete((&first.object_id).into());
+
+        let filtered = producer.records();
+        assert_eq!(filtered.len(), 3);
+        assert_eq!(filtered[0].op_type, OpType::Write);
+        assert_eq!(filtered[1].op_type, OpType::Update);
+        assert_eq!(filtered[2].op_type, OpType::Delete);
+        assert!(
+            filtered
+                .iter()
+                .all(|record| record.record_id == records[4].record_id)
+        );
+    }
+
+    #[test]
     fn a_listener_sampled_at_zero_reports_nothing() {
         let (producer, stream) = stream(0.0);
 
         for i in 0..100 {
             let id = object_id(&format!("attachments/org.1/project.2/objects/{i}"));
-            stream.write(&id, 1, None);
-            stream.update(&id, None);
-            stream.delete(&id);
+            stream.write((&id).into(), 1, None);
+            stream.update((&id).into(), None);
+            stream.delete((&id).into());
         }
 
         assert!(producer.records().is_empty());
