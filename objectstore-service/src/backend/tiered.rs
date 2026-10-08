@@ -1459,12 +1459,13 @@ mod tests {
         #[cfg(feature = "storage-cogs")]
         {
             let records = producer.records();
-            assert_eq!(records.len(), 1);
+            assert_eq!(records.len(), 2);
+            assert_eq!(records[0].size, Some(payload.len() as u64));
             assert_eq!(
-                records[0].size,
+                records[1].size,
                 Some(revision.as_upload_path().to_string().len() as u64 + 1)
             );
-            let expiry = records[0].expiration_time.unwrap() as u64;
+            let expiry = records[1].expiration_time.unwrap() as u64;
             assert!(
                 ((before + RESUMABLE_UPLOAD_TTL).as_micros()
                     ..=(Timestamp::now() + RESUMABLE_UPLOAD_TTL).as_micros())
@@ -1514,7 +1515,7 @@ mod tests {
         #[cfg(feature = "storage-cogs")]
         assert_eq!(
             producer.records().len(),
-            1,
+            2,
             "chunks and queries do not report changes"
         );
 
@@ -1556,14 +1557,18 @@ mod tests {
                     .map(|r| (r.shared_resource_id.as_str(), r.op_type))
                     .collect::<Vec<_>>(),
                 [
+                    ("gcs_objectstore", Write),
                     ("bigtable_objectstore", Write),
                     ("bigtable_objectstore", Delete),
                     ("gcs_objectstore", Write),
+                    ("gcs_objectstore", Delete),
                     ("bigtable_objectstore", Write),
                 ]
             );
-            assert_eq!(records[0].record_id, records[1].record_id);
+            assert_eq!(records[0].record_id, records[4].record_id);
+            assert_eq!(records[1].record_id, records[2].record_id);
             assert_ne!(records[0].record_id, records[3].record_id);
+            assert_ne!(records[1].record_id, records[5].record_id);
 
             producer.clear();
             let canceled =
@@ -1576,9 +1581,10 @@ mod tests {
             let records = producer.records();
             assert_eq!(
                 records.iter().map(|r| r.op_type).collect::<Vec<_>>(),
-                [Write, Delete]
+                [Write, Write, Delete, Delete]
             );
-            assert_eq!(records[0].record_id, records[1].record_id);
+            assert_eq!(records[0].record_id, records[3].record_id);
+            assert_eq!(records[1].record_id, records[2].record_id);
         }
         Ok(())
     }

@@ -25,14 +25,9 @@ use crate::id::ObjectId;
 /// can change the decision between a session write and delete. Object and session sampling
 /// decisions may differ. Neither raw paths nor session tokens are emitted.
 ///
-/// Upload sessions are tracked by default. GCS disables their accounting at stream
-/// construction because incomplete uploads do not incur storage charges. Generic
-/// session lifecycle events remain available to other change stream implementations.
-///
 /// Logs, counts, and swallows errors returned by the [`InventoryTracker`].
 pub struct CostTrackerStream<P: Producer> {
     tracker: InventoryTracker<P>,
-    pub(super) track_upload_sessions: bool,
 }
 
 impl<P: Producer> CostTrackerStream<P> {
@@ -44,7 +39,6 @@ impl<P: Producer> CostTrackerStream<P> {
                 &config.shared_resource_id,
                 config.sample_rate,
             ),
-            track_upload_sessions: true,
         }
     }
 
@@ -78,7 +72,6 @@ impl<P: Producer> fmt::Debug for CostTrackerStream<P> {
         f.debug_struct("CostTrackerStream")
             .field("shared_resource_id", &self.tracker.shared_resource_id())
             .field("sample_rate", &self.tracker.sample_rate())
-            .field("track_upload_sessions", &self.track_upload_sessions)
             .finish()
     }
 }
@@ -113,9 +106,6 @@ where
     P::Error: Into<BoxError> + Send + 'static,
 {
     fn write(&self, target: ChangeTarget<'_>, size: u64, expires_at: Option<Timestamp>) {
-        if !self.track_upload_sessions && matches!(target, ChangeTarget::UploadSession { .. }) {
-            return;
-        }
         let (id, key) = target.inventory_identity();
         let result = self.tracker.write(
             &key,
@@ -130,9 +120,6 @@ where
     }
 
     fn update(&self, target: ChangeTarget<'_>, expires_at: Option<Timestamp>) {
-        if !self.track_upload_sessions && matches!(target, ChangeTarget::UploadSession { .. }) {
-            return;
-        }
         let (id, key) = target.inventory_identity();
         let result = self.tracker.update(
             &key,
@@ -146,9 +133,6 @@ where
     }
 
     fn delete(&self, target: ChangeTarget<'_>) {
-        if !self.track_upload_sessions && matches!(target, ChangeTarget::UploadSession { .. }) {
-            return;
-        }
         let (id, key) = target.inventory_identity();
         let result = self.tracker.delete(&key, id.usecase(), SystemTime::now());
         self.swallow("delete", result);
@@ -333,35 +317,6 @@ mod tests {
         let (producer, stream) = self::stream(1.0);
         stream.write((&id).into(), 10, None);
         assert!(!record_ids.contains(&producer.records()[0].record_id));
-    }
-
-    #[test]
-    fn upload_sessions_can_be_excluded_without_affecting_objects() {
-        let (producer, mut stream) = stream(1.0);
-        let id = object_id("attachments/org.17/project.42/objects/abc");
-        let session = ChangeTarget::UploadSession {
-            object_id: &id,
-            session_id: "upload-token",
-        };
-        stream.track_upload_sessions = false;
-        stream.write(session, 10, None);
-        stream.update(session, None);
-        stream.delete(session);
-        assert!(producer.records().is_empty());
-
-        stream.write((&id).into(), 10, None);
-        stream.update((&id).into(), None);
-        stream.delete((&id).into());
-        let records = producer.records();
-        assert_eq!(records.len(), 3);
-        assert_eq!(records[0].op_type, OpType::Write);
-        assert_eq!(records[1].op_type, OpType::Update);
-        assert_eq!(records[2].op_type, OpType::Delete);
-        assert!(
-            records
-                .iter()
-                .all(|record| record.record_id == records[0].record_id)
-        );
     }
 
     #[test]

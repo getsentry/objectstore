@@ -4,9 +4,6 @@
 //! the service describes where those records go with a [`CostTrackerConfig`], shared by
 //! every backend. [`ChangeStreamFactory`] pairs the two into a [`ChangeStream`].
 //!
-//! Cost tracking includes upload sessions by default. GCS disables session accounting in
-//! the cost-tracking adapter while still publishing the generic lifecycle events.
-//!
 //! # Resumable uploads
 //!
 //! Upload backends report a session write after creation with exactly the advertised upload

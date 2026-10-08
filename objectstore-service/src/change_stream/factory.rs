@@ -48,23 +48,10 @@ impl ChangeStreamFactory {
     }
 
     /// Builds the stream `config` asks for, or a [`NoopStream`] if it cannot be built.
-    pub fn build(&self, config: Option<&CostTrackerStreamConfig>) -> Arc<dyn ChangeStream> {
-        self.build_with_upload_sessions(config, true)
-    }
-
-    /// Builds a stream with the backend's upload-session accounting policy.
     #[cfg(feature = "storage-cogs")]
-    pub(crate) fn build_with_upload_sessions(
-        &self,
-        config: Option<&CostTrackerStreamConfig>,
-        track_upload_sessions: bool,
-    ) -> Arc<dyn ChangeStream> {
+    pub fn build(&self, config: Option<&CostTrackerStreamConfig>) -> Arc<dyn ChangeStream> {
         match (config, self.producer.clone()) {
-            (Some(config), Some(producer)) => {
-                let mut stream = CostTrackerStream::new(producer, config);
-                stream.track_upload_sessions = track_upload_sessions;
-                Arc::new(stream)
-            }
+            (Some(config), Some(producer)) => Arc::new(CostTrackerStream::new(producer, config)),
             (None, None) => Arc::new(NoopStream),
             (c, p) => {
                 objectstore_log::warn!(
@@ -79,11 +66,7 @@ impl ChangeStreamFactory {
 
     /// Reporting is not compiled in, so every backend reports nothing.
     #[cfg(not(feature = "storage-cogs"))]
-    pub(crate) fn build_with_upload_sessions(
-        &self,
-        _config: Option<&CostTrackerStreamConfig>,
-        _track_upload_sessions: bool,
-    ) -> Arc<dyn ChangeStream> {
+    pub fn build(&self, _config: Option<&CostTrackerStreamConfig>) -> Arc<dyn ChangeStream> {
         Arc::new(NoopStream)
     }
 }
