@@ -4,18 +4,6 @@
 //! the service describes where those records go with a [`CostTrackerConfig`], shared by
 //! every backend. [`ChangeStreamFactory`] pairs the two into a [`ChangeStream`].
 //!
-//! # Resumable uploads
-//!
-//! Upload backends report a session write after creation with the advertised upload length
-//! plus backend metadata bytes, and an accounting expiration set by
-//! [`UPLOAD_SESSION_TTL`](crate::backend::common::UPLOAD_SESSION_TTL),
-//! independent of object expiration. Partial chunks and incomplete offset queries emit nothing. Successful publication
-//! reports the object's actual stored size and expiration, followed by a session delete. Completion
-//! discovered through an offset query follows the same order. Successful cancellation also
-//! reports a session delete. Session writes and deletes use `WRITE_SESSION` and `DELETE_SESSION`
-//! on the inventory wire, allowing consumers to exclude their estimates from cost attribution.
-//! The accounting deadline does not change backend cleanup behavior.
-//!
 //! Behind the `storage-cogs` feature. Without it every backend gets a [`NoopStream`] and
 //! the transport is left out of the binary.
 

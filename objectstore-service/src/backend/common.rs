@@ -25,7 +25,7 @@ use crate::stream::{ClientStream, PayloadStream};
 /// This intentionally has a "sentry" prefix so that it can easily be traced back to us.
 pub const USER_AGENT: &str = concat!("sentry-objectstore/", env!("CARGO_PKG_VERSION"));
 
-/// Accounting lifetime for an upload's estimated stored size, independent of backend cleanup.
+/// Lifetime for a resumable upload session.
 pub(crate) const UPLOAD_SESSION_TTL: Duration = Duration::from_hours(7 * 24);
 
 /// Backend response for put operations.

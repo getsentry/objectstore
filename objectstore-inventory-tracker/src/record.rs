@@ -1,7 +1,7 @@
 //! The wire format emitted onto the inventory topic.
 //!
 //! These types mirror the `shared-resources-inventory` schema registered in
-//! [sentry-kafka-schemas].  The schema sets `additionalProperties: false`, so adding a
+//! [sentry-kafka-schemas]. The schema sets `additionalProperties: false`, so adding a
 //! field here without a corresponding schema version bump produces messages that
 //! consumers reject.
 //!
