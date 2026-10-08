@@ -600,6 +600,28 @@ pub enum TieredUpdate {
     SetExpiry(ExpiryUpdate),
 }
 
+/// Resolves an optional byte range against a payload buffer, returning the
+/// applicable content range and the (potentially narrowed) payload.
+///
+/// When `range` is `None`, returns the full payload unchanged. Uses
+/// `Bytes::slice` to avoid copying data.
+pub(super) fn apply_range(
+    payload: Bytes,
+    range: Option<ByteRange>,
+) -> Result<(Option<ContentRange>, Bytes)> {
+    let Some(byte_range) = range else {
+        return Ok((None, payload));
+    };
+
+    let total = payload.len() as u64;
+    let content_range = byte_range
+        .resolve(total)
+        .ok_or(ErrorKind::RangeNotSatisfiable { total })?;
+
+    let sliced = payload.slice(content_range.start as usize..content_range.end as usize + 1);
+    Ok((Some(content_range), sliced))
+}
+
 /// Creates a reqwest client with required defaults.
 ///
 /// Automatic decompression is disabled because backends store pre-compressed

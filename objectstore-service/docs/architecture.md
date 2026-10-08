@@ -70,8 +70,9 @@ single storage system optimally handles both small, frequently-accessed objects
 and large, infrequently-accessed ones:
 
 - **High-volume backend** (typically
-  [BigTable](backend::StorageConfig::BigTable)): optimized for low-latency reads
-  and writes of small objects. Objects in practice are small (metadata blobs,
+  [BigTable](backend::StorageConfig::BigTable), or
+  [Cassandra/ScyllaDB](backend::StorageConfig::Cql)): optimized for low-latency
+  reads and writes of small objects. Objects in practice are small (metadata blobs,
   event attachments, etc.), so this path handles the majority of traffic by
   volume.
 - **Long-term backend** (typically [GCS](backend::StorageConfig::Gcs)):
@@ -237,8 +238,8 @@ metadata, without joining across stores.
 
 Metadata is small and always fully loaded into memory, while the payload
 streams. Backends can serve metadata independently of the payload (e.g. BigTable
-uses separate column families; GCS stores metadata as object headers), which
-enables efficient metadata-only reads.
+and CQL databases store it in separate columns; GCS stores metadata as object
+headers), which enables efficient metadata-only reads.
 
 Individual metadata keys are **mutable** — they can be updated without
 rewriting the payload. Payloads, however, can only be replaced in their
@@ -263,9 +264,9 @@ is streamed end-to-end.
 
 Expiration policies are part of the built-in object metadata and can carry
 special semantics. Backends use their underlying system's native expiry
-capabilities. For example, BigTable uses garbage collection policies, and GCS
-uses object lifecycle management. The service does not perform active garbage
-collection.
+capabilities. For example, BigTable uses garbage collection policies, CQL
+databases use row TTLs, and GCS uses object lifecycle management. The service
+does not perform active garbage collection.
 
 Backend reads are side-effect-free. After a successful GET or HEAD of a TTI
 object, the service may schedule a best-effort background deadline extension.

@@ -42,7 +42,7 @@ use bigtable_rs::google::bigtable::v2::{self, mutation};
 use bytes::Bytes;
 use futures_util::TryStreamExt;
 use objectstore_types::metadata::Metadata;
-use objectstore_types::range::{ByteRange, ContentRange};
+use objectstore_types::range::ByteRange;
 use objectstore_types::time::Timestamp;
 use serde::{Deserialize, Serialize};
 use tonic::Code;
@@ -1225,7 +1225,7 @@ impl HighVolumeBackend for BigTableBackend {
                     metadata.size = Some(payload.len());
                 }
 
-                let (content_range, payload) = apply_range(payload, range)?;
+                let (content_range, payload) = common::apply_range(payload, range)?;
                 TieredGet::Object(metadata, content_range, crate::stream::single(payload))
             }
         })
@@ -1570,25 +1570,6 @@ fn is_retryable(error: &BigTableError) -> bool {
         },
         _ => false,
     }
-}
-
-/// Resolves an optional byte range against a payload buffer, returning the
-/// applicable content range and the (potentially narrowed) payload.
-///
-/// When `range` is `None`, returns the full payload unchanged. Uses
-/// `Bytes::slice` to avoid copying data.
-fn apply_range(payload: Bytes, range: Option<ByteRange>) -> Result<(Option<ContentRange>, Bytes)> {
-    let Some(byte_range) = range else {
-        return Ok((None, payload));
-    };
-
-    let total = payload.len() as u64;
-    let content_range = byte_range
-        .resolve(total)
-        .ok_or(ErrorKind::RangeNotSatisfiable { total })?;
-
-    let sliced = payload.slice(content_range.start as usize..content_range.end as usize + 1);
-    Ok((Some(content_range), sliced))
 }
 
 #[cfg(test)]
