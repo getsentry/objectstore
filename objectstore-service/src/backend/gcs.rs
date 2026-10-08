@@ -1156,7 +1156,9 @@ impl Backend for GcsBackend {
     ) -> Result<Option<BackendToken>> {
         objectstore_log::debug!("Creating resumable upload session on GCS backend");
         let url = self.upload_url(id, "resumable")?;
-        let metadata_json = serde_json::to_vec(&GcsObject::from_metadata(metadata)).context(
+        let gcs_metadata = GcsObject::from_metadata(metadata);
+        let metadata_size = gcs_metadata.metadata_size();
+        let metadata_json = serde_json::to_vec(&gcs_metadata).context(
             ErrorKind::Internal,
             "serializing GCS resumable upload metadata",
         )?;
@@ -1218,7 +1220,7 @@ impl Backend for GcsBackend {
                 object_id: id,
                 session_id: &token,
             },
-            upload_length.get(),
+            upload_length.get().saturating_add(metadata_size),
             Some(Timestamp::now() + UPLOAD_SESSION_TTL),
         );
         Ok(Some(token))
@@ -3257,6 +3259,8 @@ mod tests {
         let payload = b"resumable payload".to_vec();
         let metadata = Metadata {
             time_expires: Some(Timestamp::now() + Duration::from_secs(3600)),
+            filename: Some("upload.txt".into()),
+            custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
             ..Default::default()
         };
         let before = Timestamp::now();
@@ -3266,7 +3270,10 @@ mod tests {
 
         let created = producer.records();
         assert_eq!(created.len(), 1);
-        assert_eq!(created[0].size, Some(payload.len() as u64));
+        assert_eq!(
+            created[0].size,
+            Some(payload.len() as u64 + GcsObject::from_metadata(&metadata).metadata_size())
+        );
         let expiration = created[0].expiration_time.unwrap() as u64;
         assert!(
             ((before + UPLOAD_SESSION_TTL).as_micros()
@@ -3296,6 +3303,7 @@ mod tests {
         );
         assert_eq!(records[0].record_id, records[2].record_id);
         assert_ne!(records[0].record_id, records[1].record_id);
+        assert_eq!(records[0].size, records[1].size);
         assert_eq!(
             records[1].size,
             Some(payload.len() as u64 + GcsObject::from_metadata(&metadata).metadata_size())

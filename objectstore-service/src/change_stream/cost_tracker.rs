@@ -14,20 +14,8 @@ use objectstore_types::time::Timestamp;
 use crate::id::ObjectId;
 
 /// Reports through an [`InventoryTracker`], which hashes each target identity both to
-/// anonymize it and to decide whether it is sampled. Session identities include the object
-/// path and session ID, keeping their records and sampling separate from published objects.
+/// anonymize it and to decide whether it is sampled.
 /// See [`objectstore_inventory_tracker`] for the record format.
-///
-/// Object identities remain their storage paths. Session identities are JSON tuples of
-/// `("upload_session", object_storage_path, session_id)`. Every operation on a session
-/// uses the same identity. Sampling decisions are consistent while the backend
-/// [`sample_rate`](CostTrackerStreamConfig::sample_rate) is unchanged; configuration changes
-/// can change the decision between a session write and delete. Object and session sampling
-/// decisions may differ. Neither raw paths nor session tokens are emitted.
-///
-/// Sessions emit `WRITE_SESSION` and `DELETE_SESSION`. High-volume upload markers retain
-/// their existing identities but emit ordinary `WRITE` and `DELETE`, since their stored
-/// bytes contribute to cost attribution.
 ///
 /// Logs, counts, and swallows errors returned by the [`InventoryTracker`].
 pub struct CostTrackerStream<P: Producer> {

@@ -1,8 +1,9 @@
 //! The wire format emitted onto the inventory topic.
 //!
 //! These types mirror the `shared-resources-inventory` schema registered in
-//! [sentry-kafka-schemas]. New fields or operation types require a coordinated schema
-//! update and rollout to validating consumers before producers emit them.
+//! [sentry-kafka-schemas].  The schema sets `additionalProperties: false`, so adding a
+//! field here without a corresponding schema version bump produces messages that
+//! consumers reject.
 //!
 //! [sentry-kafka-schemas]: https://github.com/getsentry/sentry-kafka-schemas
 

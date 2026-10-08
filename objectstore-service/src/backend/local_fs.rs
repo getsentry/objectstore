@@ -325,14 +325,14 @@ impl Backend for LocalFsBackend {
             ErrorKind::BackendFailure,
             "creating local-fs object directory",
         )?;
-        UploadFile::create(&path, metadata).await?;
+        let metadata_size = UploadFile::create(&path, metadata).await?;
         let token = upload_id.to_string();
         self.change_stream.write(
             ChangeTarget::UploadSession {
                 object_id: id,
                 session_id: &token,
             },
-            upload_length.get(),
+            upload_length.get().saturating_add(metadata_size),
             Some(Timestamp::now() + UPLOAD_SESSION_TTL),
         );
         Ok(Some(token))
@@ -835,7 +835,7 @@ struct UploadFile {
 }
 
 impl UploadFile {
-    async fn create(path: &Path, metadata: &Metadata) -> Result<()> {
+    async fn create(path: &Path, metadata: &Metadata) -> Result<u64> {
         let mut options = OpenOptions::from(file_options());
         options.create_new(true).read(true).write(true);
 
@@ -843,11 +843,12 @@ impl UploadFile {
             ErrorKind::BackendFailure,
             "creating local-fs resumable upload",
         )?;
-        write_metadata_preamble(&mut file, metadata).await?;
+        let metadata_size = write_metadata_preamble(&mut file, metadata).await?;
         file.sync_data().await.context(
             ErrorKind::BackendFailure,
             "syncing local-fs resumable upload",
-        )
+        )?;
+        Ok(metadata_size)
     }
 
     async fn open(path: &Path) -> Result<Self> {
@@ -2310,7 +2311,10 @@ mod tests {
 
         let created = producer.records();
         assert_eq!(created.len(), 1);
-        assert_eq!(created[0].size, Some(payload.len() as u64));
+        let upload_path = backend.upload_path(Uuid::parse_str(&token.backend_token).unwrap());
+        let metadata_size = tokio::fs::metadata(upload_path).await.unwrap().len();
+        assert!(metadata_size > 0);
+        assert_eq!(created[0].size, Some(payload.len() as u64 + metadata_size));
         let expiration = created[0].expiration_time.unwrap() as u64;
         assert!(
             ((before + UPLOAD_SESSION_TTL).as_micros()
@@ -2350,6 +2354,7 @@ mod tests {
         assert_eq!(records[0].record_id, records[2].record_id);
         assert_ne!(records[0].record_id, records[1].record_id);
         assert_eq!(records[1].size, Some(file.len() as u64));
+        assert_eq!(records[0].size, records[1].size);
         assert_eq!(
             records[1].expiration_time,
             metadata.time_expires.map(|t| t.as_micros() as i64)

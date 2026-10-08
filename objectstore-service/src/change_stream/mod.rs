@@ -6,9 +6,9 @@
 //!
 //! # Resumable uploads
 //!
-//! Upload backends report a session write after creation with exactly the advertised upload
-//! length and an accounting expiration set by `UPLOAD_SESSION_TTL`, independent of object
-//! expiration. Partial chunks and incomplete offset queries emit nothing. Successful publication
+//! Upload backends report a session write after creation with the advertised upload length
+//! plus backend metadata bytes, and an accounting expiration set by `UPLOAD_SESSION_TTL`,
+//! independent of object expiration. Partial chunks and incomplete offset queries emit nothing. Successful publication
 //! reports the object's actual stored size and expiration, followed by a session delete. Completion
 //! discovered through an offset query follows the same order. Successful cancellation also
 //! reports a session delete. Session writes and deletes use `WRITE_SESSION` and `DELETE_SESSION`
@@ -52,7 +52,7 @@ pub(crate) use factory::dummy_factory;
 /// How long a backend waits for reported records to be handed off during shutdown.
 pub const FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Accounting lifetime for an upload's advertised size, independent of backend cleanup.
+/// Accounting lifetime for an upload's estimated stored size, independent of backend cleanup.
 pub(crate) const UPLOAD_SESSION_TTL: Duration = Duration::from_hours(7 * 24);
 
 /// The object or upload session whose storage changed.
@@ -145,10 +145,6 @@ fn default_sample_rate() -> f64 {
 #[async_trait::async_trait]
 pub trait ChangeStream: fmt::Debug + Send + Sync + 'static {
     /// Reports that `target` now occupies `size` bytes. Used for new writes and overwrites.
-    ///
-    /// Upload sessions optimistically report the advertised upload length with an accounting
-    /// expiration set by `UPLOAD_SESSION_TTL`. Markers report their stored size and actual
-    /// expiration instead.
     fn write(&self, target: ChangeTarget<'_>, size: u64, expires_at: Option<Timestamp>);
 
     /// Reports that `target`'s expiration moved, with its stored size unchanged.

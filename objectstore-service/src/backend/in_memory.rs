@@ -277,7 +277,9 @@ impl super::common::Backend for InMemoryBackend {
                 object_id: id,
                 session_id: &token,
             },
-            upload_length.get(),
+            upload_length
+                .get()
+                .saturating_add(json_len(metadata) as u64),
             Some(Timestamp::now() + UPLOAD_SESSION_TTL),
         );
         Ok(Some(token))
@@ -1144,7 +1146,10 @@ mod tests {
         let token = create_session(&backend, &id, 2).await;
         let created = producer.records();
         assert_eq!(created.len(), 1);
-        assert_eq!(created[0].size, Some(2));
+        assert_eq!(
+            created[0].size,
+            Some(2 + json_len(&Metadata::default()) as u64)
+        );
         let expiration = created[0].expiration_time.unwrap() as u64;
         assert!(
             ((before + UPLOAD_SESSION_TTL).as_micros()
@@ -1172,6 +1177,7 @@ mod tests {
         );
         assert_eq!(records[0].record_id, records[2].record_id);
         assert_ne!(records[0].record_id, records[1].record_id);
+        assert_eq!(records[0].size, records[1].size);
         assert_eq!(
             records[1].size,
             Some((json_len(&Metadata::default()) + 2) as u64)
