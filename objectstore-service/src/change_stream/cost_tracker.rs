@@ -79,9 +79,7 @@ impl<'a> ChangeTarget<'a> {
             } => (object_id, session_id),
         };
         // Keep session identities separate from objects and concurrent uploads to the same object.
-        let key =
-            serde_json::to_string(&("upload_session", object_id.as_storage_path(), session_id))
-                .expect("session identity is serializable");
+        let key = format!("session:{}:{session_id}", object_id.as_storage_path());
         (object_id, key)
     }
 }
