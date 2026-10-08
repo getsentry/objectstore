@@ -518,7 +518,8 @@ impl GcsBackend {
             bucket,
             cogs,
         } = config;
-        let change_stream = streams.build(cogs.as_ref());
+        // Incomplete GCS uploads do not contribute to storage COGS.
+        let change_stream = streams.build_with_upload_sessions(cogs.as_ref(), false);
 
         let token_provider = if endpoint.is_none() {
             Some(PrefetchingTokenProvider::gcp_auth(TOKEN_SCOPES).await?)
@@ -3259,22 +3260,13 @@ mod tests {
             time_expires: Some(Timestamp::now() + Duration::from_secs(3600)),
             ..Default::default()
         };
-        let before = Timestamp::now();
         let token = backend
             .create_upload_session(&id, &metadata, nonzero(payload.len() as u64))
             .await?;
 
-        let created = producer.records();
-        assert_eq!(created.len(), 1);
-        assert_eq!(created[0].size, Some(payload.len() as u64));
-        let expiration = created[0].expiration_time.unwrap() as u64;
-        assert!(
-            ((before + UPLOAD_SESSION_TTL).as_micros()
-                ..=(Timestamp::now() + UPLOAD_SESSION_TTL).as_micros())
-                .contains(&expiration)
-        );
+        assert!(producer.records().is_empty());
         backend.upload_offset(&token).await?;
-        assert_eq!(producer.records().len(), 1);
+        assert!(producer.records().is_empty());
 
         assert_eq!(
             backend
@@ -3289,19 +3281,14 @@ mod tests {
         );
 
         let records = producer.records();
-        assert_eq!(records.len(), 3);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].op_type, OpType::Write);
         assert_eq!(
-            records.iter().map(|r| r.op_type).collect::<Vec<_>>(),
-            [OpType::Write, OpType::Write, OpType::Delete]
-        );
-        assert_eq!(records[0].record_id, records[2].record_id);
-        assert_ne!(records[0].record_id, records[1].record_id);
-        assert_eq!(
-            records[1].size,
+            records[0].size,
             Some(payload.len() as u64 + GcsObject::from_metadata(&metadata).metadata_size())
         );
         assert_eq!(
-            records[1].expiration_time,
+            records[0].expiration_time,
             metadata.time_expires.map(|t| t.as_micros() as i64)
         );
         producer.clear();
@@ -3310,11 +3297,7 @@ mod tests {
             .await?;
         backend.cancel_upload(&canceled).await?;
         backend.cancel_upload(&canceled).await?;
-        let records = producer.records();
-        assert_eq!(records.len(), 3);
-        assert_eq!(records[1].op_type, OpType::Delete);
-        assert_eq!(records[2].op_type, OpType::Delete);
-        assert!(records.iter().all(|r| r.record_id == records[0].record_id));
+        assert!(producer.records().is_empty());
         Ok(())
     }
 
@@ -3352,15 +3335,10 @@ mod tests {
         );
 
         let records = producer.records();
-        assert_eq!(records.len(), 3);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].op_type, OpType::Write);
         assert_eq!(
-            records.iter().map(|r| r.op_type).collect::<Vec<_>>(),
-            [OpType::Write, OpType::Write, OpType::Delete]
-        );
-        assert_eq!(records[0].record_id, records[2].record_id);
-        assert_ne!(records[0].record_id, records[1].record_id);
-        assert_eq!(
-            records[1].size,
+            records[0].size,
             Some(payload.len() as u64 + GcsObject::from_metadata(&metadata).metadata_size())
         );
         Ok(())

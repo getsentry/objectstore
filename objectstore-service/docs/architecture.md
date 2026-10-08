@@ -166,7 +166,9 @@ row for the actual object and its size in long-term backend, and a separate row
 for the tombstone and the tombstone's size in the high-volume backend.
 While a resumable upload is in progress, separate session rows account for its
 advertised size in the upload backend and its marker's stored size in high-volume
-storage. See the [change stream module](change_stream) for their lifetimes.
+storage. GCS excludes incomplete uploads in its in-process cost-tracking adapter,
+since they do not incur storage charges; the generic stream still reports their
+lifecycle. See the [change stream module](change_stream) for their lifetimes.
 
 Because the change stream does not observe automatic garbage collection, expired
 records must be filtered out when querying the inventory table.
