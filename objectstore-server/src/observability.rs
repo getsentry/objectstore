@@ -11,6 +11,11 @@ use crate::config::Config;
 /// The full release name including the objectstore version and SHA.
 const RELEASE: &str = std::env!("OBJECTSTORE_RELEASE");
 
+/// Capacity of the Sentry transport's envelope queue.
+///
+/// Raised from the SDK default of 30, which dropped events, spans, and logs under load.
+const TRANSPORT_CHANNEL_CAPACITY: usize = 100;
+
 /// Initializes the Sentry error-reporting client, if a DSN is configured.
 ///
 /// Returns `None` when `config.sentry.dsn` is not set. The returned
@@ -18,22 +23,13 @@ const RELEASE: &str = std::env!("OBJECTSTORE_RELEASE");
 /// dropping it flushes the event queue and shuts down the Sentry client.
 pub fn init_sentry(config: &Config) -> Option<sentry::ClientInitGuard> {
     let config = &config.sentry;
-    let dsn = config.dsn.as_ref()?;
-
-    let dsn = match dsn.expose_secret().parse() {
-        Ok(dsn) => Some(dsn),
-        Err(error) => {
-            // Sentry is initialized before the tracing subscriber, so a `warn!` here would be
-            // dropped. Write to stderr instead to make the misconfiguration visible.
-            eprintln!("WARN: invalid Sentry DSN, error reporting is disabled: {error}");
-            None
-        }
-    };
+    let dsn = config.dsn.as_ref()?.expose_secret().as_str();
 
     let traces_sample_rate = config.traces_sample_rate;
     let inherit_sampling_decision = config.inherit_sampling_decision;
     let mut options = sentry::ClientOptions::new()
         .release(RELEASE)
+        .sample_rate(config.sample_rate)
         .traces_sampler(move |ctx| {
             if let Some(sampled) = ctx.sampled()
                 && inherit_sampling_decision
@@ -44,14 +40,23 @@ pub fn init_sentry(config: &Config) -> Option<sentry::ClientInitGuard> {
             }
         })
         .attach_stacktrace(config.attach_stacktrace)
-        .debug(config.debug);
-    // Assigned directly rather than via the builder: the `dsn` setter only accepts an unparsed
-    // string, `environment`/`server_name` setters don't accept `Option`, and the `sample_rate`
-    // setter panics on out-of-range values while the struct field never did.
-    options.dsn = dsn;
-    options.environment = config.environment.clone();
-    options.server_name = config.server_name.clone();
-    options.event_sampling_strategy = sentry::EventSamplingStrategy::FixedRate(config.sample_rate);
+        .debug(config.debug)
+        .transport_channel_capacity(TRANSPORT_CHANNEL_CAPACITY);
+
+    match dsn.parse::<sentry::types::Dsn>() {
+        Ok(_) => options = options.dsn(dsn),
+        Err(error) => {
+            // Sentry is initialized before the tracing subscriber, so a `warn!` here would be
+            // dropped. Write to stderr instead to make the misconfiguration visible.
+            eprintln!("WARN: invalid Sentry DSN, error reporting is disabled: {error}");
+        }
+    }
+    if let Some(environment) = &config.environment {
+        options = options.environment(environment.clone());
+    }
+    if let Some(server_name) = &config.server_name {
+        options = options.server_name(server_name.clone());
+    }
 
     let guard = sentry::init(options);
 

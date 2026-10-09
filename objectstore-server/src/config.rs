@@ -222,7 +222,8 @@ pub struct Sentry {
     /// Error event sampling rate.
     ///
     /// Controls what percentage of error events are sent to Sentry. A value of `1.0` sends all
-    /// errors, while `0.5` sends 50% of errors, and `0.0` sends no errors.
+    /// errors, while `0.5` sends 50% of errors, and `0.0` sends no errors. Must be between `0.0`
+    /// and `1.0`, inclusive; other values are rejected when loading the configuration.
     ///
     /// # Default
     ///
@@ -231,12 +232,15 @@ pub struct Sentry {
     /// # Environment Variable
     ///
     /// `OS__SENTRY__SAMPLE_RATE`
+    #[serde(deserialize_with = "deserialize_sample_rate")]
     pub sample_rate: f32,
 
     /// Performance trace sampling rate.
     ///
     /// Controls what percentage of transactions (traces) are sent to Sentry for performance
-    /// monitoring. A value of `1.0` sends all traces, while `0.01` sends 1% of traces.
+    /// monitoring. A value of `1.0` sends all traces, while `0.01` sends 1% of traces. Must be
+    /// between `0.0` and `1.0`, inclusive; other values are rejected when loading the
+    /// configuration.
     ///
     /// **Important**: Performance traces can generate significant data volume in high-traffic
     /// systems. Start with a low rate (0.01-0.1) and adjust based on traffic and Sentry quota.
@@ -248,6 +252,7 @@ pub struct Sentry {
     /// # Environment Variable
     ///
     /// `OS__SENTRY__TRACES_SAMPLE_RATE`
+    #[serde(deserialize_with = "deserialize_sample_rate")]
     pub traces_sample_rate: f32,
 
     /// Whether to inherit sampling decisions from incoming traces.
@@ -321,6 +326,20 @@ pub struct Sentry {
     ///     bar: bar
     /// ```
     pub tags: BTreeMap<String, String>,
+}
+
+/// Deserializes a sample rate, rejecting values outside of `0.0..=1.0`.
+fn deserialize_sample_rate<'de, D>(deserializer: D) -> std::result::Result<f32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let rate = f32::deserialize(deserializer)?;
+    if !(0.0..=1.0).contains(&rate) {
+        return Err(serde::de::Error::custom(format!(
+            "sample rate must be between 0.0 and 1.0, got {rate}"
+        )));
+    }
+    Ok(rate)
 }
 
 impl Sentry {
@@ -986,6 +1005,22 @@ mod tests {
 
             Ok(())
         });
+    }
+
+    #[test]
+    fn sentry_rejects_out_of_range_sample_rates() {
+        for (var, value) in [
+            ("OS__SENTRY__SAMPLE_RATE", "1.5"),
+            ("OS__SENTRY__SAMPLE_RATE", "-0.1"),
+            ("OS__SENTRY__TRACES_SAMPLE_RATE", "1.01"),
+            ("OS__SENTRY__TRACES_SAMPLE_RATE", "NaN"),
+        ] {
+            figment::Jail::expect_with(|jail| {
+                jail.set_env(var, value);
+                assert!(Config::load(None).is_err(), "accepted {var}={value}");
+                Ok(())
+            });
+        }
     }
 
     #[test]
