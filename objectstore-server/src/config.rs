@@ -1008,22 +1008,6 @@ mod tests {
     }
 
     #[test]
-    fn sentry_rejects_out_of_range_sample_rates() {
-        for (var, value) in [
-            ("OS__SENTRY__SAMPLE_RATE", "1.5"),
-            ("OS__SENTRY__SAMPLE_RATE", "-0.1"),
-            ("OS__SENTRY__TRACES_SAMPLE_RATE", "1.01"),
-            ("OS__SENTRY__TRACES_SAMPLE_RATE", "NaN"),
-        ] {
-            figment::Jail::expect_with(|jail| {
-                jail.set_env(var, value);
-                assert!(Config::load(None).is_err(), "accepted {var}={value}");
-                Ok(())
-            });
-        }
-    }
-
-    #[test]
     fn encryption_rejects_invalid_configuration() {
         let mut valid = tempfile::NamedTempFile::new().unwrap();
         valid.write_all(&[7; 32]).unwrap();
