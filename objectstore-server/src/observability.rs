@@ -30,30 +30,30 @@ pub fn init_sentry(config: &Config) -> Option<sentry::ClientInitGuard> {
         }
     };
 
-    let guard = sentry::init(sentry::ClientOptions {
-        dsn,
-        release: Some(RELEASE.into()),
-        environment: config.environment.clone(),
-        server_name: config.server_name.clone(),
-        sample_rate: config.sample_rate,
-        traces_sampler: {
-            let traces_sample_rate = config.traces_sample_rate;
-            let inherit_sampling_decision = config.inherit_sampling_decision;
-            Some(std::sync::Arc::new(move |ctx| {
-                if let Some(sampled) = ctx.sampled()
-                    && inherit_sampling_decision
-                {
-                    f32::from(sampled)
-                } else {
-                    traces_sample_rate
-                }
-            }))
-        },
-        enable_logs: true,
-        attach_stacktrace: config.attach_stacktrace,
-        debug: config.debug,
-        ..Default::default()
-    });
+    let traces_sample_rate = config.traces_sample_rate;
+    let inherit_sampling_decision = config.inherit_sampling_decision;
+    let mut options = sentry::ClientOptions::new()
+        .release(RELEASE)
+        .traces_sampler(move |ctx| {
+            if let Some(sampled) = ctx.sampled()
+                && inherit_sampling_decision
+            {
+                f32::from(sampled)
+            } else {
+                traces_sample_rate
+            }
+        })
+        .attach_stacktrace(config.attach_stacktrace)
+        .debug(config.debug);
+    // Assigned directly rather than via the builder: the `dsn` setter only accepts an unparsed
+    // string, `environment`/`server_name` setters don't accept `Option`, and the `sample_rate`
+    // setter panics on out-of-range values while the struct field never did.
+    options.dsn = dsn;
+    options.environment = config.environment.clone();
+    options.server_name = config.server_name.clone();
+    options.event_sampling_strategy = sentry::EventSamplingStrategy::FixedRate(config.sample_rate);
+
+    let guard = sentry::init(options);
 
     sentry::configure_scope(|scope| {
         for (k, v) in &config.tags {
