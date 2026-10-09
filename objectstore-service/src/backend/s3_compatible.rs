@@ -398,7 +398,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             .await;
 
         self.change_stream.write(
-            id,
+            id.into(),
             metadata_size + payload_size.load(Ordering::Relaxed),
             metadata.time_expires,
         );
@@ -481,7 +481,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             .update_metadata(id, &metadata, expire_at, &etag)
             .await?;
         if matches!(outcome, SetExpiryResponse::Satisfied(_)) {
-            self.change_stream.update(id, Some(expire_at));
+            self.change_stream.update(id.into(), Some(expire_at));
         }
 
         Ok(outcome)
@@ -516,7 +516,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
 
         // If the object didn't exist in the first place, this emits a spurious message
         // due to S3 returning 204 to DELETEs whether the object existed or not.
-        self.change_stream.delete(id);
+        self.change_stream.delete(id.into());
 
         Ok(())
     }

@@ -237,6 +237,15 @@ pub struct AsStoragePath<'a> {
     namespace: &'static str,
 }
 
+impl serde::Serialize for AsStoragePath<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.collect_str(self)
+    }
+}
+
 impl fmt::Display for AsStoragePath<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}/", self.inner.context.usecase)?;
@@ -266,6 +275,10 @@ mod tests {
 
         let path = object_id.as_storage_path().to_string();
         assert_eq!(path, "testing/org.12345/project.1337/objects/foo/bar");
+        assert_eq!(
+            serde_json::to_string(&object_id.as_storage_path()).unwrap(),
+            serde_json::to_string(&path).unwrap(),
+        );
     }
 
     #[test]

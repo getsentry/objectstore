@@ -103,8 +103,8 @@
 //! written to the long-term backend. A resumable upload remains inaccessible until
 //! the long-term backend completes and a high-volume tombstone is committed.
 //!
-//! Each upload has a separate HV marker with a fixed five-day lifetime that serves
-//! as the source of truth for whether the upload logically exists.
+//! Each upload has a separate HV marker with a lifetime set by `RESUMABLE_UPLOAD_TTL`.
+//! It serves as the source of truth for whether the upload logically exists.
 //! This marker is consumed upon cancellation or the first submission of a final chunk, making
 //! finalization one-shot.
 
@@ -1256,6 +1256,7 @@ mod tests {
     use crate::backend::gcs::{GcsBackend, GcsConfig};
     use crate::backend::in_memory::InMemoryBackend;
     use crate::backend::testing::{Hooks, TestBackend};
+    #[cfg(not(feature = "storage-cogs"))]
     use crate::change_stream::ChangeStreamFactory;
     use crate::error::Error;
     use crate::id::ObjectContext;
@@ -1396,11 +1397,20 @@ mod tests {
 
     #[tokio::test]
     async fn resumable_bigtable_and_gcs() -> anyhow::Result<()> {
+        #[cfg(feature = "storage-cogs")]
+        let (streams, producer) = crate::change_stream::dummy_factory();
+        #[cfg(not(feature = "storage-cogs"))]
         let streams = ChangeStreamFactory::default();
         let lt = GcsBackend::new(
             GcsConfig {
                 endpoint: Some("http://localhost:8087".into()),
                 bucket: "test-bucket".into(),
+                #[cfg(feature = "storage-cogs")]
+                cogs: Some(crate::change_stream::CostTrackerStreamConfig {
+                    shared_resource_id: "gcs_objectstore".into(),
+                    sample_rate: 1.0,
+                }),
+                #[cfg(not(feature = "storage-cogs"))]
                 cogs: None,
             },
             &streams,
@@ -1414,6 +1424,12 @@ mod tests {
                 table_name: "objectstore".into(),
                 connections: None,
                 rpc_timeout: Duration::from_secs(2),
+                #[cfg(feature = "storage-cogs")]
+                cogs: Some(crate::change_stream::CostTrackerStreamConfig {
+                    shared_resource_id: "bigtable_objectstore".into(),
+                    sample_rate: 1.0,
+                }),
+                #[cfg(not(feature = "storage-cogs"))]
                 cogs: None,
             },
             &streams,
@@ -1422,6 +1438,8 @@ mod tests {
         let storage = TieredStorage::new(Box::new(hv), Box::new(lt), Box::new(NoopChangeLog));
         let id = make_id(&format!("tiered-resumable-{}", uuid::Uuid::now_v7()));
         let payload = vec![b'a'; BACKEND_SIZE_THRESHOLD + 1];
+        #[cfg(feature = "storage-cogs")]
+        let before = Timestamp::now();
         let token =
             resumable_token(&storage, &id, &Metadata::default(), payload.len() as u64).await;
 
@@ -1438,6 +1456,22 @@ mod tests {
         );
 
         let revision = upload_revision(&token);
+        #[cfg(feature = "storage-cogs")]
+        {
+            let records = producer.records();
+            assert_eq!(records.len(), 2);
+            assert_eq!(records[0].size, Some(payload.len() as u64));
+            assert_eq!(
+                records[1].size,
+                Some(revision.as_upload_path().to_string().len() as u64 + 1)
+            );
+            let expiry = records[1].expiration_time.unwrap() as u64;
+            assert!(
+                ((before + RESUMABLE_UPLOAD_TTL).as_micros()
+                    ..=(Timestamp::now() + RESUMABLE_UPLOAD_TTL).as_micros())
+                    .contains(&expiry)
+            );
+        }
         assert!(
             storage
                 .inner
@@ -1478,6 +1512,13 @@ mod tests {
         );
         assert!(storage.get_metadata(&id, Timestamp::now()).await?.is_none());
 
+        #[cfg(feature = "storage-cogs")]
+        assert_eq!(
+            producer.records().len(),
+            2,
+            "chunks and queries do not report changes"
+        );
+
         // A completed upload creates a logical object.
         assert_eq!(
             storage
@@ -1506,6 +1547,47 @@ mod tests {
             .await?
             .unwrap();
         assert_eq!(stream::read_to_vec(body).await?, payload);
+        #[cfg(feature = "storage-cogs")]
+        {
+            use objectstore_inventory_tracker::OpType::{
+                Delete, DeleteSession, Write, WriteSession,
+            };
+            let records = producer.records();
+            assert_eq!(
+                records
+                    .iter()
+                    .map(|r| (r.shared_resource_id.as_str(), r.op_type))
+                    .collect::<Vec<_>>(),
+                [
+                    ("gcs_objectstore", WriteSession),
+                    ("bigtable_objectstore", Write),
+                    ("bigtable_objectstore", Delete),
+                    ("gcs_objectstore", Write),
+                    ("gcs_objectstore", DeleteSession),
+                    ("bigtable_objectstore", Write),
+                ]
+            );
+            assert_eq!(records[0].record_id, records[4].record_id);
+            assert_eq!(records[1].record_id, records[2].record_id);
+            assert_ne!(records[0].record_id, records[3].record_id);
+            assert_ne!(records[1].record_id, records[5].record_id);
+
+            producer.clear();
+            let canceled =
+                resumable_token(&storage, &id, &Metadata::default(), payload.len() as u64).await;
+            storage.cancel_upload(&canceled).await?;
+            assert_eq!(
+                storage.cancel_upload(&canceled).await.unwrap_err().kind(),
+                ErrorKind::UploadSessionGone
+            );
+            let records = producer.records();
+            assert_eq!(
+                records.iter().map(|r| r.op_type).collect::<Vec<_>>(),
+                [WriteSession, Write, Delete, DeleteSession]
+            );
+            assert_eq!(records[0].record_id, records[3].record_id);
+            assert_eq!(records[1].record_id, records[2].record_id);
+        }
         Ok(())
     }
 

@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use objectstore_types::time::Timestamp;
 
 use crate::id::ObjectId;
+use crate::resumable::Session;
 
 #[cfg(feature = "storage-cogs")]
 mod cost_tracker;
@@ -32,6 +33,38 @@ pub(crate) use factory::dummy_factory;
 
 /// How long a backend waits for reported records to be handed off during shutdown.
 pub const FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The object or upload session whose storage changed.
+///
+/// Session identities are separate from objects, including concurrent uploads to the same object.
+/// Upload backends use their opaque backend token as `session_id`.
+#[derive(Clone, Copy, Debug)]
+pub enum ChangeTarget<'a> {
+    /// An object stored by a backend.
+    Object(&'a ObjectId),
+    /// An in-progress upload, identified by its backend session token.
+    Session {
+        /// Object identity supplying the usecase and scopes.
+        object_id: &'a ObjectId,
+        /// Stable identity for this particular upload.
+        session_id: &'a str,
+    },
+}
+
+impl<'a> From<&'a ObjectId> for ChangeTarget<'a> {
+    fn from(id: &'a ObjectId) -> Self {
+        Self::Object(id)
+    }
+}
+
+impl<'a> From<&'a Session> for ChangeTarget<'a> {
+    fn from(session: &'a Session) -> Self {
+        Self::Session {
+            object_id: &session.object_id,
+            session_id: &session.backend_token,
+        }
+    }
+}
 
 /// Scope key holding the Sentry organization ID.
 #[cfg(feature = "storage-cogs")]
@@ -75,19 +108,19 @@ fn default_sample_rate() -> f64 {
     1.0
 }
 
-/// Publishes the changes a single backend makes to the objects it stores.
+/// Publishes the changes a single backend makes to its objects and upload sessions.
 ///
 /// See [module docs](self).
 #[async_trait::async_trait]
 pub trait ChangeStream: fmt::Debug + Send + Sync + 'static {
-    /// Reports that `id` now occupies `size` bytes. Used for new writes and overwrites.
-    fn write(&self, id: &ObjectId, size: u64, expires_at: Option<Timestamp>);
+    /// Reports that `target` now occupies `size` bytes. Used for new writes and overwrites.
+    fn write(&self, target: ChangeTarget<'_>, size: u64, expires_at: Option<Timestamp>);
 
-    /// Reports that `id`'s expiration moved, with its stored size unchanged.
-    fn update(&self, id: &ObjectId, expires_at: Option<Timestamp>);
+    /// Reports that `target`'s expiration moved, with its stored size unchanged.
+    fn update(&self, target: ChangeTarget<'_>, expires_at: Option<Timestamp>);
 
-    /// Reports that `id` was deleted explicitly. Does not account for automatic GC.
-    fn delete(&self, id: &ObjectId);
+    /// Reports that `target` was deleted explicitly. Does not account for automatic GC.
+    fn delete(&self, target: ChangeTarget<'_>);
 
     /// Blocks until reported records have been delivered, or `timeout` elapses.
     ///
@@ -113,11 +146,11 @@ pub struct NoopStream;
 
 #[async_trait::async_trait]
 impl ChangeStream for NoopStream {
-    fn write(&self, _id: &ObjectId, _size: u64, _expires_at: Option<Timestamp>) {}
+    fn write(&self, _target: ChangeTarget<'_>, _size: u64, _expires_at: Option<Timestamp>) {}
 
-    fn update(&self, _id: &ObjectId, _expires_at: Option<Timestamp>) {}
+    fn update(&self, _target: ChangeTarget<'_>, _expires_at: Option<Timestamp>) {}
 
-    fn delete(&self, _id: &ObjectId) {}
+    fn delete(&self, _target: ChangeTarget<'_>) {}
 
     async fn join(&self, _timeout: Duration) {}
 }

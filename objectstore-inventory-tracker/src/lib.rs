@@ -6,7 +6,10 @@
 //!   is meant to be, for example, a specific GCS bucket or Bigtable instance.
 //! - `record_id`: identifies each record. `InventoryTracker` populates this with a hash
 //!   of the identifier passed in by the caller.
-//! - `size`: the size of the record in bytes (including metadata).
+//! - `op_type`: `WRITE`, `UPDATE`, or `DELETE` for stored objects; `WRITE_SESSION` or
+//!   `DELETE_SESSION` for upload sessions.
+//! - `size`: stored bytes (including metadata). For sessions, this is optimistically the
+//!   final size that the object will have when the upload is completed.
 //! - `expiration_time`: a timestamp (unixtime microseconds) describing when the record is
 //!   meant to be deleted.
 //!

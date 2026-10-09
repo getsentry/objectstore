@@ -156,7 +156,9 @@ mod tests {
 
         assert!(reports(&stream));
 
-        stream.delete(&crate::id::ObjectId::from_storage_path("attachments/objects/abc").unwrap());
+        stream.delete(
+            (&crate::id::ObjectId::from_storage_path("attachments/objects/abc").unwrap()).into(),
+        );
 
         let records = producer.records();
         assert_eq!(records.len(), 1);
