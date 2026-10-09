@@ -17,6 +17,10 @@ local gocdtasks = import 'github.com/getsentry/gocd-jsonnet/libs/gocd-tasks.libs
         fetch_materials: true,
         jobs: {
           checks: {
+            environment_variables: {
+              GITHUB_APP_ID: '{{SECRET:[devinfra-github][app_id]}}',
+              GITHUB_APP_PRIVATE_KEY: '{{SECRET:[devinfra-github][private_key]}}',
+            },
             timeout: 1800,
             elastic_profile_id: 'objectstore',
             tasks: [
