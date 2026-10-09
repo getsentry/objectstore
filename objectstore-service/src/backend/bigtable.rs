@@ -999,6 +999,9 @@ impl Backend for BigTableBackend {
         _access_time: Timestamp,
     ) -> Result<PutResponse> {
         objectstore_log::debug!("Writing to Bigtable backend");
+        self.change_stream
+            .begin_write(id, metadata.time_expires)
+            .await?;
         let path = id.as_storage_path().to_string().into_bytes();
 
         let mut payload = ChunkedBytes::new(0);
@@ -1009,7 +1012,9 @@ impl Backend for BigTableBackend {
         let (_, size) = self
             .put_row(path, metadata.clone(), payload.into_bytes().into(), "put")
             .await?;
-        self.change_stream.write(id, size, metadata.time_expires);
+        self.change_stream
+            .commit_write(id, size, metadata.time_expires)
+            .await;
 
         Ok(())
     }
@@ -1063,7 +1068,7 @@ impl Backend for BigTableBackend {
 
         let path = id.as_storage_path().to_string().into_bytes();
         self.mutate(path, [delete_row_mutation()], "delete").await?;
-        self.change_stream.delete(id);
+        self.change_stream.commit_delete(id).await;
 
         Ok(())
     }
@@ -1136,6 +1141,9 @@ impl HighVolumeBackend for BigTableBackend {
         access_time: Timestamp,
     ) -> Result<Option<Tombstone>> {
         objectstore_log::debug!("Conditional put to Bigtable backend");
+        self.change_stream
+            .begin_write(id, metadata.time_expires)
+            .await?;
 
         let path = id.as_storage_path().to_string().into_bytes();
         let (mutations, size) = object_mutations(&path, metadata.clone(), payload.to_vec())?;
@@ -1151,7 +1159,9 @@ impl HighVolumeBackend for BigTableBackend {
                 .await?;
 
             if write_succeeded {
-                self.change_stream.write(id, size, metadata.time_expires);
+                self.change_stream
+                    .commit_write(id, size, metadata.time_expires)
+                    .await;
                 return Ok(None);
             }
 
@@ -1363,12 +1373,13 @@ impl HighVolumeBackend for BigTableBackend {
             }
         };
 
+        self.change_stream.begin_update(id, Some(expire_at)).await?;
         let applied = self
             .check_and_mutate(path, predicate, mutations, "set_expiry")
             .await?;
 
         if applied {
-            self.change_stream.update(id, Some(expire_at));
+            self.change_stream.commit_update(id, Some(expire_at)).await;
         }
 
         Ok(if applied {
@@ -1399,7 +1410,7 @@ impl HighVolumeBackend for BigTableBackend {
                 .await?;
 
             if deleted {
-                self.change_stream.delete(id);
+                self.change_stream.commit_delete(id).await;
                 return Ok(None);
             }
 
@@ -1471,6 +1482,9 @@ impl HighVolumeBackend for BigTableBackend {
             }
             TieredWrite::Delete => (vec![delete_row_mutation()], None),
         };
+        if let Some(expires_at) = expires_at {
+            self.change_stream.begin_write(id, expires_at).await?;
+        }
 
         let written = self
             .check_and_mutate(
@@ -1487,10 +1501,11 @@ impl HighVolumeBackend for BigTableBackend {
             // We wrote something (the inner `expires_at` is `None` for manual GC)
             (true, Some(expires_at)) => {
                 self.change_stream
-                    .write(id, row_size(&path, &mutations), expires_at)
+                    .commit_write(id, row_size(&path, &mutations), expires_at)
+                    .await
             }
             // We deleted something
-            (true, None) => self.change_stream.delete(id),
+            (true, None) => self.change_stream.commit_delete(id).await,
         }
 
         Ok(written)
