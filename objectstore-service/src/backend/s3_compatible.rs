@@ -379,6 +379,9 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         _access_time: Timestamp,
     ) -> Result<PutResponse> {
         objectstore_log::debug!("Writing to s3_compatible backend");
+        self.change_stream
+            .begin_write(id, metadata.time_expires)
+            .await?;
         let headers = metadata_to_gcs_headers(metadata, GCS_CUSTOM_PREFIX)
             .context(ErrorKind::InvalidMetadata, "encoding S3 object metadata")?;
         let metadata_size = headers_size(&headers);
@@ -397,11 +400,13 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             .drain_body()
             .await;
 
-        self.change_stream.write(
-            id,
-            metadata_size + payload_size.load(Ordering::Relaxed),
-            metadata.time_expires,
-        );
+        self.change_stream
+            .commit_write(
+                id,
+                metadata_size + payload_size.load(Ordering::Relaxed),
+                metadata.time_expires,
+            )
+            .await;
 
         Ok(())
     }
@@ -477,11 +482,12 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
             expire_at,
         )?;
         metadata.time_expires = Some(expire_at);
+        self.change_stream.begin_update(id, Some(expire_at)).await?;
         let outcome = self
             .update_metadata(id, &metadata, expire_at, &etag)
             .await?;
         if matches!(outcome, SetExpiryResponse::Satisfied(_)) {
-            self.change_stream.update(id, Some(expire_at));
+            self.change_stream.commit_update(id, Some(expire_at)).await;
         }
 
         Ok(outcome)
@@ -516,7 +522,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
 
         // If the object didn't exist in the first place, this emits a spurious message
         // due to S3 returning 204 to DELETEs whether the object existed or not.
-        self.change_stream.delete(id);
+        self.change_stream.commit_delete(id).await;
 
         Ok(())
     }

@@ -167,6 +167,9 @@ impl Backend for LocalFsBackend {
     ) -> Result<PutResponse> {
         let path = self.path(id);
         objectstore_log::debug!(path=%path.display(), "Writing to local_fs backend");
+        self.change_stream
+            .begin_write(id, metadata.time_expires)
+            .await?;
         create_directories(path.parent().unwrap()).await.context(
             ErrorKind::BackendFailure,
             "creating local-fs object directory",
@@ -192,7 +195,8 @@ impl Backend for LocalFsBackend {
         draft.publish().await?;
 
         self.change_stream
-            .write(id, stored_size, metadata.time_expires);
+            .commit_write(id, stored_size, metadata.time_expires)
+            .await;
 
         Ok(())
     }
@@ -273,6 +277,7 @@ impl Backend for LocalFsBackend {
             expire_at,
         )?;
         metadata.time_expires = Some(expire_at);
+        self.change_stream.begin_update(id, Some(expire_at)).await?;
 
         let mut draft = Draft::create(&path, &metadata).await?;
         tokio::io::copy(&mut reader, draft.writer()).await.context(
@@ -283,7 +288,7 @@ impl Backend for LocalFsBackend {
         draft.prepare().await?;
         draft.publish().await?;
 
-        self.change_stream.update(id, Some(expire_at));
+        self.change_stream.commit_update(id, Some(expire_at)).await;
 
         Ok(SetExpiryResponse::Satisfied(expire_at))
     }
@@ -299,7 +304,7 @@ impl Backend for LocalFsBackend {
         objectstore_log::debug!("Deleting from local_fs backend");
         let path = self.path(id);
         match tokio::fs::remove_file(path).await {
-            Ok(()) => self.change_stream.delete(id),
+            Ok(()) => self.change_stream.commit_delete(id).await,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 objectstore_log::debug!("Object not found");
             }
@@ -318,6 +323,9 @@ impl Backend for LocalFsBackend {
         metadata: &Metadata,
         _upload_length: NonZeroU64,
     ) -> Result<Option<BackendToken>> {
+        self.change_stream
+            .begin_write(id, metadata.time_expires)
+            .await?;
         let upload_id = uuid::Uuid::now_v7();
         let path = self.upload_path(upload_id);
         create_directories(path.parent().unwrap()).await.context(
@@ -377,7 +385,8 @@ impl Backend for LocalFsBackend {
             )?;
         let (stored_size, expires_at) = upload.publish(object_path).await?;
         self.change_stream
-            .write(&session.object_id, stored_size, expires_at);
+            .commit_write(&session.object_id, stored_size, expires_at)
+            .await;
         Ok(UploadProgress::Complete)
     }
 
@@ -426,6 +435,9 @@ impl MultipartUploadBackend for LocalFsBackend {
         id: &ObjectId,
         metadata: &Metadata,
     ) -> Result<InitiateMultipartResponse> {
+        self.change_stream
+            .begin_write(id, metadata.time_expires)
+            .await?;
         let upload_id = UploadId::new(Uuid::now_v7().to_string())?;
         let dir = self.multipart_dir(id, &upload_id);
         create_directories(&dir).await.context(
@@ -741,7 +753,8 @@ impl MultipartUploadBackend for LocalFsBackend {
         drop(guard);
 
         self.change_stream
-            .write(id, stored_size, metadata.time_expires);
+            .commit_write(id, stored_size, metadata.time_expires)
+            .await;
 
         // Clean up multipart state
         tokio::fs::remove_dir_all(dir).await.context(

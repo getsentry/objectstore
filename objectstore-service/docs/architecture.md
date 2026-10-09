@@ -182,14 +182,21 @@ See also: [`objectstore_inventory_tracker`] documentation.
 # Change Streams
 
 Every backend publishes the changes it makes to the objects it stores as a
-[`ChangeStream`](change_stream::ChangeStream). It is a fire-and-forget,
-per-backend feed of three operations:
+[`ChangeStream`](change_stream::ChangeStream). It is a per-backend feed of
+three operations:
 
 - `write(id, size, expires_at)`: `id` now occupies `size` bytes. Used for both
   new objects and overwrites.
 - `update(id, expires_at)`: `id`'s expiration moved while its stored size is
   unchanged. In practice this is a TTI bump.
 - `delete(id)`: `id` was deleted explicitly.
+
+Writes and updates are reported twice: `begin_*` before the storage operation
+and `commit_*` after it succeeds. Deletes are only committed. A failed
+`begin_*` fails the request before storage is touched, while `commit_*` cannot
+fail. Resumable and multipart uploads call `begin_write` when they are created.
+A `begin_*` is not always followed by a `commit_*`, so `begin_*` gives an upper
+bound on what is stored, e.g. for cleaning up expired data.
 
 The stream describes physical storage per backend. When using
 [`TieredStorage`](backend::tiered::TieredStorage), objects that are stored in
