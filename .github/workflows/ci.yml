@@ -98,7 +98,7 @@ jobs:
             -p 8086:8086 \
             -e BIGTABLE_EMULATOR_HOST=localhost:8086 \
             -v $PWD/devservices/run-bigtable.sh:/run-bigtable.sh \
-            google/cloud-sdk \
+            ghcr.io/getsentry/image-mirror-google-cloud-sdk:588.0.0 \
             /run-bigtable.sh
 
       - name: Build GCS Emulator
