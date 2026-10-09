@@ -302,6 +302,21 @@ pub struct Sentry {
     /// `OS__SENTRY__DEBUG`
     pub debug: bool,
 
+    /// Capacity of the Sentry transport's envelope queue.
+    ///
+    /// Maximum number of envelopes (events, transactions, logs) buffered for sending to Sentry.
+    /// When the queue is full, new envelopes are dropped. Raise this if Sentry data is being
+    /// dropped under load.
+    ///
+    /// # Default
+    ///
+    /// `60`
+    ///
+    /// # Environment Variable
+    ///
+    /// `OS__SENTRY__TRANSPORT_CHANNEL_CAPACITY`
+    pub transport_channel_capacity: usize,
+
     /// Additional tags to attach to all Sentry events.
     ///
     /// Key-value pairs that are sent as tags with every event reported to Sentry. Useful for adding
@@ -362,6 +377,7 @@ impl Default for Sentry {
             inherit_sampling_decision: true,
             attach_stacktrace: false,
             debug: false,
+            transport_channel_capacity: 60,
             tags: BTreeMap::new(),
         }
     }

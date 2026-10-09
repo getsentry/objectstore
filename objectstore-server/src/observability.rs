@@ -11,11 +11,6 @@ use crate::config::Config;
 /// The full release name including the objectstore version and SHA.
 const RELEASE: &str = std::env!("OBJECTSTORE_RELEASE");
 
-/// Capacity of the Sentry transport's envelope queue.
-///
-/// Raised from the SDK default of 30, which dropped events, spans, and logs under load.
-const TRANSPORT_CHANNEL_CAPACITY: usize = 100;
-
 /// Initializes the Sentry error-reporting client, if a DSN is configured.
 ///
 /// Returns `None` when `config.sentry.dsn` is not set. The returned
@@ -41,7 +36,7 @@ pub fn init_sentry(config: &Config) -> Option<sentry::ClientInitGuard> {
         })
         .attach_stacktrace(config.attach_stacktrace)
         .debug(config.debug)
-        .transport_channel_capacity(TRANSPORT_CHANNEL_CAPACITY);
+        .transport_channel_capacity(config.transport_channel_capacity);
 
     match dsn.parse::<sentry::types::Dsn>() {
         Ok(_) => options = options.dsn(dsn),
