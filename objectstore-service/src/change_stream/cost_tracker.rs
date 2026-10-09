@@ -73,7 +73,7 @@ where
     P: Producer + Clone + Send + Sync + 'static,
     P::Error: Into<BoxError> + Send + 'static,
 {
-    fn write(&self, id: &ObjectId, size: u64, expires_at: Option<Timestamp>) {
+    async fn commit_write(&self, id: &ObjectId, size: u64, expires_at: Option<Timestamp>) {
         let result = self.tracker.write(
             &id.as_storage_path().to_string(),
             id.usecase(),
@@ -86,7 +86,7 @@ where
         self.swallow("write", result);
     }
 
-    fn update(&self, id: &ObjectId, expires_at: Option<Timestamp>) {
+    async fn commit_update(&self, id: &ObjectId, expires_at: Option<Timestamp>) {
         let result = self.tracker.update(
             &id.as_storage_path().to_string(),
             id.usecase(),
@@ -98,7 +98,7 @@ where
         self.swallow("update", result);
     }
 
-    fn delete(&self, id: &ObjectId) {
+    async fn commit_delete(&self, id: &ObjectId) {
         let result = self.tracker.delete(
             &id.as_storage_path().to_string(),
             id.usecase(),
@@ -135,12 +135,12 @@ mod tests {
         (producer, stream)
     }
 
-    #[test]
-    fn usecase_and_scopes_are_extracted_from_the_id() {
+    #[tokio::test]
+    async fn usecase_and_scopes_are_extracted_from_the_id() {
         let (producer, stream) = stream(1.0);
         let id = object_id("attachments/org.17/project.42/objects/abc");
 
-        stream.write(&id, 4096, None);
+        stream.commit_write(&id, 4096, None).await;
 
         let record = &producer.records()[0];
         assert_eq!(record.shared_resource_id, "bigtable_objectstore");
@@ -151,20 +151,20 @@ mod tests {
         assert_eq!(record.op_type, OpType::Write);
     }
 
-    #[test]
-    fn the_storage_path_is_not_emitted() {
+    #[tokio::test]
+    async fn the_storage_path_is_not_emitted() {
         let (producer, stream) = stream(1.0);
         let id = object_id("attachments/org.17/project.42/objects/abc");
 
-        stream.write(&id, 4096, None);
+        stream.commit_write(&id, 4096, None).await;
 
         let record_id = &producer.records()[0].record_id;
         assert_ne!(record_id, &id.as_storage_path().to_string());
         assert!(!record_id.contains("attachments"));
     }
 
-    #[test]
-    fn missing_or_unparseable_scopes_are_reported_as_absent() {
+    #[tokio::test]
+    async fn missing_or_unparseable_scopes_are_reported_as_absent() {
         let (producer, stream) = stream(1.0);
 
         for path in [
@@ -172,7 +172,7 @@ mod tests {
             "attachments/organization.17/objects/abc",
             "attachments/org.not-a-number/project.42/objects/abc",
         ] {
-            stream.write(&object_id(path), 1, None);
+            stream.commit_write(&object_id(path), 1, None).await;
         }
 
         let records = producer.records();
@@ -200,14 +200,14 @@ mod tests {
         }
     }
 
-    #[test]
-    fn every_operation_on_an_object_reports_the_same_record() {
+    #[tokio::test]
+    async fn every_operation_on_an_object_reports_the_same_record() {
         let (producer, stream) = stream(1.0);
         let id = object_id("attachments/org.1/project.2/objects/abc");
 
-        stream.write(&id, 10, None);
-        stream.update(&id, Some(Timestamp::now()));
-        stream.delete(&id);
+        stream.commit_write(&id, 10, None).await;
+        stream.commit_update(&id, Some(Timestamp::now())).await;
+        stream.commit_delete(&id).await;
 
         let records = producer.records();
         assert_eq!(records.len(), 3);
@@ -215,33 +215,37 @@ mod tests {
         assert_eq!(records[1].record_id, records[2].record_id);
     }
 
-    #[test]
-    fn distinct_revisions_are_distinct_records() {
+    #[tokio::test]
+    async fn distinct_revisions_are_distinct_records() {
         let (producer, stream) = stream(1.0);
 
-        stream.write(
-            &object_id("attachments/org.1/project.2/objects/abc/0199aaaa"),
-            1,
-            None,
-        );
-        stream.write(
-            &object_id("attachments/org.1/project.2/objects/abc/0199bbbb"),
-            1,
-            None,
-        );
+        stream
+            .commit_write(
+                &object_id("attachments/org.1/project.2/objects/abc/0199aaaa"),
+                1,
+                None,
+            )
+            .await;
+        stream
+            .commit_write(
+                &object_id("attachments/org.1/project.2/objects/abc/0199bbbb"),
+                1,
+                None,
+            )
+            .await;
 
         let records = producer.records();
         assert_ne!(records[0].record_id, records[1].record_id);
     }
 
-    #[test]
-    fn update_omits_size_and_delete_omits_everything_optional() {
+    #[tokio::test]
+    async fn update_omits_size_and_delete_omits_everything_optional() {
         let (producer, stream) = stream(1.0);
         let id = object_id("attachments/org.1/project.2/objects/abc");
 
         let expires = Timestamp::from_unix_micros(1_800_000_000_123_456).unwrap();
-        stream.update(&id, Some(expires));
-        stream.delete(&id);
+        stream.commit_update(&id, Some(expires)).await;
+        stream.commit_delete(&id).await;
 
         let records = producer.records();
         assert_eq!(records[0].op_type, OpType::Update);
@@ -252,15 +256,15 @@ mod tests {
         assert_eq!(records[1].expiration_time, None);
     }
 
-    #[test]
-    fn a_listener_sampled_at_zero_reports_nothing() {
+    #[tokio::test]
+    async fn a_listener_sampled_at_zero_reports_nothing() {
         let (producer, stream) = stream(0.0);
 
         for i in 0..100 {
             let id = object_id(&format!("attachments/org.1/project.2/objects/{i}"));
-            stream.write(&id, 1, None);
-            stream.update(&id, None);
-            stream.delete(&id);
+            stream.commit_write(&id, 1, None).await;
+            stream.commit_update(&id, None).await;
+            stream.commit_delete(&id).await;
         }
 
         assert!(producer.records().is_empty());

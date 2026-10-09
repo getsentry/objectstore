@@ -10,6 +10,9 @@ use std::error::Error as StdError;
 use std::fmt;
 
 use objectstore_log::Level;
+
+use crate::change_stream::ChangeStreamError;
+
 /// A panic captured from a service task.
 #[derive(Debug)]
 pub struct Panic {
@@ -308,6 +311,17 @@ where
 
     fn kind(self, kind: ErrorKind) -> Result<T> {
         self.map_err(|source| Error::with_source(kind, source))
+    }
+}
+
+impl From<ChangeStreamError> for Error {
+    fn from(source: ChangeStreamError) -> Self {
+        let kind = match source {
+            ChangeStreamError::Unavailable(_) => ErrorKind::BackendUnavailable,
+            ChangeStreamError::Timeout(_) => ErrorKind::BackendTimeout,
+            ChangeStreamError::Failure(_) => ErrorKind::BackendFailure,
+        };
+        Self::with_context(kind, "writing to the change stream", source)
     }
 }
 
