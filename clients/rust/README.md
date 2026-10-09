@@ -149,7 +149,15 @@ session.put("payload")
     .send().await?;
 ```
 
-### Resumable Upload API
+### Automatic Resumable Puts
+
+`Session::put`, `Session::put_file`, and `Session::put_path` are eligible for automatic resumable
+upload of larger payloads.
+Eligibility is enabled by default and can be disabled per request with `.resumable(false)`.
+If the object is uploaded via `Session::put_file` or `Session::put_path`, this may create an
+additional temporary file to buffer the compressed payload.
+
+### Low-level Resumable Upload API
 
 > **Feature flag required:** Enable `resumable-upload-api` to use this API.
 >
@@ -163,6 +171,9 @@ scratch would be expensive.
 It's recommended to always try to upload the whole object in a single request if
 possible, as that's always the more efficient approach.
 If the request fails midway, it will be possible to resume it from the persisted offset.
+
+Note that resumable uploads are used automatically when performing eligible PUTs, so
+this API should only be used directly for advanced usecases.
 
 **Important:** resumable uploads do not automatically compress chunk contents. The `compression`
 setting only records how the object is encoded; the caller must compress the payload accordingly.
