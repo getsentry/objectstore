@@ -57,6 +57,41 @@ async fn filename_produces_content_disposition() -> Result<()> {
 }
 
 #[tokio::test]
+async fn object_without_filename_is_served_as_attachment() -> Result<()> {
+    let server = test_server().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .put(server.url("/v1/objects/test/org=1/cd-no-filename"))
+        .body("data")
+        .send()
+        .await?;
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    let resp = client
+        .get(server.url("/v1/objects/test/org=1/cd-no-filename"))
+        .send()
+        .await?;
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        resp.headers().get("content-disposition").unwrap(),
+        "attachment"
+    );
+
+    let resp = client
+        .head(server.url("/v1/objects/test/org=1/cd-no-filename"))
+        .send()
+        .await?;
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        resp.headers().get("content-disposition").unwrap(),
+        "attachment"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn filename_with_quotes_is_escaped() -> Result<()> {
     let server = test_server().await;
     let client = reqwest::Client::new();

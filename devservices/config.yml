@@ -44,7 +44,7 @@ services:
       - orchestrator=devservices
     restart: unless-stopped
   bigtable:
-    image: google/cloud-sdk
+    image: ghcr.io/getsentry/image-mirror-google-cloud-sdk:588.0.0
     command: /run-bigtable.sh
     environment:
       BIGTABLE_EMULATOR_HOST: localhost:8086

@@ -30,7 +30,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
-use crate::resumable::{BackendToken, SessionToken};
+use crate::resumable::Session;
 use crate::stream::{ClientStream, PayloadStream};
 use crate::streaming::StreamExecutor;
 
@@ -42,6 +42,15 @@ pub type MetadataResponse = Option<Metadata>;
 pub type InsertResponse = ObjectId;
 /// Service response for [`StorageService::delete_object`].
 pub type DeleteResponse = ();
+
+/// A newly opened resumable upload session and its upload granularity.
+#[derive(Debug)]
+pub struct CreateUploadSessionResponse {
+    /// The encrypted token used to continue the upload.
+    pub session: EncryptedSessionToken,
+    /// The upload granularity in bytes, or zero when there is none.
+    pub granularity: u64,
+}
 
 /// Default concurrency limit for [`StorageService`].
 ///
@@ -465,7 +474,7 @@ impl StorageService {
 
     // --- Resumable upload operations ---
 
-    /// Opens a resumable upload session for an object of `total_length` bytes.
+    /// Opens a resumable upload session for an object of `upload_length` bytes.
     ///
     /// Returns `Ok(None)` for zero-length objects or when the backend declines resumable uploads
     /// for this object, in which case the caller should fall back to [`Self::insert_object`].
@@ -473,9 +482,9 @@ impl StorageService {
         &self,
         id: ObjectId,
         metadata: Metadata,
-        total_length: u64,
-    ) -> Result<Option<EncryptedSessionToken>> {
-        let Some(total_length) = NonZeroU64::new(total_length) else {
+        upload_length: u64,
+    ) -> Result<Option<CreateUploadSessionResponse>> {
+        let Some(upload_length) = NonZeroU64::new(upload_length) else {
             return Ok(None);
         };
         metadata.validate().kind(ErrorKind::InvalidMetadata)?;
@@ -483,35 +492,36 @@ impl StorageService {
         let cipher = Arc::clone(&self.cipher);
         self.spawn("create_upload_session", async move {
             let session = inner
-                .create_upload_session(&id, &metadata, total_length)
+                .create_upload_session(&id, &metadata, upload_length)
                 .await?;
             session
                 .map(|backend_token| {
-                    cipher
-                        .encrypt(&SessionToken {
+                    let session = cipher
+                        .encrypt(&Session {
                             object_id: id,
+                            upload_length,
                             backend_token,
                         })
-                        .map(EncryptedSessionToken::new)
+                        .map(EncryptedSessionToken::new)?;
+                    Ok(CreateUploadSessionResponse {
+                        session,
+                        granularity: inner.upload_granularity(),
+                    })
                 })
                 .transpose()
         })
         .await
     }
 
-    fn backend_token_for(
-        &self,
-        expected_id: &ObjectId,
-        token: EncryptedSessionToken,
-    ) -> Result<BackendToken> {
-        let session: SessionToken = self
+    fn session_for(&self, expected_id: &ObjectId, token: EncryptedSessionToken) -> Result<Session> {
+        let session: Session = self
             .cipher
             .decrypt(token.as_bytes())
             .map_err(|_| ErrorKind::UnknownUploadSession)?;
         if session.object_id != *expected_id {
             return Err(ErrorKind::UnknownUploadSession.into());
         }
-        Ok(session.backend_token)
+        Ok(session)
     }
 
     /// Writes a chunk of `content_length` bytes at `offset` into an open session.
@@ -530,11 +540,11 @@ impl StorageService {
         content_length: u64,
         body: ClientStream,
     ) -> Result<UploadProgress> {
-        let session = self.backend_token_for(&id, token)?;
+        let session = self.session_for(&id, token)?;
         let inner = Arc::clone(&self.inner);
         self.spawn("put_chunk", async move {
             inner
-                .put_chunk(&id, &session, offset, content_length, body)
+                .put_chunk(&session, offset, content_length, body)
                 .await
         })
         .await
@@ -550,20 +560,20 @@ impl StorageService {
         id: ObjectId,
         token: EncryptedSessionToken,
     ) -> Result<UploadProgress> {
-        let session = self.backend_token_for(&id, token)?;
+        let session = self.session_for(&id, token)?;
         let inner = Arc::clone(&self.inner);
         self.spawn("upload_offset", async move {
-            inner.upload_offset(&id, &session).await
+            inner.upload_offset(&session).await
         })
         .await
     }
 
     /// Cancels an upload session, discarding whatever was uploaded.
     pub async fn cancel_upload(&self, id: ObjectId, token: EncryptedSessionToken) -> Result<()> {
-        let session = self.backend_token_for(&id, token)?;
+        let session = self.session_for(&id, token)?;
         let inner = Arc::clone(&self.inner);
         self.spawn("cancel_upload", async move {
-            inner.cancel_upload(&id, &session).await
+            inner.cancel_upload(&session).await
         })
         .await
     }
@@ -591,6 +601,7 @@ mod tests {
     use crate::backend::testing::{Hooks, TestBackend};
     use crate::backend::tiered::TieredStorage;
     use crate::change_stream::ChangeStreamFactory;
+    use crate::resumable::BackendToken;
     use crate::stream::{self, ClientStream};
 
     #[derive(Clone, Debug, Default)]
@@ -600,12 +611,16 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Hooks for ResumableTokenHooks {
+        fn upload_granularity(&self, _inner: &InMemoryBackend) -> u64 {
+            256 * 1024
+        }
+
         async fn create_upload_session(
             &self,
             _inner: &InMemoryBackend,
             _id: &ObjectId,
             _metadata: &Metadata,
-            _total_length: NonZeroU64,
+            _upload_length: NonZeroU64,
         ) -> Result<Option<BackendToken>> {
             Ok(Some("backend token".to_owned()))
         }
@@ -613,10 +628,13 @@ mod tests {
         async fn upload_offset(
             &self,
             _inner: &InMemoryBackend,
-            _id: &ObjectId,
-            token: &BackendToken,
+            session: &Session,
         ) -> Result<UploadProgress> {
-            self.seen_tokens.lock().unwrap().push(token.to_owned());
+            assert_eq!(session.upload_length.get(), 4);
+            self.seen_tokens
+                .lock()
+                .unwrap()
+                .push(session.backend_token.clone());
             Ok(UploadProgress::Incomplete { offset: 0 })
         }
     }
@@ -1395,11 +1413,13 @@ mod tests {
     async fn resumable_round_trip() {
         let service = make_service();
         let id = ObjectId::new(make_context(), "resumable".into());
-        let token = service
+        let created = service
             .create_upload_session(id.clone(), Metadata::default(), 3)
             .await
             .unwrap()
             .unwrap();
+        assert_eq!(created.granularity, 0);
+        let token = created.session;
         assert_eq!(
             service
                 .put_chunk(id.clone(), token.clone(), 0, 1, stream::single("a"))
@@ -1473,10 +1493,12 @@ mod tests {
         );
         let id = ObjectId::new(make_context(), "resumable".into());
 
-        let token = service
+        let created = service
             .create_upload_session(id.clone(), Metadata::default(), 4)
             .await?
             .expect("test backend supports resumable uploads");
+        assert_eq!(created.granularity, 256 * 1024);
+        let token = created.session;
         assert_ne!(token.as_bytes(), b"backend token");
         assert!(matches!(
             service
@@ -1512,7 +1534,8 @@ mod tests {
         let encrypted = service
             .create_upload_session(id.clone(), Metadata::default(), 4)
             .await?
-            .expect("test backend supports resumable uploads");
+            .expect("test backend supports resumable uploads")
+            .session;
         assert_ne!(encrypted.as_bytes(), b"backend token");
         service.upload_offset(id, encrypted).await?;
         assert_eq!(

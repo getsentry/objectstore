@@ -63,9 +63,11 @@ profiling = ["dep:jemalloc_pprof", "tikv-jemallocator/profiling"]
 nix = { workspace = true, features = ["signal"] }
 objectstore-options = { workspace = true, features = ["testing"] }
 objectstore-test = { workspace = true }
+sentry = { workspace = true, features = ["test"] }
 stresstest = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
+tracing-subscriber = { workspace = true }
 
 [[bin]]
 name = "objectstore"

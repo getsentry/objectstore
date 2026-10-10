@@ -222,7 +222,8 @@ pub struct Sentry {
     /// Error event sampling rate.
     ///
     /// Controls what percentage of error events are sent to Sentry. A value of `1.0` sends all
-    /// errors, while `0.5` sends 50% of errors, and `0.0` sends no errors.
+    /// errors, while `0.5` sends 50% of errors, and `0.0` sends no errors. Must be between `0.0`
+    /// and `1.0`, inclusive; other values are rejected when loading the configuration.
     ///
     /// # Default
     ///
@@ -231,12 +232,15 @@ pub struct Sentry {
     /// # Environment Variable
     ///
     /// `OS__SENTRY__SAMPLE_RATE`
+    #[serde(deserialize_with = "deserialize_sample_rate")]
     pub sample_rate: f32,
 
     /// Performance trace sampling rate.
     ///
     /// Controls what percentage of transactions (traces) are sent to Sentry for performance
-    /// monitoring. A value of `1.0` sends all traces, while `0.01` sends 1% of traces.
+    /// monitoring. A value of `1.0` sends all traces, while `0.01` sends 1% of traces. Must be
+    /// between `0.0` and `1.0`, inclusive; other values are rejected when loading the
+    /// configuration.
     ///
     /// **Important**: Performance traces can generate significant data volume in high-traffic
     /// systems. Start with a low rate (0.01-0.1) and adjust based on traffic and Sentry quota.
@@ -248,6 +252,7 @@ pub struct Sentry {
     /// # Environment Variable
     ///
     /// `OS__SENTRY__TRACES_SAMPLE_RATE`
+    #[serde(deserialize_with = "deserialize_sample_rate")]
     pub traces_sample_rate: f32,
 
     /// Whether to inherit sampling decisions from incoming traces.
@@ -297,6 +302,21 @@ pub struct Sentry {
     /// `OS__SENTRY__DEBUG`
     pub debug: bool,
 
+    /// Capacity of the Sentry transport's envelope queue.
+    ///
+    /// Maximum number of envelopes (events, transactions, logs) buffered for sending to Sentry.
+    /// When the queue is full, new envelopes are dropped. Raise this if Sentry data is being
+    /// dropped under load.
+    ///
+    /// # Default
+    ///
+    /// `60`
+    ///
+    /// # Environment Variable
+    ///
+    /// `OS__SENTRY__TRANSPORT_CHANNEL_CAPACITY`
+    pub transport_channel_capacity: usize,
+
     /// Additional tags to attach to all Sentry events.
     ///
     /// Key-value pairs that are sent as tags with every event reported to Sentry. Useful for adding
@@ -323,6 +343,20 @@ pub struct Sentry {
     pub tags: BTreeMap<String, String>,
 }
 
+/// Deserializes a sample rate, rejecting values outside of `0.0..=1.0`.
+fn deserialize_sample_rate<'de, D>(deserializer: D) -> std::result::Result<f32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let rate = f32::deserialize(deserializer)?;
+    if !(0.0..=1.0).contains(&rate) {
+        return Err(serde::de::Error::custom(format!(
+            "sample rate must be between 0.0 and 1.0, got {rate}"
+        )));
+    }
+    Ok(rate)
+}
+
 impl Sentry {
     /// Returns whether Sentry integration is enabled.
     ///
@@ -343,6 +377,7 @@ impl Default for Sentry {
             inherit_sampling_decision: true,
             attach_stacktrace: false,
             debug: false,
+            transport_channel_capacity: 60,
             tags: BTreeMap::new(),
         }
     }

@@ -29,7 +29,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, Part, PartNumber, UploadId, UploadPartResponse,
 };
-use crate::resumable::{BackendToken, UploadProgress};
+use crate::resumable::{BackendToken, Session, UploadProgress};
 use crate::stream::ClientStream;
 
 /// An entry in the in-memory store.
@@ -79,7 +79,6 @@ struct UploadedPart {
 #[derive(Debug)]
 struct ResumableUpload {
     metadata: Metadata,
-    total_length: NonZeroU64,
     data: BytesMut,
 }
 
@@ -100,6 +99,7 @@ pub struct InMemoryBackend {
     store: Arc<Mutex<Store>>,
     multipart_store: Arc<Mutex<MultipartStore>>,
     resumable_store: Arc<Mutex<ResumableStore>>,
+    upload_markers: Arc<Mutex<HashMap<ObjectId, Timestamp>>>,
     change_stream: Arc<dyn ChangeStream>,
 }
 
@@ -111,15 +111,16 @@ impl InMemoryBackend {
             store: Arc::new(Mutex::new(HashMap::new())),
             multipart_store: Arc::new(Mutex::new(HashMap::new())),
             resumable_store: Arc::new(Mutex::new(HashMap::new())),
+            upload_markers: Arc::new(Mutex::new(HashMap::new())),
             change_stream: Arc::new(NoopStream),
         }
     }
 
-    fn upload_session(&self, id: &ObjectId, token: &BackendToken) -> Result<ResumableSession> {
+    fn upload_session(&self, session: &Session) -> Result<ResumableSession> {
         self.resumable_store
             .lock()
             .unwrap()
-            .get(&(id.clone(), token.clone()))
+            .get(&(session.object_id.clone(), session.backend_token.clone()))
             // Clone the session handle so that the `resumable_store` mutex is released immediately.
             .cloned()
             .ok_or_else(|| ErrorKind::UnknownUploadSession.into())
@@ -129,6 +130,45 @@ impl InMemoryBackend {
     pub fn with_change_stream(mut self, change_stream: Arc<dyn ChangeStream>) -> Self {
         self.change_stream = change_stream;
         self
+    }
+
+    /// Applies `extend` to `id`'s entry, calling [`ChangeStream::begin_update`] first.
+    ///
+    /// Like a conditional write, this is rejected if the entry changed in the meantime.
+    async fn update_expiry(
+        &self,
+        id: &ObjectId,
+        access_time: Timestamp,
+        extend: impl Fn(&mut StoreEntry) -> Result<ExpiryOutcome> + Send + Sync,
+    ) -> Result<SetExpiryResponse> {
+        let try_extend = |store: &Store| -> Result<(ExpiryOutcome, Option<StoreEntry>)> {
+            match store.get(id) {
+                Some(entry) if !entry.is_expired(access_time) => {
+                    let mut updated = entry.clone();
+                    let outcome = extend(&mut updated)?;
+                    Ok((outcome, Some(updated)))
+                }
+                _ => Ok((ExpiryOutcome::NotFound, None)),
+            }
+        };
+
+        let (outcome, _) = try_extend(&self.store.lock().unwrap())?;
+        let ExpiryOutcome::Extended(expire_at) = outcome else {
+            return Ok(outcome.response());
+        };
+        self.change_stream.begin_update(id, Some(expire_at)).await?;
+
+        {
+            let mut store = self.store.lock().unwrap();
+            match try_extend(&store)? {
+                (ExpiryOutcome::Extended(t), Some(updated)) if t == expire_at => {
+                    store.insert(id.clone(), updated);
+                }
+                _ => return Ok(SetExpiryResponse::Rejected),
+            }
+        }
+        self.change_stream.commit_update(id, Some(expire_at)).await;
+        Ok(outcome.response())
     }
 
     /// Returns the stored entry for `id`, for direct inspection in tests.
@@ -175,12 +215,16 @@ impl super::common::Backend for InMemoryBackend {
         stream: ClientStream,
         _access_time: Timestamp,
     ) -> Result<PutResponse> {
+        self.change_stream
+            .begin_write(id, metadata.time_expires)
+            .await?;
         let bytes: BytesMut = stream.try_collect().await?;
         let entry = StoreEntry::Object(metadata.clone(), bytes.freeze());
         let size = entry.stored_size();
         self.store.lock().unwrap().insert(id.clone(), entry);
         self.change_stream
-            .write(id, size as u64, metadata.time_expires);
+            .commit_write(id, size as u64, metadata.time_expires)
+            .await;
         Ok(())
     }
 
@@ -224,23 +268,11 @@ impl super::common::Backend for InMemoryBackend {
         target: ExpiryUpdate,
         access_time: Timestamp,
     ) -> Result<SetExpiryResponse> {
-        let outcome = {
-            let mut store = self.store.lock().unwrap();
-            match store.get_mut(id) {
-                None => ExpiryOutcome::NotFound,
-                Some(entry) if entry.is_expired(access_time) => ExpiryOutcome::NotFound,
-                Some(StoreEntry::Object(metadata, _)) => {
-                    extend_object_expiry(metadata, target, access_time)?
-                }
-                _ => ExpiryOutcome::Rejected,
-            }
-        };
-
-        if let ExpiryOutcome::Extended(expire_at) = outcome {
-            self.change_stream.update(id, Some(expire_at));
-        }
-
-        Ok(outcome.response())
+        self.update_expiry(id, access_time, |entry| match entry {
+            StoreEntry::Object(metadata, _) => extend_object_expiry(metadata, target, access_time),
+            StoreEntry::Tombstone(_) => Ok(ExpiryOutcome::Rejected),
+        })
+        .await
     }
 
     async fn delete_object(
@@ -249,7 +281,7 @@ impl super::common::Backend for InMemoryBackend {
         _access_time: Timestamp,
     ) -> Result<DeleteResponse> {
         if self.store.lock().unwrap().remove(id).is_some() {
-            self.change_stream.delete(id);
+            self.change_stream.commit_delete(id).await;
         }
         Ok(())
     }
@@ -258,12 +290,14 @@ impl super::common::Backend for InMemoryBackend {
         &self,
         id: &ObjectId,
         metadata: &Metadata,
-        total_length: NonZeroU64,
+        _upload_length: NonZeroU64,
     ) -> Result<Option<BackendToken>> {
+        self.change_stream
+            .begin_write(id, metadata.time_expires)
+            .await?;
         let token = uuid::Uuid::now_v7().to_string();
         let upload = ResumableUpload {
             metadata: metadata.clone(),
-            total_length,
             data: BytesMut::new(),
         };
         self.resumable_store.lock().unwrap().insert(
@@ -275,22 +309,21 @@ impl super::common::Backend for InMemoryBackend {
 
     async fn put_chunk(
         &self,
-        id: &ObjectId,
-        token: &BackendToken,
+        session: &Session,
         offset: u64,
         content_length: u64,
         mut stream: ClientStream,
     ) -> Result<UploadProgress> {
-        let session = self.upload_session(id, token)?;
-        let mut guard = session.lock().await;
+        let upload_session = self.upload_session(session)?;
+        let mut guard = upload_session.lock().await;
         let upload = guard.as_mut().ok_or(ErrorKind::UnknownUploadSession)?;
         offset
             .checked_add(content_length)
-            .filter(|end| *end <= upload.total_length.get())
+            .filter(|end| *end <= session.upload_length.get())
             .ok_or(ErrorKind::ChunkExceedsUploadLength {
                 offset,
                 content_length,
-                upload_length: upload.total_length.get(),
+                upload_length: session.upload_length.get(),
             })?;
         if content_length != 0 && offset != upload.data.len() as u64 {
             return Err(ErrorKind::UploadOffsetMismatch {
@@ -310,7 +343,7 @@ impl super::common::Backend for InMemoryBackend {
         }
 
         let offset = upload.data.len() as u64;
-        if offset != upload.total_length.get() {
+        if offset != session.upload_length.get() {
             return Ok(UploadProgress::Incomplete { offset });
         }
 
@@ -319,34 +352,39 @@ impl super::common::Backend for InMemoryBackend {
         let expires_at = metadata.time_expires;
         let entry = StoreEntry::Object(metadata, upload.data.freeze());
         let size = entry.stored_size();
-        self.store.lock().unwrap().insert(id.clone(), entry);
+        self.store
+            .lock()
+            .unwrap()
+            .insert(session.object_id.clone(), entry);
 
-        self.change_stream.write(id, size as u64, expires_at);
+        self.change_stream
+            .commit_write(&session.object_id, size as u64, expires_at)
+            .await;
         self.resumable_store
             .lock()
             .unwrap()
-            .remove(&(id.clone(), token.clone()));
+            .remove(&(session.object_id.clone(), session.backend_token.clone()));
 
         Ok(UploadProgress::Complete)
     }
 
-    async fn upload_offset(&self, id: &ObjectId, token: &BackendToken) -> Result<UploadProgress> {
-        let session = self.upload_session(id, token)?;
-        let guard = session.lock().await;
+    async fn upload_offset(&self, session: &Session) -> Result<UploadProgress> {
+        let upload_session = self.upload_session(session)?;
+        let guard = upload_session.lock().await;
         let upload = guard.as_ref().ok_or(ErrorKind::UnknownUploadSession)?;
         Ok(UploadProgress::Incomplete {
             offset: upload.data.len() as u64,
         })
     }
 
-    async fn cancel_upload(&self, id: &ObjectId, token: &BackendToken) -> Result<()> {
-        let session = self.upload_session(id, token)?;
-        let mut guard = session.lock().await;
+    async fn cancel_upload(&self, session: &Session) -> Result<()> {
+        let upload_session = self.upload_session(session)?;
+        let mut guard = upload_session.lock().await;
         guard.take().ok_or(ErrorKind::UnknownUploadSession)?;
         self.resumable_store
             .lock()
             .unwrap()
-            .remove(&(id.clone(), token.clone()));
+            .remove(&(session.object_id.clone(), session.backend_token.clone()));
         Ok(())
     }
 
@@ -357,6 +395,40 @@ impl super::common::Backend for InMemoryBackend {
 
 #[async_trait::async_trait]
 impl HighVolumeBackend for InMemoryBackend {
+    async fn create_upload_marker(
+        &self,
+        revision: &ObjectId,
+        time_expires: Timestamp,
+    ) -> Result<()> {
+        self.upload_markers
+            .lock()
+            .unwrap()
+            .insert(revision.clone(), time_expires);
+        Ok(())
+    }
+
+    async fn has_upload_marker(&self, revision: &ObjectId, access_time: Timestamp) -> Result<bool> {
+        Ok(self
+            .upload_markers
+            .lock()
+            .unwrap()
+            .get(revision)
+            .is_some_and(|expiry| *expiry >= access_time))
+    }
+
+    async fn delete_upload_marker(
+        &self,
+        revision: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<bool> {
+        Ok(self
+            .upload_markers
+            .lock()
+            .unwrap()
+            .remove(revision)
+            .is_some_and(|expiry| expiry >= access_time))
+    }
+
     async fn put_non_tombstone(
         &self,
         id: &ObjectId,
@@ -364,20 +436,29 @@ impl HighVolumeBackend for InMemoryBackend {
         payload: Bytes,
         access_time: Timestamp,
     ) -> Result<Option<Tombstone>> {
-        let mut store = self.store.lock().unwrap();
-        if let Some(StoreEntry::Tombstone(tombstone)) = store.get(id)
-            && !tombstone.is_expired(access_time)
-        {
-            return Ok(Some(tombstone.clone()));
-        }
+        self.change_stream
+            .begin_write(id, metadata.time_expires)
+            .await?;
+        let (size, expires_at) = {
+            let mut store = self.store.lock().unwrap();
+            if let Some(StoreEntry::Tombstone(tombstone)) = store.get(id)
+                && !tombstone.is_expired(access_time)
+            {
+                return Ok(Some(tombstone.clone()));
+            }
 
-        let mut metadata = metadata.clone();
-        metadata.size = Some(payload.len());
-        let expires_at = metadata.time_expires;
-        let entry = StoreEntry::Object(metadata, payload);
-        let size = entry.stored_size();
-        store.insert(id.clone(), entry);
-        self.change_stream.write(id, size as u64, expires_at);
+            let mut metadata = metadata.clone();
+            metadata.size = Some(payload.len());
+            let expires_at = metadata.time_expires;
+            let entry = StoreEntry::Object(metadata, payload);
+            let size = entry.stored_size();
+            store.insert(id.clone(), entry);
+            (size, expires_at)
+        };
+
+        self.change_stream
+            .commit_write(id, size as u64, expires_at)
+            .await;
         Ok(None)
     }
 
@@ -430,15 +511,19 @@ impl HighVolumeBackend for InMemoryBackend {
         id: &ObjectId,
         access_time: Timestamp,
     ) -> Result<Option<Tombstone>> {
-        let mut store = self.store.lock().unwrap();
-        if let Some(StoreEntry::Tombstone(tombstone)) = store.get(id).cloned()
-            && !tombstone.is_expired(access_time)
-        {
-            return Ok(Some(tombstone));
-        }
+        let removed = {
+            let mut store = self.store.lock().unwrap();
+            if let Some(StoreEntry::Tombstone(tombstone)) = store.get(id).cloned()
+                && !tombstone.is_expired(access_time)
+            {
+                return Ok(Some(tombstone));
+            }
 
-        if store.remove(id).is_some() {
-            self.change_stream.delete(id);
+            store.remove(id).is_some()
+        };
+
+        if removed {
+            self.change_stream.commit_delete(id).await;
         }
         Ok(None)
     }
@@ -451,26 +536,16 @@ impl HighVolumeBackend for InMemoryBackend {
         access_time: Timestamp,
     ) -> Result<SetExpiryResponse> {
         let TieredUpdate::SetExpiry(expiry_target) = update;
-        let outcome = {
-            let mut store = self.store.lock().unwrap();
-            match (store.get_mut(id), current) {
-                (None, _) => ExpiryOutcome::NotFound,
-                (Some(entry), _) if entry.is_expired(access_time) => ExpiryOutcome::NotFound,
-                (Some(StoreEntry::Object(metadata, _)), None) => {
-                    extend_object_expiry(metadata, expiry_target, access_time)?
-                }
-                (Some(StoreEntry::Tombstone(t)), Some(target)) if t.target == *target => {
-                    extend_expiry(&mut t.time_expires, expiry_target, None, access_time)?
-                }
-                _ => ExpiryOutcome::Rejected,
+        self.update_expiry(id, access_time, |entry| match (entry, current) {
+            (StoreEntry::Object(metadata, _), None) => {
+                extend_object_expiry(metadata, expiry_target, access_time)
             }
-        };
-
-        if let ExpiryOutcome::Extended(expire_at) = outcome {
-            self.change_stream.update(id, Some(expire_at));
-        }
-
-        Ok(outcome.response())
+            (StoreEntry::Tombstone(t), Some(target)) if t.target == *target => {
+                extend_expiry(&mut t.time_expires, expiry_target, None, access_time)
+            }
+            _ => Ok(ExpiryOutcome::Rejected),
+        })
+        .await
     }
 
     async fn compare_and_write(
@@ -480,37 +555,60 @@ impl HighVolumeBackend for InMemoryBackend {
         write: TieredWrite,
         access_time: Timestamp,
     ) -> Result<bool> {
-        let mut store = self.store.lock().unwrap();
-
-        let actual = store.get(id);
-        let matches_current = matches_redirect(actual, current, access_time);
-        let matches_next = matches_redirect(actual, write.target(), access_time);
-
-        if matches_current {
-            match write {
-                TieredWrite::Tombstone(tombstone) => {
-                    let expires_at = tombstone.time_expires;
-                    let entry = StoreEntry::Tombstone(tombstone);
-                    let size = entry.stored_size();
-                    store.insert(id.clone(), entry);
-                    self.change_stream.write(id, size as u64, expires_at);
-                }
-                TieredWrite::Object(metadata, payload) => {
-                    let expires_at = metadata.time_expires;
-                    let entry = StoreEntry::Object(metadata, payload);
-                    let size = entry.stored_size();
-                    store.insert(id.clone(), entry);
-                    self.change_stream.write(id, size as u64, expires_at);
-                }
-                TieredWrite::Delete => {
-                    if store.remove(id).is_some() {
-                        self.change_stream.delete(id);
-                    }
-                }
+        match &write {
+            TieredWrite::Tombstone(tombstone) => {
+                self.change_stream
+                    .begin_write(id, tombstone.time_expires)
+                    .await?;
             }
+            TieredWrite::Object(metadata, _) => {
+                self.change_stream
+                    .begin_write(id, metadata.time_expires)
+                    .await?;
+            }
+            TieredWrite::Delete => {}
         }
 
-        Ok(matches_current || matches_next)
+        let mut written = None;
+        let mut deleted = false;
+        let matches = {
+            let mut store = self.store.lock().unwrap();
+
+            let actual = store.get(id);
+            let matches_current = matches_redirect(actual, current, access_time);
+            let matches_next = matches_redirect(actual, write.target(), access_time);
+
+            if matches_current {
+                match write {
+                    TieredWrite::Tombstone(tombstone) => {
+                        let expires_at = tombstone.time_expires;
+                        let entry = StoreEntry::Tombstone(tombstone);
+                        written = Some((entry.stored_size(), expires_at));
+                        store.insert(id.clone(), entry);
+                    }
+                    TieredWrite::Object(metadata, payload) => {
+                        let expires_at = metadata.time_expires;
+                        let entry = StoreEntry::Object(metadata, payload);
+                        written = Some((entry.stored_size(), expires_at));
+                        store.insert(id.clone(), entry);
+                    }
+                    TieredWrite::Delete => deleted = store.remove(id).is_some(),
+                }
+            }
+
+            matches_current || matches_next
+        };
+
+        if let Some((size, expires_at)) = written {
+            self.change_stream
+                .commit_write(id, size as u64, expires_at)
+                .await;
+        }
+        if deleted {
+            self.change_stream.commit_delete(id).await;
+        }
+
+        Ok(matches)
     }
 }
 
@@ -521,6 +619,9 @@ impl MultipartUploadBackend for InMemoryBackend {
         id: &ObjectId,
         metadata: &Metadata,
     ) -> Result<InitiateMultipartResponse> {
+        self.change_stream
+            .begin_write(id, metadata.time_expires)
+            .await?;
         let upload_id = UploadId::new(uuid::Uuid::now_v7().to_string())?;
         let upload = MultipartUpload {
             metadata: metadata.clone(),
@@ -692,7 +793,9 @@ impl MultipartUploadBackend for InMemoryBackend {
         let entry = StoreEntry::Object(metadata, payload);
         let size = entry.stored_size();
         self.store.lock().unwrap().insert(id.clone(), entry);
-        self.change_stream.write(id, size as u64, expires_at);
+        self.change_stream
+            .commit_write(id, size as u64, expires_at)
+            .await;
 
         self.multipart_store.lock().unwrap().remove(&key);
 
@@ -890,12 +993,17 @@ mod tests {
         })
     }
 
-    async fn create_session(backend: &InMemoryBackend, id: &ObjectId, length: u64) -> BackendToken {
-        backend
+    async fn create_session(backend: &InMemoryBackend, id: &ObjectId, length: u64) -> Session {
+        let backend_token = backend
             .create_upload_session(id, &Metadata::default(), NonZeroU64::new(length).unwrap())
             .await
             .unwrap()
-            .unwrap()
+            .unwrap();
+        Session {
+            object_id: id.clone(),
+            upload_length: NonZeroU64::new(length).unwrap(),
+            backend_token,
+        }
     }
 
     #[tokio::test]
@@ -917,20 +1025,26 @@ mod tests {
             )
             .await
             .unwrap();
+        let upload_length = NonZeroU64::new(3).unwrap();
         let token = backend
-            .create_upload_session(&id, &metadata, NonZeroU64::new(3).unwrap())
+            .create_upload_session(&id, &metadata, upload_length)
             .await
             .unwrap()
             .unwrap();
+        let token = Session {
+            object_id: id.clone(),
+            upload_length,
+            backend_token: token,
+        };
         assert_eq!(
-            backend.upload_offset(&id, &token).await.unwrap(),
+            backend.upload_offset(&token).await.unwrap(),
             UploadProgress::Incomplete { offset: 0 }
         );
 
         // Upload a prefix. The session advances, and the old object remains visible.
         assert_eq!(
             backend
-                .put_chunk(&id, &token, 0, 1, stream::single("a"))
+                .put_chunk(&token, 0, 1, stream::single("a"))
                 .await
                 .unwrap(),
             UploadProgress::Incomplete { offset: 1 }
@@ -938,13 +1052,13 @@ mod tests {
         assert_eq!(backend.get(&id).expect_object().1, "old");
         assert_eq!(
             backend
-                .put_chunk(&id, &token, 0, 0, stream::single(""))
+                .put_chunk(&token, 0, 0, stream::single(""))
                 .await
                 .unwrap(),
             UploadProgress::Incomplete { offset: 1 }
         );
         let error = backend
-            .put_chunk(&id, &token, 0, 1, stream::single("a"))
+            .put_chunk(&token, 0, 1, stream::single("a"))
             .await
             .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::UploadOffsetMismatch { offset: 1 });
@@ -952,7 +1066,7 @@ mod tests {
         // Upload the suffix. Publication replaces the object and deletes the session.
         assert_eq!(
             backend
-                .put_chunk(&id, &token, 1, 2, stream::single("bc"))
+                .put_chunk(&token, 1, 2, stream::single("bc"))
                 .await
                 .unwrap(),
             UploadProgress::Complete
@@ -962,7 +1076,7 @@ mod tests {
         assert_eq!(actual.custom, metadata.custom);
         assert_eq!(actual.size, metadata.size);
         assert_eq!(
-            backend.upload_offset(&id, &token).await.unwrap_err().kind(),
+            backend.upload_offset(&token).await.unwrap_err().kind(),
             ErrorKind::UnknownUploadSession
         );
     }
@@ -975,7 +1089,7 @@ mod tests {
 
         // The backend rejects a chunk whose declared range exceeds the session length.
         let error = backend
-            .put_chunk(&id, &token, 3, 1, stream::single("x"))
+            .put_chunk(&token, 3, 1, stream::single("x"))
             .await
             .unwrap_err();
         assert_eq!(
@@ -989,13 +1103,13 @@ mod tests {
 
         // Cancellation discards partial progress and makes the token unknown to the backend.
         backend
-            .put_chunk(&id, &token, 0, 1, stream::single("a"))
+            .put_chunk(&token, 0, 1, stream::single("a"))
             .await
             .unwrap();
-        backend.cancel_upload(&id, &token).await.unwrap();
+        backend.cancel_upload(&token).await.unwrap();
         assert!(!backend.contains(&id));
         assert_eq!(
-            backend.upload_offset(&id, &token).await.unwrap_err().kind(),
+            backend.upload_offset(&token).await.unwrap_err().kind(),
             ErrorKind::UnknownUploadSession
         );
     }
@@ -1008,7 +1122,7 @@ mod tests {
 
         // Persist a prefix, then disconnect after writing one byte of the next chunk.
         backend
-            .put_chunk(&id, &token, 0, 2, stream::single("ab"))
+            .put_chunk(&token, 0, 2, stream::single("ab"))
             .await
             .unwrap();
         let body = futures_util::stream::iter([
@@ -1020,7 +1134,7 @@ mod tests {
         .boxed();
         assert_eq!(
             backend
-                .put_chunk(&id, &token, 2, 2, body)
+                .put_chunk(&token, 2, 2, body)
                 .await
                 .unwrap_err()
                 .kind(),
@@ -1029,12 +1143,12 @@ mod tests {
 
         // Resume from the partial byte and verify the complete object.
         assert_eq!(
-            backend.upload_offset(&id, &token).await.unwrap(),
+            backend.upload_offset(&token).await.unwrap(),
             UploadProgress::Incomplete { offset: 3 }
         );
         assert_eq!(
             backend
-                .put_chunk(&id, &token, 3, 1, stream::single("d"))
+                .put_chunk(&token, 3, 1, stream::single("d"))
                 .await
                 .unwrap(),
             UploadProgress::Complete
@@ -1051,10 +1165,10 @@ mod tests {
         let body = futures_util::stream::once(async { Ok(receiver.await.unwrap()) }).boxed();
 
         // An offset query waits while a chunk holds the session lock.
-        let request = backend.put_chunk(&id, &token, 0, 1, body);
+        let request = backend.put_chunk(&token, 0, 1, body);
         tokio::pin!(request);
         assert!(futures_util::poll!(&mut request).is_pending());
-        let query = backend.upload_offset(&id, &token);
+        let query = backend.upload_offset(&token);
         tokio::pin!(query);
         assert!(futures_util::poll!(&mut query).is_pending());
 
@@ -1077,14 +1191,14 @@ mod tests {
 
         // Partial session state is not reported as a stored object.
         backend
-            .put_chunk(&id, &token, 0, 1, stream::single("a"))
+            .put_chunk(&token, 0, 1, stream::single("a"))
             .await
             .unwrap();
         assert!(producer.records().is_empty());
 
         // Completion emits exactly one write for the published object.
         backend
-            .put_chunk(&id, &token, 1, 1, stream::single("b"))
+            .put_chunk(&token, 1, 1, stream::single("b"))
             .await
             .unwrap();
         let records = producer.records();

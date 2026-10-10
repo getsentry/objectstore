@@ -215,7 +215,18 @@ impl ObjectId {
     /// `{usecase}/{scope1.key}.{scope1.value}/.../{key}` that is intended to be used by backends to
     /// reference the object in a storage system.
     pub fn as_storage_path(&self) -> AsStoragePath<'_> {
-        AsStoragePath { inner: self }
+        AsStoragePath {
+            inner: self,
+            namespace: KEY_DELIMITER,
+        }
+    }
+
+    /// Returns the internal upload-marker path for this revision, outside the object namespace.
+    pub(crate) fn as_upload_path(&self) -> AsStoragePath<'_> {
+        AsStoragePath {
+            inner: self,
+            namespace: "uploads",
+        }
     }
 }
 
@@ -223,6 +234,7 @@ impl ObjectId {
 #[derive(Debug)]
 pub struct AsStoragePath<'a> {
     inner: &'a ObjectId,
+    namespace: &'static str,
 }
 
 impl fmt::Display for AsStoragePath<'_> {
@@ -231,7 +243,7 @@ impl fmt::Display for AsStoragePath<'_> {
         if !self.inner.context.scopes.is_empty() {
             write!(f, "{}/", self.inner.context.scopes.as_storage_path())?;
         }
-        write!(f, "{}/{}", KEY_DELIMITER, self.inner.key)
+        write!(f, "{}/{}", self.namespace, self.inner.key)
     }
 }
 

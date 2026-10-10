@@ -52,6 +52,8 @@ pub struct ResumableUpload {
     session: Session,
     key: ObjectKey,
     token: SessionToken,
+    total_length: Option<u64>,
+    granularity: Option<u64>,
 }
 
 impl Session {
@@ -87,6 +89,8 @@ impl Session {
             session: self.clone(),
             key: key.into(),
             token,
+            total_length: None,
+            granularity: None,
         }
     }
 }
@@ -100,6 +104,14 @@ impl ResumableUpload {
     /// Returns the session token bound to this upload.
     pub fn token(&self) -> &SessionToken {
         &self.token
+    }
+
+    /// Returns this upload's granularity in bytes, if known.
+    ///
+    /// The granularity is the persistence unit for non-final chunks: chunks shorter than one
+    /// unit are rejected, and larger chunks may persist only an aligned prefix.
+    pub fn granularity(&self) -> Option<u64> {
+        self.granularity
     }
 
     /// Builds a request for the server's authoritative upload progress.
@@ -148,6 +160,28 @@ impl ResumableUpload {
             length,
             body,
         }
+    }
+
+    fn validate_chunk_length(&self, offset: u64, chunk_length: u64) -> crate::Result<()> {
+        let (Some(granularity), Some(total_length)) = (self.granularity, self.total_length) else {
+            // A reconstructed handle cannot tell whether this is the final chunk. The backend
+            // retains the authoritative total length and validates the request.
+            return Ok(());
+        };
+        if granularity == 0 || chunk_length == 0 || chunk_length >= granularity {
+            return Ok(());
+        }
+        if !offset
+            .checked_add(chunk_length)
+            .is_some_and(|end| end < total_length)
+        {
+            return Ok(());
+        }
+
+        Err(Error::ChunkTooSmall {
+            chunk_length,
+            upload_granularity: granularity,
+        })
     }
 
     /// Builds a request to cancel this upload session, discarding any uploaded bytes.
@@ -267,9 +301,14 @@ impl CreateResumableUploadBuilder {
         }
 
         let response: CreateSessionResponse = response.json().await?;
-        Ok(Some(
-            self.session.resume_upload(response.key, response.session),
-        ))
+        let upload = ResumableUpload {
+            session: self.session,
+            key: response.key,
+            token: response.session,
+            total_length: Some(self.total_length),
+            granularity: Some(response.granularity),
+        };
+        Ok(Some(upload))
     }
 }
 
@@ -319,23 +358,27 @@ impl fmt::Debug for PutChunkBuilder {
 impl PutChunkBuilder {
     /// Writes this chunk and returns the server's authoritative progress.
     ///
-    /// If `offset` differs from the server's current offset, the response is returned as
-    /// [`UploadProgress::Incomplete`] with the server's authoritative offset.
-    ///
     /// # Errors
     ///
+    /// Returns [`Error::UploadOffsetMismatch`] with the server's authoritative offset when
+    /// `offset` differs from the server's current offset.
     /// Returns [`Error::ResumableUploadUnavailable`] when the session expired, was canceled, or
     /// could not be found. The upload must be restarted with a new session in that case.
+    /// Returns [`Error::ChunkTooSmall`] before sending the request when this is known to be a
+    /// non-final chunk shorter than the upload granularity.
     ///
     /// ```rust,ignore
     /// let offset = match upload.put(offset, chunk).send().await {
     ///     Ok(UploadProgress::Complete) => return Ok(()),
     ///     Ok(UploadProgress::Incomplete { offset }) => offset,
+    ///     Err(Error::UploadOffsetMismatch { offset }) => offset,
     ///     Err(error @ Error::ResumableUploadUnavailable) => todo!("retry the whole upload"),
     ///     Err(error) => todo!("handle error"),
     /// };
     /// ```
     pub async fn send(self) -> crate::Result<UploadProgress> {
+        self.upload
+            .validate_chunk_length(self.offset, self.length)?;
         let response = self
             .upload
             .request(Method::PUT)?
@@ -385,7 +428,7 @@ impl CancelUploadBuilder {
 
 async fn parse_progress_response(response: Response) -> crate::Result<UploadProgress> {
     match response.status() {
-        StatusCode::NO_CONTENT | StatusCode::CONFLICT => {
+        status @ (StatusCode::NO_CONTENT | StatusCode::CONFLICT) => {
             let offset = parse_offset(&response);
             response.drain_body().await;
             let offset = offset.ok_or_else(|| {
@@ -393,7 +436,11 @@ async fn parse_progress_response(response: Response) -> crate::Result<UploadProg
                     "resumable upload response has no valid Upload-Offset header".into(),
                 )
             })?;
-            Ok(UploadProgress::Incomplete { offset })
+            if status == StatusCode::CONFLICT {
+                Err(Error::UploadOffsetMismatch { offset })
+            } else {
+                Ok(UploadProgress::Incomplete { offset })
+            }
         }
         StatusCode::CREATED => {
             let _: CompleteUploadResponse = response.json().await?;

@@ -1,14 +1,17 @@
 //! Types supporting authenticated Resumable Upload Session tokens.
 //!
 //! Storage backends represent their opaque upload state as a [`BackendToken`]. At the service
-//! boundary, `SessionToken` combines that state with service-specific fields, and
+//! boundary, [`Session`] combines that state with service-specific fields, and
 //! [`crate::encryption::Cipher`] protects the serialized token before it is returned to the server.
+//! After authentication, the service passes the structured [`Session`] to the backend.
 //!
 //! ```text
-//! Storage backend       | objectstore-service                         | objectstore-server             |
-//! BackendToken <------->| SessionToken ---------- Cipher ------------>| EncryptedSessionToken          |
-//! opaque backend state  | { ObjectId, BackendToken }                  | b64url encoded opaque envelope |
+//! Storage backend       | objectstore-service                          | objectstore-server             |
+//! BackendToken <------->| Session --------------- Cipher ------------->| EncryptedSessionToken          |
+//! opaque backend state  | { ObjectId, upload_length, BackendToken }    | b64url encoded opaque envelope |
 //! ```
+
+use std::num::NonZeroU64;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
@@ -21,15 +24,22 @@ pub use objectstore_types::resumable::{
 /// Opaque session state encoded and decoded by a storage backend.
 pub type BackendToken = String;
 
-/// Structured token encrypted at the service boundary.
-#[derive(Deserialize, Serialize)]
-pub(crate) struct SessionToken {
+/// Identifies a resumable upload and carries its declared length.
+///
+/// The service encrypts this value before returning it to clients and authenticates it before
+/// passing it to backend continuation operations.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Session {
+    /// The `ObjectID` this upload is tied to to.
     #[serde(
         serialize_with = "serialize_object_id",
         deserialize_with = "deserialize_object_id"
     )]
-    pub(crate) object_id: ObjectId,
-    pub(crate) backend_token: BackendToken,
+    pub object_id: ObjectId,
+    /// Total length of the upload in bytes.
+    pub upload_length: NonZeroU64,
+    /// Opaque session state belonging to the receiving backend.
+    pub backend_token: BackendToken,
 }
 
 fn serialize_object_id<S>(id: &ObjectId, serializer: S) -> std::result::Result<S::Ok, S::Error>

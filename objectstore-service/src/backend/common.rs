@@ -17,7 +17,7 @@ use crate::multipart::{
     AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
     ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
 };
-use crate::resumable::BackendToken;
+use crate::resumable::{BackendToken, Session};
 use crate::stream::{ClientStream, PayloadStream};
 
 /// User agent string used for outgoing requests.
@@ -190,6 +190,15 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// The backend name, used for diagnostics.
     fn name(&self) -> &'static str;
 
+    /// Returns the upload granularity for sessions opened by this backend, in bytes.
+    ///
+    /// A value of zero means these uploads have no granularity. A positive value means that a
+    /// non-final chunk can persist only a multiple of this value. Implementations must reject a
+    /// non-empty, non-final chunk shorter than one unit with [`ErrorKind::ChunkTooSmall`].
+    fn upload_granularity(&self) -> u64 {
+        0
+    }
+
     /// Stores an object at the given path with the given metadata.
     async fn put_object(
         &self,
@@ -274,9 +283,9 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
         &self,
         id: &ObjectId,
         metadata: &Metadata,
-        total_length: NonZeroU64,
+        upload_length: NonZeroU64,
     ) -> Result<Option<BackendToken>> {
-        let _ = (id, metadata, total_length);
+        let _ = (id, metadata, upload_length);
         Ok(None)
     }
 
@@ -294,18 +303,18 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// A `content_length` of zero is valid. It writes nothing and reports the offset the backend
     /// holds.
     ///
-    /// Returns [`ErrorKind::UnknownUploadSession`] when `token` does not identify an open session,
+    /// Returns [`ErrorKind::UnknownUploadSession`] when `session` does not identify an open session,
     /// and [`ErrorKind::ChunkExceedsUploadLength`] when the chunk would exceed the total length
-    /// declared when the session was created.
+    /// declared when the session was created. Returns [`ErrorKind::ChunkTooSmall`] when a non-empty,
+    /// non-final chunk is shorter than the upload granularity.
     async fn put_chunk(
         &self,
-        id: &ObjectId,
-        token: &BackendToken,
+        session: &Session,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
     ) -> Result<UploadProgress> {
-        let _ = (id, token, offset, content_length, stream);
+        let _ = (session, offset, content_length, stream);
         Err(ErrorKind::Unsupported.into())
     }
 
@@ -315,17 +324,17 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// when its original response was lost. A composed backend may finish pending idempotent
     /// publication work before returning that terminal outcome.
     ///
-    /// Returns [`ErrorKind::UnknownUploadSession`] when `token` does not identify a known session.
-    async fn upload_offset(&self, id: &ObjectId, token: &BackendToken) -> Result<UploadProgress> {
-        let _ = (id, token);
+    /// Returns [`ErrorKind::UnknownUploadSession`] when `session` does not identify a known session.
+    async fn upload_offset(&self, session: &Session) -> Result<UploadProgress> {
+        let _ = session;
         Err(ErrorKind::Unsupported.into())
     }
 
     /// Cancels an upload session, discarding whatever was uploaded.
     ///
-    /// Returns [`ErrorKind::UnknownUploadSession`] when `token` does not identify an open session.
-    async fn cancel_upload(&self, id: &ObjectId, token: &BackendToken) -> Result<()> {
-        let _ = (id, token);
+    /// Returns [`ErrorKind::UnknownUploadSession`] when `session` does not identify an open session.
+    async fn cancel_upload(&self, session: &Session) -> Result<()> {
+        let _ = session;
         Err(ErrorKind::Unsupported.into())
     }
 }
@@ -392,6 +401,29 @@ pub trait MultipartUploadBackend: Backend + fmt::Debug + Send + Sync + 'static {
 /// redirect tombstones.
 #[async_trait::async_trait]
 pub trait HighVolumeBackend: Backend {
+    /// Creates an upload marker separate from the logical object row.
+    ///
+    /// `revision` is the upload's unique LT revision. The fixed deadline is independent
+    /// of object expiration and must not be refreshed by subsequent requests.
+    async fn create_upload_marker(
+        &self,
+        revision: &ObjectId,
+        time_expires: Timestamp,
+    ) -> Result<()>;
+
+    /// Returns whether an upload marker exists and is live at `access_time`.
+    async fn has_upload_marker(&self, revision: &ObjectId, access_time: Timestamp) -> Result<bool>;
+
+    /// Atomically deletes a live upload marker.
+    ///
+    /// Returns `true` only when this call deletes a live marker.
+    /// Missing and expired markers return `false`, including on a repeated deletion.
+    async fn delete_upload_marker(
+        &self,
+        revision: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<bool>;
+
     /// Writes the object only if NO redirect tombstone exists at this key.
     ///
     /// Returns `None` after storing the object, or `Some(tombstone)` (skipping

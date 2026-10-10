@@ -10,6 +10,9 @@ use std::error::Error as StdError;
 use std::fmt;
 
 use objectstore_log::Level;
+
+use crate::change_stream::ChangeStreamError;
+
 /// A panic captured from a service task.
 #[derive(Debug)]
 pub struct Panic {
@@ -70,6 +73,13 @@ pub enum ErrorKind {
         /// The total upload length declared when the session was created.
         upload_length: u64,
     },
+    /// A non-final resumable chunk is shorter than the upload granularity.
+    ChunkTooSmall {
+        /// The declared length of the chunk.
+        chunk_length: u64,
+        /// The upload granularity in bytes.
+        upload_granularity: u64,
+    },
     /// The service cannot accept more work.
     AtCapacity,
     /// The requested operation is unsupported.
@@ -113,6 +123,13 @@ impl fmt::Display for ErrorKind {
             } => write!(
                 f,
                 "chunk at offset {offset} with length {content_length} exceeds upload length {upload_length}"
+            ),
+            Self::ChunkTooSmall {
+                chunk_length,
+                upload_granularity,
+            } => write!(
+                f,
+                "non-final chunk length {chunk_length} is smaller than upload granularity {upload_granularity}"
             ),
             Self::AtCapacity => f.write_str("service at capacity"),
             Self::Unsupported => f.write_str("unsupported operation"),
@@ -192,6 +209,7 @@ impl Error {
             ErrorKind::UploadSessionGone => Level::DEBUG,
             ErrorKind::UnknownUploadSession => Level::DEBUG,
             ErrorKind::ChunkExceedsUploadLength { .. } => Level::DEBUG,
+            ErrorKind::ChunkTooSmall { .. } => Level::DEBUG,
             // Indicates that optional functionality is not supported.
             // We don't want a rogue client spamming us with Sentry errors just by calling an API
             // that the server doesn't support, so we just log it.
@@ -293,6 +311,17 @@ where
 
     fn kind(self, kind: ErrorKind) -> Result<T> {
         self.map_err(|source| Error::with_source(kind, source))
+    }
+}
+
+impl From<ChangeStreamError> for Error {
+    fn from(source: ChangeStreamError) -> Self {
+        let kind = match source {
+            ChangeStreamError::Unavailable(_) => ErrorKind::BackendUnavailable,
+            ChangeStreamError::Timeout(_) => ErrorKind::BackendTimeout,
+            ChangeStreamError::Failure(_) => ErrorKind::BackendFailure,
+        };
+        Self::with_context(kind, "writing to the change stream", source)
     }
 }
 

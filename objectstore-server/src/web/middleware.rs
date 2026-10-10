@@ -1,13 +1,11 @@
 use std::any::Any;
-use std::net::SocketAddr;
 
 use axum::RequestExt;
 use axum::body::Body;
-use axum::extract::{ConnectInfo, MatchedPath, RawPathParams, Request, State};
+use axum::extract::{MatchedPath, RawPathParams, Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use objectstore_log::tracing;
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::endpoints;
@@ -54,25 +52,6 @@ pub fn set_server_header() -> SetResponseHeaderLayer<HeaderValue> {
     SetResponseHeaderLayer::overriding(header::SERVER, HeaderValue::from_static(SERVER))
 }
 
-/// Create a tracing span for an HTTP request.
-///
-/// As opposed to `DefaultMakeSpan`, this also records the client IP address if available.
-pub fn make_http_span(request: &Request) -> tracing::Span {
-    let span = tracing::debug_span!(
-        "request",
-        method = %request.method(),
-        uri = %request.uri(),
-        version = ?request.version(),
-        client_addr = tracing::field::Empty,
-    );
-
-    if let Some(ConnectInfo(addr)) = request.extensions().get::<ConnectInfo<SocketAddr>>() {
-        span.record("client_addr", tracing::field::display(addr.ip()));
-    }
-
-    span
-}
-
 /// A panic handler that logs the panic and turns it into a 500 response.
 ///
 /// Use with the [`CatchPanicLayer`](tower_http::catch_panic::CatchPanicLayer) middleware.
@@ -91,7 +70,7 @@ pub fn handle_panic(err: Box<dyn Any + Send + 'static>) -> Response {
     response.into_response()
 }
 
-/// Wraps the response body so the request's Sentry hub stays active during polling.
+/// Wraps the response body with a fork of the request's Sentry hub for polling.
 ///
 /// Use this with [`from_fn`](axum::middleware::from_fn). Place it below the Sentry
 /// tower layers so that `Hub::current()` returns the request-scoped hub.
@@ -99,7 +78,7 @@ pub async fn bind_sentry_body(request: Request, next: Next) -> Response {
     let hub = sentry::Hub::current();
     next.run(request)
         .await
-        .map(|body| Body::new(SentryBody::new(hub, body)))
+        .map(|body| Body::new(SentryBody::new(sentry::Hub::new_from_top(hub).into(), body)))
 }
 
 async fn get_usecase(request: &mut Request) -> Option<String> {

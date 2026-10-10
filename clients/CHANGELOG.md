@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.9
+
+### New Features ✨
+
+- (rust-client) Surface upload offset mismatch as an error by @lcian in [#654](https://github.com/getsentry/objectstore/pull/654)
+
+## 0.2.8
+
+### New Features ✨
+
+- (resumable) Define and expose upload granularity by @lcian in [#652](https://github.com/getsentry/objectstore/pull/652)
+
 ## 0.2.7
 
 ### New Features ✨

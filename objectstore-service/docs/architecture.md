@@ -80,7 +80,8 @@ and large, infrequently-accessed ones:
 
 The threshold is **1 MiB**. `TieredStorage` routes objects at or below this
 size to the high-volume backend; objects exceeding it go to the long-term
-backend.
+backend. The backend rejects Resumable Upload creation requests when the
+given object size is below this threshold.
 
 See [`backend::StorageConfig`] for available backend implementations.
 
@@ -181,14 +182,21 @@ See also: [`objectstore_inventory_tracker`] documentation.
 # Change Streams
 
 Every backend publishes the changes it makes to the objects it stores as a
-[`ChangeStream`](change_stream::ChangeStream). It is a fire-and-forget,
-per-backend feed of three operations:
+[`ChangeStream`](change_stream::ChangeStream). It is a per-backend feed of
+three operations:
 
 - `write(id, size, expires_at)`: `id` now occupies `size` bytes. Used for both
   new objects and overwrites.
 - `update(id, expires_at)`: `id`'s expiration moved while its stored size is
   unchanged. In practice this is a TTI bump.
 - `delete(id)`: `id` was deleted explicitly.
+
+Writes and updates are reported twice: `begin_*` before the storage operation
+and `commit_*` after it succeeds. Deletes are only committed. A failed
+`begin_*` fails the request before storage is touched, while `commit_*` cannot
+fail. Resumable and multipart uploads call `begin_write` when they are created.
+A `begin_*` is not always followed by a `commit_*`, so `begin_*` gives an upper
+bound on what is stored, e.g. for cleaning up expired data.
 
 The stream describes physical storage per backend. When using
 [`TieredStorage`](backend::tiered::TieredStorage), objects that are stored in
@@ -331,10 +339,13 @@ Not all backends support resumable uploads. A backend returns no session when it
 particular upload; this is a routine outcome rather than an error. Acceptance can depend on the
 declared size, the metadata, or whether resuming is possible in principle.
 
-The offset returned by every chunk response is authoritative. A backend may accept the full
-request body but persist only a prefix (for example, up to an internal alignment boundary), so a
-client must not advance by the submitted `Content-Length` on its own. It continues from the
-preceding response's offset, or performs an explicit offset query after an ambiguous failure.
+The offset returned by every chunk response is authoritative. Session creation reports each
+upload's granularity in bytes, or zero when it imposes none. For a positive granularity, a backend
+may accept the full request body but persist only the largest aligned prefix, so a client must not
+advance by the submitted `Content-Length` on its own. Non-empty, non-final chunks shorter than one
+granularity unit are rejected; the final chunk is exempt. Clients should use granularity-sized
+multiples and continue from the preceding response's offset, or perform an explicit offset query
+after an ambiguous failure.
 
 ## Multipart Uploads
 

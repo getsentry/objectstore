@@ -2,7 +2,7 @@
 //!
 //! # Row Format
 //!
-//! Each row key is the object's storage path. A row contains either an **object** or a
+//! Object row keys use the object's storage path. An object row contains either an **object** or a
 //! **tombstone** — never both. The two layouts are mutually exclusive and distinguished by
 //! column presence:
 //!
@@ -19,6 +19,9 @@
 //!
 //! `p`/`m` and `r` are mutually exclusive. Every write begins with a `DeleteFromRow`
 //! mutation that clears all columns before writing the new cells, so mixed rows cannot exist.
+//!
+//! Upload markers use a separate `uploads` namespace and contain only a one-byte
+//! `u` cell in `fg`, timestamped with the upload deadline.
 //!
 //! ## Legacy Tombstone Format
 //!
@@ -186,6 +189,9 @@ const COLUMN_METADATA: &[u8] = b"m";
 const COLUMN_REDIRECT: &[u8] = b"r";
 /// Regex to match all non-payload columns (`m`, `r`) for metadata-only reads.
 const FILTER_META: &[u8] = b"^[mr]$";
+
+/// Column which marks the presence of an ongoing resumable upload.
+const COLUMN_UPLOAD: &[u8] = b"u";
 
 /// Column family that uses timestamp-based garbage collection.
 ///
@@ -993,6 +999,9 @@ impl Backend for BigTableBackend {
         _access_time: Timestamp,
     ) -> Result<PutResponse> {
         objectstore_log::debug!("Writing to Bigtable backend");
+        self.change_stream
+            .begin_write(id, metadata.time_expires)
+            .await?;
         let path = id.as_storage_path().to_string().into_bytes();
 
         let mut payload = ChunkedBytes::new(0);
@@ -1003,7 +1012,9 @@ impl Backend for BigTableBackend {
         let (_, size) = self
             .put_row(path, metadata.clone(), payload.into_bytes().into(), "put")
             .await?;
-        self.change_stream.write(id, size, metadata.time_expires);
+        self.change_stream
+            .commit_write(id, size, metadata.time_expires)
+            .await;
 
         Ok(())
     }
@@ -1057,7 +1068,7 @@ impl Backend for BigTableBackend {
 
         let path = id.as_storage_path().to_string().into_bytes();
         self.mutate(path, [delete_row_mutation()], "delete").await?;
-        self.change_stream.delete(id);
+        self.change_stream.commit_delete(id).await;
 
         Ok(())
     }
@@ -1069,6 +1080,58 @@ impl Backend for BigTableBackend {
 
 #[async_trait::async_trait]
 impl HighVolumeBackend for BigTableBackend {
+    async fn create_upload_marker(
+        &self,
+        revision: &ObjectId,
+        time_expires: Timestamp,
+    ) -> Result<()> {
+        let mutations = vec![mutation(mutation::Mutation::SetCell(mutation::SetCell {
+            family_name: FAMILY_GC.to_owned(),
+            column_qualifier: COLUMN_UPLOAD.to_vec(),
+            timestamp_micros: time_expires.as_micros() as i64,
+            value: vec![1],
+        }))];
+        self.mutate(
+            revision.as_upload_path().to_string().into_bytes(),
+            mutations,
+            "create_upload_marker",
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn has_upload_marker(&self, revision: &ObjectId, access_time: Timestamp) -> Result<bool> {
+        let request = v2::ReadRowsRequest {
+            table_name: self.table_path.clone(),
+            rows: Some(v2::RowSet {
+                row_keys: vec![revision.as_upload_path().to_string().into_bytes()],
+                row_ranges: vec![],
+            }),
+            filter: Some(live_row_filter(column_filter(COLUMN_UPLOAD), access_time)),
+            rows_limit: 1,
+            ..Default::default()
+        };
+        let rows = retry("has_upload_marker", || async {
+            self.bigtable.client().read_rows(request.clone()).await
+        })
+        .await?;
+        Ok(!rows.is_empty())
+    }
+
+    async fn delete_upload_marker(
+        &self,
+        revision: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<bool> {
+        self.check_and_mutate(
+            revision.as_upload_path().to_string().into_bytes(),
+            MutatePredicate::Include(live_row_filter(column_filter(COLUMN_UPLOAD), access_time)),
+            vec![delete_row_mutation()],
+            "delete_upload_marker",
+        )
+        .await
+    }
+
     #[tracing::instrument(level = "debug", fields(?id), skip_all)]
     async fn put_non_tombstone(
         &self,
@@ -1078,6 +1141,9 @@ impl HighVolumeBackend for BigTableBackend {
         access_time: Timestamp,
     ) -> Result<Option<Tombstone>> {
         objectstore_log::debug!("Conditional put to Bigtable backend");
+        self.change_stream
+            .begin_write(id, metadata.time_expires)
+            .await?;
 
         let path = id.as_storage_path().to_string().into_bytes();
         let (mutations, size) = object_mutations(&path, metadata.clone(), payload.to_vec())?;
@@ -1093,7 +1159,9 @@ impl HighVolumeBackend for BigTableBackend {
                 .await?;
 
             if write_succeeded {
-                self.change_stream.write(id, size, metadata.time_expires);
+                self.change_stream
+                    .commit_write(id, size, metadata.time_expires)
+                    .await;
                 return Ok(None);
             }
 
@@ -1305,12 +1373,13 @@ impl HighVolumeBackend for BigTableBackend {
             }
         };
 
+        self.change_stream.begin_update(id, Some(expire_at)).await?;
         let applied = self
             .check_and_mutate(path, predicate, mutations, "set_expiry")
             .await?;
 
         if applied {
-            self.change_stream.update(id, Some(expire_at));
+            self.change_stream.commit_update(id, Some(expire_at)).await;
         }
 
         Ok(if applied {
@@ -1341,7 +1410,7 @@ impl HighVolumeBackend for BigTableBackend {
                 .await?;
 
             if deleted {
-                self.change_stream.delete(id);
+                self.change_stream.commit_delete(id).await;
                 return Ok(None);
             }
 
@@ -1413,6 +1482,9 @@ impl HighVolumeBackend for BigTableBackend {
             }
             TieredWrite::Delete => (vec![delete_row_mutation()], None),
         };
+        if let Some(expires_at) = expires_at {
+            self.change_stream.begin_write(id, expires_at).await?;
+        }
 
         let written = self
             .check_and_mutate(
@@ -1429,10 +1501,11 @@ impl HighVolumeBackend for BigTableBackend {
             // We wrote something (the inner `expires_at` is `None` for manual GC)
             (true, Some(expires_at)) => {
                 self.change_stream
-                    .write(id, row_size(&path, &mutations), expires_at)
+                    .commit_write(id, row_size(&path, &mutations), expires_at)
+                    .await
             }
             // We deleted something
-            (true, None) => self.change_stream.delete(id),
+            (true, None) => self.change_stream.commit_delete(id).await,
         }
 
         Ok(written)

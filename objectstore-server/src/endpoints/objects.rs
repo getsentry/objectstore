@@ -270,13 +270,15 @@ fn insert_content_length(headers: &mut HeaderMap, metadata: &Metadata) {
     }
 }
 
+/// Serves every object as an attachment, named after its filename when it has one.
 fn insert_content_disposition(response: &mut Response, metadata: &Metadata) {
-    if let Some(filename) = metadata.filename.as_deref() {
-        response.headers_mut().insert(
-            http::header::CONTENT_DISPOSITION,
-            format_content_disposition(filename),
-        );
-    }
+    let value = match metadata.filename.as_deref() {
+        Some(filename) => format_content_disposition(filename),
+        None => http::HeaderValue::from_static("attachment"),
+    };
+    response
+        .headers_mut()
+        .insert(http::header::CONTENT_DISPOSITION, value);
 }
 
 /// Formats a `Content-Disposition: attachment; filename="..."` header value.

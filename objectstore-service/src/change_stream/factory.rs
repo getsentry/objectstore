@@ -149,14 +149,18 @@ mod tests {
         assert!(!reports(&factory.build(Some(&config()))));
     }
 
-    #[test]
-    fn a_configured_backend_reports_through_the_transport() {
+    #[tokio::test]
+    async fn a_configured_backend_reports_through_the_transport() {
         let (factory, producer) = dummy_factory();
         let stream = factory.build(Some(&config()));
 
         assert!(reports(&stream));
 
-        stream.delete(&crate::id::ObjectId::from_storage_path("attachments/objects/abc").unwrap());
+        stream
+            .commit_delete(
+                &crate::id::ObjectId::from_storage_path("attachments/objects/abc").unwrap(),
+            )
+            .await;
 
         let records = producer.records();
         assert_eq!(records.len(), 1);
