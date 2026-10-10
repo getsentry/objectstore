@@ -1,7 +1,7 @@
 //! Storage backend implementations.
 //!
 //! This module contains the [`Backend`](common::Backend) trait and its
-//! implementations. Each backend adapts a specific storage system (BigTable,
+//! implementations. Each backend adapts a specific storage system (BigTable, Cassandra/Scylla,
 //! GCS, local filesystem, S3-compatible) to a uniform interface that
 //! [`StorageService`](crate::StorageService) consumes.
 //!
@@ -17,6 +17,7 @@ pub mod bigtable;
 pub mod changelog;
 pub mod common;
 pub mod counting;
+pub mod cql;
 mod extensions;
 pub mod gcs;
 pub mod in_memory;
@@ -50,6 +51,9 @@ pub enum StorageConfig {
     ///
     /// [Google Bigtable]: https://cloud.google.com/bigtable
     BigTable(bigtable::BigTableConfig),
+
+    /// Cassandra or Scylla storage backend (type `"cql"`).
+    Cql(cql::CqlConfig),
 
     /// Tiered storage backend (type `"tiered"`).
     ///
@@ -92,6 +96,7 @@ async fn from_leaf_config(
         ),
         StorageConfig::Gcs(c) => Box::new(gcs::GcsBackend::new(c, streams).await?),
         StorageConfig::BigTable(c) => Box::new(bigtable::BigTableBackend::new(c, streams).await?),
+        StorageConfig::Cql(c) => Box::new(cql::CqlBackend::new(c, streams).await?),
         StorageConfig::Tiered(_) => anyhow::bail!("nested tiered storage is not supported"),
     })
 }
@@ -99,10 +104,12 @@ async fn from_leaf_config(
 /// Configuration for the high-volume backend in a [`tiered::TieredStorageConfig`].
 ///
 /// Only backends that implement [`common::HighVolumeBackend`] are valid here.
-/// Currently this is limited to BigTable.
+/// Supported implementations are BigTable and CQL (Cassandra or Scylla).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum HighVolumeStorageConfig {
+    /// Cassandra or Scylla backend.
+    Cql(cql::CqlConfig),
     /// [Google Bigtable] backend.
     ///
     /// [Google Bigtable]: https://cloud.google.com/bigtable
@@ -115,6 +122,7 @@ async fn hv_from_config(
     streams: &ChangeStreamFactory,
 ) -> Result<Box<dyn common::HighVolumeBackend>> {
     Ok(match config {
+        HighVolumeStorageConfig::Cql(c) => Box::new(cql::CqlBackend::new(c, streams).await?),
         HighVolumeStorageConfig::BigTable(c) => {
             Box::new(bigtable::BigTableBackend::new(c, streams).await?)
         }
