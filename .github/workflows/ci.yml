@@ -101,6 +101,19 @@ jobs:
             ghcr.io/getsentry/image-mirror-google-cloud-sdk:588.0.0 \
             /run-bigtable.sh
 
+      - name: Start Cassandra
+        run: |
+          docker run -d \
+            --name cassandra \
+            -p 8088:9042 \
+            -e MAX_HEAP_SIZE=512M \
+            -e HEAP_NEWSIZE=128M \
+            -e CASSANDRA_BROADCAST_RPC_ADDRESS=127.0.0.1 \
+            -v $PWD/devservices/run-cassandra.sh:/run-cassandra.sh \
+            -v $PWD/devservices/cql-schema.cql:/cql-schema.cql \
+            cassandra:5.0.9 \
+            /run-cassandra.sh
+
       - name: Build GCS Emulator
         run: |
           docker build -t gcs-emulator-local https://github.com/getsentry/google-cloud-storage-testbench.git#main
@@ -137,6 +150,11 @@ jobs:
 
       - uses: taiki-e/install-action@cargo-llvm-cov
 
+      # Cassandra takes a while to boot; the schema exists once the start script is done.
+      - name: Wait for Cassandra
+        run: |
+          timeout 300 bash -c 'until docker exec cassandra cqlsh -e "describe table objectstore.objectstore" >/dev/null 2>&1; do sleep 3; done'
+
       - name: Run Rust doctests
         run: cargo test --workspace --all-features --doc --locked
 
@@ -150,6 +168,56 @@ jobs:
           files: lcov.info
           flags: rust
           use_oidc: true
+
+  test-cql-scylla:
+    name: Test CQL backend (ScyllaDB)
+    runs-on: ubuntu-latest
+
+    steps:
+      # librdkafka is built from source and links against libcurl, whose headers are not
+      # on the runner by default. Needed by anything that builds the `kafka` feature.
+      - name: Install libcurl-dev
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev
+
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Start ScyllaDB
+        run: |
+          docker run -d \
+            --name scylla \
+            -p 8090:9042 \
+            -v $PWD/devservices/cql-schema.cql:/cql-schema.cql \
+            scylladb/scylla:2026.1.14 \
+            --smp 1 --memory 750M --overprovisioned 1 --developer-mode 1 \
+            --broadcast-rpc-address 127.0.0.1
+
+      - name: Install Rust Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        with:
+          key: ${{ github.job }}
+
+      - name: Build tests
+        run: cargo test -p objectstore-service --all-features --lib --locked --no-run
+
+      - name: Create ScyllaDB schema
+        run: |
+          timeout 300 bash -c 'until docker exec scylla cqlsh -e "describe keyspaces" >/dev/null 2>&1; do sleep 3; done'
+          docker exec scylla cqlsh -f /cql-schema.cql
+
+      - name: Run tests
+        run: cargo test -p objectstore-service --all-features --lib --locked backend::cql
+        env:
+          OS_TEST_CQL_NODES: localhost:8090
 
   test-python:
     name: Test Python

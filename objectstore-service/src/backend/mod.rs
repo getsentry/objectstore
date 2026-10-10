@@ -2,7 +2,7 @@
 //!
 //! This module contains the [`Backend`](common::Backend) trait and its
 //! implementations. Each backend adapts a specific storage system (BigTable,
-//! GCS, local filesystem, S3-compatible) to a uniform interface that
+//! CQL databases, GCS, local filesystem, S3-compatible) to a uniform interface that
 //! [`StorageService`](crate::StorageService) consumes.
 //!
 //! Two-tier routing is encapsulated in [`TieredStorage`](tiered::TieredStorage)
@@ -17,6 +17,7 @@ pub mod bigtable;
 pub mod changelog;
 pub mod common;
 pub mod counting;
+pub mod cql;
 mod extensions;
 pub mod gcs;
 pub mod in_memory;
@@ -50,6 +51,12 @@ pub enum StorageConfig {
     ///
     /// [Google Bigtable]: https://cloud.google.com/bigtable
     BigTable(bigtable::BigTableConfig),
+
+    /// CQL backend for [Apache Cassandra] or [ScyllaDB] (type `"cql"`).
+    ///
+    /// [Apache Cassandra]: https://cassandra.apache.org/
+    /// [ScyllaDB]: https://www.scylladb.com/
+    Cql(cql::CqlConfig),
 
     /// Tiered storage backend (type `"tiered"`).
     ///
@@ -92,14 +99,15 @@ async fn from_leaf_config(
         ),
         StorageConfig::Gcs(c) => Box::new(gcs::GcsBackend::new(c, streams).await?),
         StorageConfig::BigTable(c) => Box::new(bigtable::BigTableBackend::new(c, streams).await?),
+        StorageConfig::Cql(c) => Box::new(cql::CqlBackend::new(c, streams).await?),
         StorageConfig::Tiered(_) => anyhow::bail!("nested tiered storage is not supported"),
     })
 }
 
 /// Configuration for the high-volume backend in a [`tiered::TieredStorageConfig`].
 ///
-/// Only backends that implement [`common::HighVolumeBackend`] are valid here.
-/// Currently this is limited to BigTable.
+/// Only backends that implement [`common::HighVolumeBackend`] are valid here:
+/// BigTable and CQL databases.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum HighVolumeStorageConfig {
@@ -107,6 +115,12 @@ pub enum HighVolumeStorageConfig {
     ///
     /// [Google Bigtable]: https://cloud.google.com/bigtable
     BigTable(bigtable::BigTableConfig),
+
+    /// CQL backend for [Apache Cassandra] or [ScyllaDB].
+    ///
+    /// [Apache Cassandra]: https://cassandra.apache.org/
+    /// [ScyllaDB]: https://www.scylladb.com/
+    Cql(cql::CqlConfig),
 }
 
 /// Constructs a type-erased [`common::HighVolumeBackend`] from the given config.
@@ -118,6 +132,7 @@ async fn hv_from_config(
         HighVolumeStorageConfig::BigTable(c) => {
             Box::new(bigtable::BigTableBackend::new(c, streams).await?)
         }
+        HighVolumeStorageConfig::Cql(c) => Box::new(cql::CqlBackend::new(c, streams).await?),
     })
 }
 

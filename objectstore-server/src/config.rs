@@ -495,13 +495,13 @@ pub struct Config {
     ///
     /// # Environment Variables
     ///
-    /// - `OS__STORAGE__TYPE` — backend type (`filesystem`, `tiered`, `gcs`, `bigtable`,
+    /// - `OS__STORAGE__TYPE` — backend type (`filesystem`, `tiered`, `gcs`, `bigtable`, `cql`,
     ///   `s3compatible`)
     /// - Additional fields depending on the type (see [`StorageConfig`])
     ///
     /// For tiered storage, sub-backend fields are nested under `high_volume` and `long_term`:
     /// - `OS__STORAGE__TYPE=tiered`
-    /// - `OS__STORAGE__HIGH_VOLUME__TYPE=bigtable`
+    /// - `OS__STORAGE__HIGH_VOLUME__TYPE=bigtable` (or `cql`)
     /// - `OS__STORAGE__LONG_TERM__TYPE=gcs`
     ///
     /// # Example (tiered)
@@ -925,6 +925,7 @@ impl Config {
 mod tests {
     use std::io::Write;
 
+    use objectstore_service::backend::cql::{CqlConsistency, CqlSerialConsistency};
     use objectstore_service::backend::{HighVolumeStorageConfig, MultipartUploadStorageConfig};
     use secrecy::ExposeSecret;
 
@@ -1121,7 +1122,9 @@ mod tests {
             let StorageConfig::Tiered(c) = &dbg!(&config).storage else {
                 panic!("expected tiered storage");
             };
-            let HighVolumeStorageConfig::BigTable(hv) = &c.high_volume;
+            let HighVolumeStorageConfig::BigTable(hv) = &c.high_volume else {
+                panic!("expected bigtable high_volume");
+            };
             assert_eq!(hv.project_id, "my-project");
             assert_eq!(hv.rpc_timeout, Duration::from_secs(2));
             let MultipartUploadStorageConfig::Gcs(lt) = &c.long_term else {
@@ -1150,7 +1153,9 @@ mod tests {
             let StorageConfig::Tiered(c) = &dbg!(&config).storage else {
                 panic!("expected tiered storage");
             };
-            let HighVolumeStorageConfig::BigTable(hv) = &c.high_volume;
+            let HighVolumeStorageConfig::BigTable(hv) = &c.high_volume else {
+                panic!("expected bigtable high_volume");
+            };
             assert_eq!(hv.project_id, "my-project");
             assert_eq!(hv.instance_name, "my-instance");
             assert_eq!(hv.table_name, "my-table");
@@ -1159,6 +1164,51 @@ mod tests {
                 panic!("expected filesystem long_term");
             };
             assert_eq!(lt.path, Path::new("/data/lt"));
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn tiered_cql_storage_via_env() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("OS__STORAGE__TYPE", "tiered");
+            jail.set_env("OS__STORAGE__HIGH_VOLUME__TYPE", "cql");
+            jail.set_env(
+                "OS__STORAGE__HIGH_VOLUME__NODES",
+                "[cassandra-1:9042,cassandra-2:9042]",
+            );
+            jail.set_env("OS__STORAGE__HIGH_VOLUME__KEYSPACE", "my_keyspace");
+            jail.set_env("OS__STORAGE__HIGH_VOLUME__TABLE_NAME", "my_table");
+            jail.set_env("OS__STORAGE__HIGH_VOLUME__USERNAME", "objectstore");
+            jail.set_env("OS__STORAGE__HIGH_VOLUME__PASSWORD", "hunter2");
+            jail.set_env("OS__STORAGE__HIGH_VOLUME__SERIAL_CONSISTENCY", "serial");
+            jail.set_env("OS__STORAGE__HIGH_VOLUME__TLS__CA_CERT", "/etc/ca.pem");
+            jail.set_env("OS__STORAGE__LONG_TERM__TYPE", "filesystem");
+            jail.set_env("OS__STORAGE__LONG_TERM__PATH", "/data/lt");
+
+            let config = Config::load(None).unwrap();
+
+            let StorageConfig::Tiered(c) = &dbg!(&config).storage else {
+                panic!("expected tiered storage");
+            };
+            let HighVolumeStorageConfig::Cql(hv) = &c.high_volume else {
+                panic!("expected cql high_volume");
+            };
+            assert_eq!(hv.nodes, ["cassandra-1:9042", "cassandra-2:9042"]);
+            assert_eq!(hv.keyspace, "my_keyspace");
+            assert_eq!(hv.table_name, "my_table");
+            assert_eq!(hv.username.as_deref(), Some("objectstore"));
+            assert!(hv.password.is_some());
+            assert_eq!(hv.consistency, CqlConsistency::LocalQuorum);
+            assert_eq!(hv.serial_consistency, CqlSerialConsistency::Serial);
+            assert_eq!(hv.request_timeout, Duration::from_secs(2));
+            let tls = hv.tls.as_ref().expect("tls config");
+            assert_eq!(tls.ca_cert.as_deref(), Some(Path::new("/etc/ca.pem")));
+            assert!(tls.verify_hostname);
+
+            // The password must not leak into debug output.
+            assert!(!format!("{config:?}").contains("hunter2"));
 
             Ok(())
         });
