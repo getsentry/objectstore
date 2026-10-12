@@ -1401,6 +1401,7 @@ mod tests {
             GcsConfig {
                 endpoint: Some("http://localhost:8087".into()),
                 bucket: "test-bucket".into(),
+                tcp_user_timeout: Duration::from_secs(30),
                 cogs: None,
             },
             &streams,

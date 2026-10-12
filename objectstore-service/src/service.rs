@@ -701,6 +701,7 @@ mod tests {
         let config = GcsConfig {
             endpoint: Some("http://localhost:8087".into()),
             bucket: "test-bucket".into(), // aligned with the env var in devservices and CI
+            tcp_user_timeout: Duration::from_secs(30),
             cogs: None,
         };
 
@@ -744,6 +745,7 @@ mod tests {
         let gcs_config = GcsConfig {
             endpoint: Some("http://localhost:8087".into()),
             bucket: "test-bucket".into(),
+            tcp_user_timeout: Duration::from_secs(30),
             cogs: None,
         };
 

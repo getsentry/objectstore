@@ -4,6 +4,7 @@ use std::convert::Infallible;
 use std::error::Error as StdError;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 use std::{fmt, io};
 
 use futures_util::{StreamExt, TryStreamExt};
@@ -61,6 +62,22 @@ pub struct S3CompatibleConfig {
     ///
     /// - `OS__STORAGE__BUCKET=my-bucket`
     pub bucket: String,
+
+    /// Maximum time TCP data may remain unacknowledged or blocked before failing the request.
+    ///
+    /// This detects stalled transports. It does not limit the total upload duration or the time
+    /// waiting for a response after the upload is acknowledged. Applied on Linux and ignored on
+    /// other platforms. `0s` uses the operating system's default.
+    ///
+    /// # Default
+    ///
+    /// `30s`
+    ///
+    /// # Environment Variables
+    ///
+    /// - `OS__STORAGE__TCP_USER_TIMEOUT=30s`
+    #[serde(default = "common::default_tcp_user_timeout", with = "humantime_serde")]
+    pub tcp_user_timeout: Duration,
 
     /// Reports what this backend stores, for per-usecase cost attribution.
     ///
@@ -151,10 +168,11 @@ impl<T> S3CompatibleBackend<T> {
         let S3CompatibleConfig {
             endpoint,
             bucket,
+            tcp_user_timeout,
             cogs,
         } = config;
         Self {
-            client: common::reqwest_client(),
+            client: common::reqwest_client(tcp_user_timeout),
             endpoint,
             bucket,
             token_provider,
@@ -560,6 +578,7 @@ mod tests {
             S3CompatibleConfig {
                 endpoint: "http://localhost:8089".into(),
                 bucket: "test-bucket".into(),
+                tcp_user_timeout: Duration::from_secs(30),
                 cogs: None,
             },
             &ChangeStreamFactory::default(),
@@ -637,6 +656,7 @@ mod tests {
                 S3CompatibleConfig {
                     endpoint,
                     bucket: "bucket".into(),
+                    tcp_user_timeout: Duration::from_secs(30),
                     cogs: None,
                 },
                 &ChangeStreamFactory::default(),
