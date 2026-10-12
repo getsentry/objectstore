@@ -611,6 +611,17 @@ impl GcsBackend {
         Ok(builder)
     }
 
+    /// Counts a terminal request-operation error without retrying the future.
+    async fn with_failure_metrics<T>(
+        &self,
+        action: &'static str,
+        future: impl Future<Output = Result<T>> + Send,
+    ) -> Result<T> {
+        future.await.inspect_err(|_| {
+            objectstore_metrics::count!("gcs.failures", action = action);
+        })
+    }
+
     /// Retries a GCS request on transient errors.
     async fn with_retry<T, F>(&self, action: &'static str, f: impl Fn() -> F) -> Result<T>
     where
@@ -920,14 +931,18 @@ impl Backend for GcsBackend {
         // set the header *after* writing the multipart form into the request.
         let content_type = format!("multipart/related; boundary={}", multipart.boundary());
 
+        let url = self.upload_url(id, "multipart")?;
         let response = self
-            .request(Method::POST, self.upload_url(id, "multipart")?)
-            .await?
-            .multipart(multipart)
-            .header(header::CONTENT_TYPE, content_type)
-            .send_traced()
-            .await
-            .check_error("uploading a GCS object")
+            .with_failure_metrics("put_object", async {
+                self.request(Method::POST, url)
+                    .await?
+                    .multipart(multipart)
+                    .header(header::CONTENT_TYPE, content_type)
+                    .send_traced()
+                    .await
+                    .check_error("uploading a GCS object")
+                    .await
+            })
             .await?;
 
         let stored_size = read_stored_content_length(response).await;
@@ -1259,17 +1274,21 @@ impl Backend for GcsBackend {
             _ => format!("bytes {offset}-{}/{}", end - 1, session.upload_length),
         };
 
-        let response = self
-            .request(Method::PUT, session_uri.as_str())
-            .await?
-            .header(header::CONTENT_LENGTH, content_length)
-            .header(header::CONTENT_RANGE, content_range)
-            .body(Body::wrap_stream(stream))
-            .send_traced()
-            .await
-            .reqwest_context("uploading a GCS resumable chunk")?;
+        let progress = self
+            .with_failure_metrics("put_chunk", async {
+                let response = self
+                    .request(Method::PUT, session_uri.as_str())
+                    .await?
+                    .header(header::CONTENT_LENGTH, content_length)
+                    .header(header::CONTENT_RANGE, content_range)
+                    .body(Body::wrap_stream(stream))
+                    .send_traced()
+                    .await
+                    .reqwest_context("uploading a GCS resumable chunk")?;
 
-        let progress = range_response_to_upload_progress(session.upload_length, response).await?;
+                range_response_to_upload_progress(session.upload_length, response).await
+            })
+            .await?;
         if let GcsUploadProgress::Complete(ref object) = progress {
             let stored_size = object.size.as_deref().and_then(|size| size.parse().ok());
             let expires_at = object.custom_time.map(Rfc3339Timestamp::into_inner);
@@ -1550,37 +1569,40 @@ impl MultipartUploadBackend for GcsBackend {
             .append_pair("partNumber", &part_number.to_string())
             .append_pair("uploadId", upload_id);
 
-        let mut builder = self
-            .request(Method::PUT, url)
-            .await?
-            .header(header::CONTENT_LENGTH, content_length)
-            .body(Body::wrap_stream(body));
+        self.with_failure_metrics("upload_part", async {
+            let mut builder = self
+                .request(Method::PUT, url)
+                .await?
+                .header(header::CONTENT_LENGTH, content_length)
+                .body(Body::wrap_stream(body));
 
-        if let Some(md5) = content_md5 {
-            builder = builder.header("content-md5", md5);
-        }
+            if let Some(md5) = content_md5 {
+                builder = builder.header("content-md5", md5);
+            }
 
-        let resp = builder
-            .send_traced()
-            .await
-            .check_error("uploading a GCS multipart part")
-            .await?;
+            let resp = builder
+                .send_traced()
+                .await
+                .check_error("uploading a GCS multipart part")
+                .await?;
 
-        let etag = resp
-            .headers()
-            .get(header::ETAG)
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_owned())
-            .ok_or_else(|| {
-                Error::new(
-                    ErrorKind::BackendFailure,
-                    "GCS upload-part response missing ETag",
-                )
-            })?;
+            let etag = resp
+                .headers()
+                .get(header::ETAG)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_owned())
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::BackendFailure,
+                        "GCS upload-part response missing ETag",
+                    )
+                })?;
 
-        resp.drain_body().await;
+            resp.drain_body().await;
 
-        Ok(etag)
+            Ok(etag)
+        })
+        .await
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
@@ -2242,12 +2264,27 @@ mod tests {
             .create_upload_session(&id, &Metadata::default(), nonzero(4))
             .await?;
         inject_retry_test(&mut backend, "storage.objects.insert", "return-503").await?;
-        assert!(matches!(
-            backend
-                .put_chunk(&token, 0, 4, stream::single(b"data".to_vec()))
-                .await,
-            Err(error) if error.kind() == ErrorKind::BackendUnavailable
-        ));
+        let metrics = objectstore_metrics::with_capturing_test_client_async(async {
+            assert!(matches!(
+                backend
+                    .put_chunk(&token, 0, 4, stream::single(b"data".to_vec()))
+                    .await,
+                Err(error) if error.kind() == ErrorKind::BackendUnavailable
+            ));
+        })
+        .await;
+        assert_eq!(
+            metrics
+                .iter()
+                .filter(|metric| metric.starts_with("gcs.failures:"))
+                .collect::<Vec<_>>(),
+            ["gcs.failures:+1|c|#action:put_chunk"]
+        );
+        assert!(
+            !metrics
+                .iter()
+                .any(|metric| metric.starts_with("gcs.retries:"))
+        );
         assert_eq!(
             backend.upload_offset(&token).await?,
             UploadProgress::Incomplete { offset: 0 }
