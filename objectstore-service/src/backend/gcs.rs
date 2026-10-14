@@ -1294,6 +1294,7 @@ impl Backend for GcsBackend {
             let response = self
                 .request(Method::PUT, session_uri.as_str())
                 .await?
+                .header(header::CONTENT_LENGTH, 0)
                 .header(
                     header::CONTENT_RANGE,
                     format!("bytes */{}", session.upload_length),
@@ -1333,6 +1334,7 @@ impl Backend for GcsBackend {
                 let response = self
                     .request(Method::DELETE, session_uri)
                     .await?
+                    .header(header::CONTENT_LENGTH, 0)
                     .send_traced()
                     .await
                     .reqwest_context("canceling a GCS resumable upload")?;
