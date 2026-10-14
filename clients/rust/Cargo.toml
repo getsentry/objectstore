@@ -10,6 +10,9 @@ edition = "2024"
 rust-version = "1.89"
 publish = true
 
+[package.metadata.docs.rs]
+features = ["resumable-upload-api"]
+
 [dependencies]
 async-compression = { workspace = true, features = ["tokio", "zstd"] }
 base64 = { workspace = true, optional = true }
