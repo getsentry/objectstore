@@ -71,7 +71,13 @@ impl Services {
             .unwrap_or_default();
         let cipher = match config.service.cipher()? {
             Some(cipher) => cipher,
-            None => Cipher::ephemeral().context("failed to initialize encryption")?,
+            None => {
+                let cipher = Cipher::ephemeral().context("failed to initialize encryption")?;
+                objectstore_log::warn!(
+                    "No persistent encryption keyring configured; using a process-local ephemeral key. Resumable uploads cannot reliably cross replicas or survive restarts. Configure service.encryption in production."
+                );
+                cipher
+            }
         };
         let backend = backend::from_config(config.storage.clone(), &streams).await?;
         let concurrency = ConcurrencyLimiter::new(config.service.max_concurrency)

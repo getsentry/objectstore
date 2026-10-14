@@ -76,7 +76,7 @@
 //!
 //! | Status | Meaning | Client action |
 //! |--------|---------|---------------|
-//! | `400`  | Malformed session token, missing `Upload-Length`, nonempty offset query, chunk exceeding the declared length, or non-final chunk shorter than the granularity | Correct the request |
+//! | `400`  | Malformed session token or one that cannot be decrypted or authenticated, missing `Upload-Length`, nonempty offset query, chunk exceeding the declared length, or non-final chunk shorter than the granularity | Correct the request |
 //! | `404`  | The upload session is unknown or does not belong to this object | Start a new session or correct the request |
 //! | `409`  | A chunk's offset does not match the authoritative offset | Query the offset and continue from there |
 //! | `410`  | The session expired or was canceled | Start a new session |
