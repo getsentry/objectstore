@@ -604,19 +604,31 @@ pub enum TieredUpdate {
 ///
 /// Automatic decompression is disabled because backends store pre-compressed
 /// payloads and manage `Content-Encoding` themselves.
-pub(super) fn reqwest_client() -> reqwest::Client {
-    reqwest::Client::builder()
+pub(super) fn reqwest_client(tcp_user_timeout: Duration) -> reqwest::Client {
+    let builder = reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .hickory_dns(true)
         .http1_only()
         .no_zstd()
         .no_brotli()
         .no_gzip()
-        .no_deflate()
+        .no_deflate();
+
+    #[cfg(target_os = "linux")]
+    let builder = builder.tcp_user_timeout(tcp_user_timeout);
+    #[cfg(not(target_os = "linux"))]
+    let _ = tcp_user_timeout;
+
+    builder
         .build()
         // INVARIANT: Building fails only if the TLS backend cannot be initialized, which
         // is checked at startup when the rustls crypto provider is installed.
         .expect("failed to build backend HTTP client")
+}
+
+/// Matches reqwest's default TCP user timeout on supported platforms.
+pub(super) fn default_tcp_user_timeout() -> Duration {
+    Duration::from_secs(30)
 }
 
 #[cfg(test)]

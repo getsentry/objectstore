@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::num::NonZeroU64;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use std::{fmt, io};
 
 use futures_util::{StreamExt, TryStreamExt};
@@ -79,6 +79,22 @@ pub struct GcsConfig {
     ///
     /// - `OS__STORAGE__BUCKET=my-gcs-bucket`
     pub bucket: String,
+
+    /// Maximum time TCP data may remain unacknowledged or blocked before failing the request.
+    ///
+    /// This detects stalled transports. It does not limit the total upload duration or the time
+    /// waiting for a response after the upload is acknowledged. Applied on Linux and ignored on
+    /// other platforms. `0s` uses the operating system's default.
+    ///
+    /// # Default
+    ///
+    /// `30s`
+    ///
+    /// # Environment Variables
+    ///
+    /// - `OS__STORAGE__TCP_USER_TIMEOUT=30s`
+    #[serde(default = "common::default_tcp_user_timeout", with = "humantime_serde")]
+    pub tcp_user_timeout: Duration,
 
     /// Reports what this backend stores, for per-usecase cost attribution.
     ///
@@ -515,6 +531,7 @@ impl GcsBackend {
         let GcsConfig {
             endpoint,
             bucket,
+            tcp_user_timeout,
             cogs,
         } = config;
         let change_stream = streams.build(cogs.as_ref());
@@ -528,7 +545,7 @@ impl GcsBackend {
         let endpoint_str = endpoint.as_deref().unwrap_or(DEFAULT_ENDPOINT);
 
         Ok(Self {
-            client: common::reqwest_client(),
+            client: common::reqwest_client(tcp_user_timeout),
             endpoint: endpoint_str
                 .parse()
                 .map_err(|e| anyhow::Error::new(e).context("invalid GCS endpoint URL"))?,
@@ -1850,6 +1867,7 @@ mod tests {
         GcsConfig {
             endpoint: Some("http://localhost:8087".into()),
             bucket: "test-bucket".into(),
+            tcp_user_timeout: Duration::from_secs(30),
             cogs: None,
         }
     }
@@ -1934,6 +1952,7 @@ mod tests {
             GcsConfig {
                 endpoint: Some(endpoint),
                 bucket: "bucket".into(),
+                tcp_user_timeout: Duration::from_secs(30),
                 cogs: None,
             },
             &ChangeStreamFactory::default(),
