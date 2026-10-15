@@ -116,6 +116,7 @@ use std::time::{Duration, SystemTime};
 use base64::Engine as _;
 use bytes::Bytes;
 use futures_util::StreamExt;
+use objectstore_metrics::TimerGuard;
 use objectstore_types::metadata::Metadata;
 use objectstore_types::range::ByteRange;
 use objectstore_types::resumable::UploadProgress;
@@ -309,6 +310,12 @@ impl TieredStorage {
             BackendChoice::HighVolume => self.inner.high_volume.name(),
             BackendChoice::LongTerm => self.inner.long_term.name(),
         }
+    }
+
+    /// Updates a latency timer to identify the selected route.
+    fn tag_backend(&self, timer: &mut TimerGuard, choice: &BackendChoice) {
+        timer.set_tag("backend_choice", choice.as_str());
+        timer.set_tag("backend_type", self.backend_type(choice));
     }
 
     /// Puts an object into the high-volume backend.
@@ -652,7 +659,8 @@ impl Backend for TieredStorage {
         stream: ClientStream,
         access_time: Timestamp,
     ) -> Result<PutResponse> {
-        let timer = objectstore_metrics::timer!("put.latency", usecase = id.usecase().to_owned());
+        let mut timer =
+            objectstore_metrics::timer!("put.latency", usecase = id.usecase().to_owned(),);
         if metadata.origin.is_none() {
             objectstore_metrics::count!("put.origin_missing", usecase = id.usecase().to_owned());
         }
@@ -665,12 +673,14 @@ impl Backend for TieredStorage {
         );
 
         let (backend_choice, stored_size) = if peeked.is_exhausted() {
+            self.tag_backend(&mut timer, &BackendChoice::HighVolume);
             let payload = peeked.into_bytes().await?;
             let payload_len = payload.len() as u64;
             self.put_high_volume(id, metadata, payload, access_time)
                 .await?;
             (BackendChoice::HighVolume, payload_len)
         } else {
+            self.tag_backend(&mut timer, &BackendChoice::LongTerm);
             let (stored_size, stream) = counting_stream(peeked.into_stream());
             self.put_long_term(id, metadata, stream.boxed(), access_time)
                 .await?;
@@ -678,10 +688,7 @@ impl Backend for TieredStorage {
         };
 
         let backend_ty = self.backend_type(&backend_choice);
-        timer
-            .tag("backend_choice", backend_choice.as_str())
-            .tag("backend_type", backend_ty)
-            .record();
+        timer.record();
         objectstore_metrics::record!(
             "put.size" = stored_size,
             usecase = id.usecase().to_owned(),
@@ -700,10 +707,11 @@ impl Backend for TieredStorage {
         access_time: Timestamp,
         range: Option<ByteRange>,
     ) -> Result<GetResponse> {
-        let timer = objectstore_metrics::timer!(
+        let mut timer = objectstore_metrics::timer!(
             "get.latency.pre-response",
             usecase = id.usecase().to_owned(),
         );
+        self.tag_backend(&mut timer, &BackendChoice::HighVolume);
 
         let hv_result = self
             .inner
@@ -716,21 +724,20 @@ impl Backend for TieredStorage {
                 Some((metadata, content_range, stream)),
                 BackendChoice::HighVolume,
             ),
-            TieredGet::Tombstone(tombstone) => (
-                self.inner
+            TieredGet::Tombstone(tombstone) => {
+                self.tag_backend(&mut timer, &BackendChoice::LongTerm);
+                let result = self
+                    .inner
                     .long_term
                     .get_object(&tombstone.target, access_time, range)
                     .await?
-                    .map(|(meta, range, stream)| (align_expiry(meta, &tombstone), range, stream)),
-                BackendChoice::LongTerm,
-            ),
+                    .map(|(meta, range, stream)| (align_expiry(meta, &tombstone), range, stream));
+                (result, BackendChoice::LongTerm)
+            }
         };
 
         let backend_type = self.backend_type(&backend_choice);
-        timer
-            .tag("backend_choice", backend_choice.as_str())
-            .tag("backend_type", backend_type)
-            .record();
+        timer.record();
 
         if let Some((ref metadata, ref content_range, _)) = result {
             let size = content_range.map(|cr| cr.len() as usize).or(metadata.size);
@@ -753,30 +760,29 @@ impl Backend for TieredStorage {
         id: &ObjectId,
         access_time: Timestamp,
     ) -> Result<MetadataResponse> {
-        let timer = objectstore_metrics::timer!("head.latency", usecase = id.usecase().to_owned());
+        let mut timer =
+            objectstore_metrics::timer!("head.latency", usecase = id.usecase().to_owned());
+        self.tag_backend(&mut timer, &BackendChoice::HighVolume);
 
         let hv_result = self
             .inner
             .high_volume
             .get_tiered_metadata(id, access_time)
             .await?;
-        let (result, backend_choice) = match hv_result {
-            TieredMetadata::NotFound => (None, BackendChoice::HighVolume),
-            TieredMetadata::Object(metadata) => (Some(metadata), BackendChoice::HighVolume),
-            TieredMetadata::Tombstone(tombstone) => (
+        let result = match hv_result {
+            TieredMetadata::NotFound => None,
+            TieredMetadata::Object(metadata) => Some(metadata),
+            TieredMetadata::Tombstone(tombstone) => {
+                self.tag_backend(&mut timer, &BackendChoice::LongTerm);
                 self.inner
                     .long_term
                     .get_metadata(&tombstone.target, access_time)
                     .await?
-                    .map(|metadata| align_expiry(metadata, &tombstone)),
-                BackendChoice::LongTerm,
-            ),
+                    .map(|metadata| align_expiry(metadata, &tombstone))
+            }
         };
 
-        timer
-            .tag("backend_choice", backend_choice.as_str())
-            .tag("backend_type", self.backend_type(&backend_choice))
-            .record();
+        timer.record();
 
         Ok(result)
     }
@@ -833,10 +839,9 @@ impl Backend for TieredStorage {
 
     #[tracing::instrument(level = "debug", skip(self))]
     async fn delete_object(&self, id: &ObjectId, access_time: Timestamp) -> Result<DeleteResponse> {
-        let timer =
+        let mut timer =
             objectstore_metrics::timer!("delete.latency", usecase = id.usecase().to_owned());
-
-        let mut backend_choice = BackendChoice::HighVolume;
+        self.tag_backend(&mut timer, &BackendChoice::HighVolume);
 
         if let Some(tombstone) = self
             .inner
@@ -844,7 +849,7 @@ impl Backend for TieredStorage {
             .delete_non_tombstone(id, access_time)
             .await?
         {
-            backend_choice = BackendChoice::LongTerm;
+            self.tag_backend(&mut timer, &BackendChoice::LongTerm);
 
             let mut guard = self
                 .record_change(Change {
@@ -872,10 +877,7 @@ impl Backend for TieredStorage {
             guard.advance(ChangePhase::compare_and_write(deleted));
         }
 
-        timer
-            .tag("backend_choice", backend_choice.as_str())
-            .tag("backend_type", self.backend_type(&backend_choice))
-            .record();
+        timer.record();
 
         Ok(())
     }
@@ -975,6 +977,8 @@ impl MultipartUploadBackend for TieredStorage {
         let timer = objectstore_metrics::timer!(
             "multipart.initiate.latency",
             usecase = id.usecase().to_owned(),
+            backend_choice = BackendChoice::LongTerm.as_str(),
+            backend_type = self.backend_type(&BackendChoice::LongTerm),
         );
         let physical = new_long_term_revision(id);
 
@@ -1007,6 +1011,8 @@ impl MultipartUploadBackend for TieredStorage {
         let timer = objectstore_metrics::timer!(
             "multipart.upload_part.latency",
             usecase = id.usecase().to_owned(),
+            backend_choice = BackendChoice::LongTerm.as_str(),
+            backend_type = self.backend_type(&BackendChoice::LongTerm),
         );
         let tiered: TieredUploadId = upload_id.try_into()?;
 
@@ -1048,6 +1054,8 @@ impl MultipartUploadBackend for TieredStorage {
         let timer = objectstore_metrics::timer!(
             "multipart.list_parts.latency",
             usecase = id.usecase().to_owned(),
+            backend_choice = BackendChoice::LongTerm.as_str(),
+            backend_type = self.backend_type(&BackendChoice::LongTerm),
         );
         let tiered: TieredUploadId = upload_id.try_into()?;
 
@@ -1075,6 +1083,8 @@ impl MultipartUploadBackend for TieredStorage {
         let timer = objectstore_metrics::timer!(
             "multipart.abort.latency",
             usecase = id.usecase().to_owned(),
+            backend_choice = BackendChoice::LongTerm.as_str(),
+            backend_type = self.backend_type(&BackendChoice::LongTerm),
         );
         let tiered: TieredUploadId = upload_id.try_into()?;
 
@@ -1104,6 +1114,8 @@ impl MultipartUploadBackend for TieredStorage {
         let timer = objectstore_metrics::timer!(
             "multipart.complete.latency",
             usecase = id.usecase().to_owned(),
+            backend_choice = BackendChoice::LongTerm.as_str(),
+            backend_type = self.backend_type(&BackendChoice::LongTerm),
         );
         let part_count = parts.len();
         let tiered: TieredUploadId = upload_id.try_into()?;
