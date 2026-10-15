@@ -613,8 +613,8 @@ pub struct Config {
 /// - `OS__SERVICE__CONCURRENCY_TIMEOUT`
 /// - `OS__SERVICE__BULK_CONCURRENCY_PCT`
 /// - `OS__SERVICE__BACKGROUND_QUEUE`
-/// - `OS__SERVICE__RESUMABLE_TOKEN_ENCRYPTION__ACTIVE_KEY_ID`
-/// - `OS__SERVICE__RESUMABLE_TOKEN_ENCRYPTION__KEYS`
+/// - `OS__SERVICE__ENCRYPTION__ACTIVE_KEY_ID`
+/// - `OS__SERVICE__ENCRYPTION__KEYS`
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Service {
