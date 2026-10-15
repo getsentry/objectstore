@@ -16,7 +16,7 @@ use reqwest::StatusCode;
 const SESSION: &str = "c29tZS10b2tlbg";
 
 /// Protected `some-token`, bound to `test/org.1/objects/my-key` with the test key below.
-const PROTECTED_SESSION: &str = "AAR0ZXN0XSsQ-Z1kEHOi7Np_EvIdRGcZVhFjaV20NWpuzZNyrxcbQD6sDvNFCqXBJF_z8DcrYZoGhzYxYnmX2KOEB4AjPDlkorw3DrUD4AwxlhqSmHMERGPtexVbxt_DS9b-jpDPwJA";
+const PROTECTED_SESSION: &str = "AAR0ZXN0AwMDAwMDAwMDAwMDXtzMYTBNPTYlKSd-0XWLaZ5Iz4DG8rpBALHl24aGNMueygQP8J7cYuKqPnXhoYYheEh2qu72VVUWHwKBXE3rA5KNXyfbyR90J8SNpaf4qVbQ3qYebw1sUApe1dqI4oMSD4zQeuucFkE";
 
 const OBJECT_PATH: &str = "/v1/objects/test/org=1/my-key";
 
@@ -392,7 +392,7 @@ async fn session_token_requires_base64url() -> Result<()> {
 }
 
 #[tokio::test]
-async fn unknown_session_returns_not_found() -> Result<()> {
+async fn plaintext_session_returns_bad_request() -> Result<()> {
     let server = test_server().await;
 
     let response = reqwest::Client::new()
@@ -401,7 +401,7 @@ async fn unknown_session_returns_not_found() -> Result<()> {
         .send()
         .await?;
 
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     Ok(())
 }
 

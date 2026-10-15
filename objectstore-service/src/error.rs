@@ -62,6 +62,8 @@ pub enum ErrorKind {
     },
     /// A resumable upload session expired or was canceled.
     UploadSessionGone,
+    /// A resumable upload session token could not be decrypted or authenticated.
+    InvalidUploadSessionToken,
     /// The backend does not recognize a resumable upload session.
     UnknownUploadSession,
     /// A resumable chunk would exceed the total upload length.
@@ -115,6 +117,9 @@ impl fmt::Display for ErrorKind {
                 write!(f, "upload offset mismatch (server holds {offset} bytes)")
             }
             Self::UploadSessionGone => f.write_str("upload session gone"),
+            Self::InvalidUploadSessionToken => {
+                f.write_str("invalid upload session token: could not decrypt or authenticate it")
+            }
             Self::UnknownUploadSession => f.write_str("unknown upload session"),
             Self::ChunkExceedsUploadLength {
                 offset,
@@ -207,6 +212,7 @@ impl Error {
             ErrorKind::RangeNotSatisfiable { .. } => Level::DEBUG,
             ErrorKind::UploadOffsetMismatch { .. } => Level::DEBUG,
             ErrorKind::UploadSessionGone => Level::DEBUG,
+            ErrorKind::InvalidUploadSessionToken => Level::DEBUG,
             ErrorKind::UnknownUploadSession => Level::DEBUG,
             ErrorKind::ChunkExceedsUploadLength { .. } => Level::DEBUG,
             ErrorKind::ChunkTooSmall { .. } => Level::DEBUG,

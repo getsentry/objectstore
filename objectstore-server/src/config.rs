@@ -688,6 +688,7 @@ pub struct Service {
     /// generated at startup, which means that resumable upload sessions won't work in a
     /// multi-instance deployment or survive a restart.
     /// Configure a persistent keyring in production.
+    /// Using the ephemeral fallback emits a startup warning.
     ///
     /// Keys must contain exactly 32 raw bytes.
     ///
