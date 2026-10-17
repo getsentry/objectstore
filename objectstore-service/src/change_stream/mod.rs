@@ -184,3 +184,15 @@ impl ChangeStream for NoopStream {
 fn scope_id(id: &ObjectId, scope: &str) -> Option<u64> {
     id.scopes().get_value(scope)?.parse().ok()
 }
+
+/// A change stream that can list expired objects.
+#[async_trait::async_trait]
+pub trait ExpiryIndex: ChangeStream {
+    /// Object ids whose stored deadline is at or before `now`, oldest first,
+    /// at most `limit` per call. Never returns non-expiring (NULL) rows.
+    async fn list_expired(
+        &self,
+        now: Timestamp,
+        limit: u64,
+    ) -> Result<Vec<ObjectId>, Box<dyn std::error::Error + Send + Sync>>;
+}
