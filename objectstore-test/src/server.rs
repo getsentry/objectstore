@@ -142,6 +142,9 @@ fn replace_fs_paths(config: &mut StorageConfig, tempdirs: &mut Vec<TempDir>) {
                 tempdirs.push(dir);
             }
         }
-        StorageConfig::S3Compatible(_) | StorageConfig::Gcs(_) | StorageConfig::BigTable(_) => {}
+        StorageConfig::S3Compatible(_)
+        | StorageConfig::Gcs(_)
+        | StorageConfig::BigTable(_)
+        | StorageConfig::Cql(_) => {}
     }
 }

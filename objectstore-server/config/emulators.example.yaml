@@ -9,6 +9,12 @@ storage:
     project_id: testing
     instance_name: objectstore
     table_name: objectstore
+  # Alternatively, use the Cassandra devservice as the high-volume backend:
+  # high_volume:
+  #   type: cql
+  #   nodes: [localhost:8088]
+  #   keyspace: objectstore
+  #   table_name: objectstore
   long_term:
     type: gcs
     endpoint: http://localhost:8087

@@ -190,6 +190,10 @@ the required images and configuration, such as port mapping.
 
  - For **Google BigTable**, we automatically create a table with the required
 column families.
+ - For **Apache Cassandra**, we automatically create the keyspace and table from
+  `devservices/cql-schema.cql`. Cassandra takes up to a minute to start. To run
+  the CQL backend tests against ScyllaDB instead, apply the same schema to a
+  ScyllaDB node and set `OS_TEST_CQL_NODES` (e.g. `localhost:8090`).
  - For **Google Cloud Storage** (GCS), a test bucket is already configured in
   the dev container.
  - For **SeaweedFS** (S3-compatible), a public test bucket is created on startup.
