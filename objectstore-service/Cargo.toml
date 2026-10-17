@@ -21,15 +21,27 @@ futures-util = { workspace = true }
 gcp_auth = { workspace = true }
 humantime = { workspace = true }
 humantime-serde = { workspace = true }
-objectstore-inventory-tracker = { workspace = true, features = ["kafka"], optional = true }
+objectstore-inventory-tracker = { workspace = true, features = [
+    "kafka",
+], optional = true }
 objectstore-log = { workspace = true }
 objectstore-metrics = { workspace = true }
 objectstore-types = { workspace = true }
 papaya = { workspace = true }
 quick-xml = { workspace = true, features = ["serialize"] }
 regex = { workspace = true }
-reqwest = { workspace = true, features = ["charset", "http2", "hickory-dns", "json", "multipart", "native-tls-no-alpn", "stream", "system-proxy"] }
+reqwest = { workspace = true, features = [
+    "charset",
+    "http2",
+    "hickory-dns",
+    "json",
+    "multipart",
+    "native-tls-no-alpn",
+    "stream",
+    "system-proxy",
+] }
 ring = { workspace = true }
+rocksdb = { workspace = true }
 sentry = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
