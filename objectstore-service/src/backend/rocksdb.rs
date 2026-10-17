@@ -28,7 +28,7 @@
 //! # Cell Framing and Expiry
 //!
 //! Every cell value is framed as `[8-byte big-endian deadline in unix seconds][payload]`, where
-//! the sentinel [`NO_DEADLINE`] means the cell never expires. The prefix is authoritative for
+//! the sentinel `NO_DEADLINE` means the cell never expires. The prefix is authoritative for
 //! every cell's deadline, so reads report the stored deadline verbatim instead of recomputing it
 //! from the metadata. A compaction filter drops cells whose deadline has passed in wall-clock
 //! time, which is how expired data eventually frees space; cells can therefore vanish while a
