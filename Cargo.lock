@@ -2811,6 +2811,7 @@ version = "0.2.9"
 dependencies = [
  "anyhow",
  "async-compression",
+ "axum",
  "base64",
  "bytes",
  "futures-util",
@@ -2820,6 +2821,7 @@ dependencies = [
  "multer",
  "objectstore-test",
  "objectstore-types",
+ "rand 0.10.2",
  "reqwest 0.13.4",
  "sentry-core",
  "serde",

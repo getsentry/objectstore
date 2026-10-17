@@ -1,3 +1,4 @@
+use std::error::Error as StdError;
 use std::sync::Arc;
 
 /// Errors that can happen within the objectstore-client
@@ -47,13 +48,20 @@ pub enum Error {
     /// Error that indicates that an entire batch request failed.
     #[error("batch request failed: {0}")]
     Batch(Arc<Error>),
-    /// Error that indicates failure of an individual operation in a batch request.
+    /// Error that indicates failure of an operation with an HTTP response.
     #[error("operation failed with HTTP status code {status}: {message}")]
     OperationFailure {
         /// The HTTP status code corresponding to the status of the operation.
         status: u16,
         /// The error message.
         message: String,
+    },
+    /// An upload failed after the client selected an internal upload strategy.
+    #[error("upload failed")]
+    UploadFailed {
+        /// The underlying cause, retained for diagnostics.
+        #[source]
+        source: Box<dyn StdError + Send + Sync + 'static>,
     },
     /// Error when part number validation fails (must be >= 1).
     #[error("invalid part number: {0}")]

@@ -84,6 +84,7 @@ enum BatchOperation {
         metadata: Metadata,
         compression: Option<CompressionMode>,
         body: PutBody,
+        resumable: bool,
     },
     Delete {
         key: ObjectKey,
@@ -116,6 +117,7 @@ impl From<PutBuilder> for BatchOperation {
             metadata,
             compression,
             body,
+            resumable,
             session: _session,
         } = value;
         BatchOperation::Insert {
@@ -123,6 +125,7 @@ impl From<PutBuilder> for BatchOperation {
             metadata,
             compression,
             body,
+            resumable,
         }
     }
 }
@@ -159,6 +162,7 @@ impl BatchOperation {
                 mut metadata,
                 compression,
                 body,
+                resumable: _,
             } => {
                 let mut headers = operation_headers("insert", key.as_deref());
                 metadata.compression = compression.map(CompressionMode::compression);
@@ -549,6 +553,7 @@ async fn classify(op: BatchOperation) -> Classified {
             metadata,
             compression,
             body,
+            resumable,
         } => {
             let size = match &body {
                 PutBody::Buffer(bytes) => Some(bytes.len() as u64),
@@ -581,6 +586,7 @@ async fn classify(op: BatchOperation) -> Classified {
                 metadata,
                 compression,
                 body,
+                resumable,
             };
 
             match size {
@@ -637,6 +643,7 @@ async fn execute_individual(op: BatchOperation, session: &Session) -> OperationR
             metadata,
             compression,
             body,
+            resumable,
         } => {
             let error_key = key.clone().unwrap_or_else(|| "<unknown>".to_owned());
             let put = PutBuilder {
@@ -645,6 +652,7 @@ async fn execute_individual(op: BatchOperation, session: &Session) -> OperationR
                 compression,
                 key,
                 body,
+                resumable,
             };
             match put.send().await {
                 Ok(response) => OperationResult::Put(response.key.clone(), Ok(response)),
@@ -822,6 +830,7 @@ mod tests {
             metadata: Metadata::default(),
             compression: Some(compression),
             body: PutBody::Buffer(vec![0; size].into()),
+            resumable: true,
         }
     }
 
