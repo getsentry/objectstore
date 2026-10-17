@@ -37,6 +37,7 @@ from objectstore_client.metadata import (
 from objectstore_client.metrics import (
     MetricsBackend,
     NoOpMetricsBackend,
+    StorageMetricEmitter,
     measure_storage_operation,
 )
 from objectstore_client.multipart import MultipartUpload
@@ -55,6 +56,30 @@ class GetResponse(NamedTuple):
     payload: IO[bytes]
 
 
+@dataclass(frozen=True)
+class ResumableRetryPolicy:
+    """Recovery limits for one resumable upload, including progress queries.
+
+    ``retries`` counts recovery retries across the upload; zero disables resumable
+    uploads.
+
+    ``delay`` is the initial backoff in seconds, doubling on each retry.
+
+    ``jitter`` is the maximum random delay added in seconds.
+
+    These limits are separate from the pool's per-request retries; retryable
+    failures are determined internally.
+    """
+
+    retries: int = 2
+    delay: float = 2.0
+    jitter: float = 1.0
+
+    def __post_init__(self) -> None:
+        if self.retries < 0 or self.delay < 0 or self.jitter < 0:
+            raise ValueError("Resumable upload retry settings must be non-negative")
+
+
 class Usecase:
     """
     An identifier for a workload in Objectstore, along with defaults to use for all
@@ -63,6 +88,10 @@ class Usecase:
     Usecases need to be statically defined in Objectstore's configuration server-side.
     Objectstore can make decisions based on the Usecase. For example, choosing the most
     suitable storage backend.
+
+    ``resumable_threshold_bytes`` defaults to 32 MiB of remaining source bytes,
+    before any compression. ``None`` disables resumable uploads.
+    ``resumable_retries`` configures recovery via `ResumableRetryPolicy`.
     """
 
     name: str
@@ -74,10 +103,16 @@ class Usecase:
         name: str,
         compression: Compression = "zstd",
         expiration_policy: ExpirationPolicy | None = None,
+        resumable_threshold_bytes: int | None = 32 * 1024 * 1024,
+        resumable_retries: ResumableRetryPolicy = ResumableRetryPolicy(),
     ):
+        if resumable_threshold_bytes is not None and resumable_threshold_bytes < 0:
+            raise ValueError("resumable_threshold_bytes must be non-negative")
         self.name = name
         self._compression = compression
         self._expiration_policy = expiration_policy
+        self._resumable_threshold_bytes = resumable_threshold_bytes
+        self._resumable_retries = resumable_retries
 
 
 # Connect timeout used unless overridden in connection parameters.
@@ -393,6 +428,7 @@ class Session:
         expiration_policy: ExpirationPolicy | None = None,
         origin: str | None = None,
         filename: str | None = None,
+        resumable_threshold_bytes: int | None | Literal["unset"] = "unset",
     ) -> str:
         """
         Uploads the given `contents` to blob storage.
@@ -411,6 +447,10 @@ class Session:
 
         You can use the utility function `objectstore_client.utils.guess_mime_type`
         to attempt to guess a `content_type` based on magic bytes.
+
+        ``resumable_threshold_bytes`` overrides the Usecase threshold when supplied;
+        ``None`` disables resumable uploads. Eligible uploads use the Usecase's
+        ``resumable_retries`` policy; a retry count of zero disables resumable uploads.
 
         `compression` is deprecated in favor of `compress`.
         """
@@ -431,16 +471,24 @@ class Session:
         if precompressed and precompressed != "zstd":
             raise ValueError(f"Invalid compression: {precompressed}")
 
-        body = BytesIO(contents) if isinstance(contents, bytes) else contents
-        original_body: IO[bytes] = body
+        if resumable_threshold_bytes == "unset":
+            resumable_threshold_bytes = self._usecase._resumable_threshold_bytes
+        if resumable_threshold_bytes is not None and resumable_threshold_bytes < 0:
+            raise ValueError("resumable_threshold_bytes must be non-negative")
 
         encoding = precompressed or compress or self._usecase._compression
 
         compress_with = encoding if precompressed is None else "none"
-        if compress_with == "zstd":
-            cctx = zstandard.ZstdCompressor()
-            body = cctx.stream_reader(original_body)
-            body = cast(IO[bytes], utils._ZstdCompressionReaderWrapper(body))
+
+        replayable = isinstance(contents, bytes) or compress_with == "none"
+        body_size = _resumable.get_size(contents)
+        use_resumable = (
+            body_size is not None
+            and resumable_threshold_bytes is not None
+            and self._usecase._resumable_retries.retries > 0
+            and replayable
+            and body_size >= resumable_threshold_bytes
+        )
 
         headers = self._metadata_headers(
             compression=encoding,
@@ -460,8 +508,87 @@ class Session:
                 self._metrics_backend, "put", self._usecase.name
             ) as metrics,
         ):
-            retries = None  # by default use the pool's value, set by the Client
-            if compress_with != "none":
+            if use_resumable:
+                assert body_size is not None
+                if isinstance(contents, bytes):
+                    encoded = (
+                        zstandard.ZstdCompressor().compress(contents)
+                        if compress_with == "zstd"
+                        else contents
+                    )
+                    body: IO[bytes] = BytesIO(encoded)
+                    encoded_size = len(encoded)
+                else:
+                    body = contents
+                    encoded_size = body_size
+                try:
+                    result_key = _resumable.upload(
+                        self,
+                        body,
+                        encoded_size,
+                        key=key,
+                        compression=encoding,
+                        content_type=content_type,
+                        metadata=metadata,
+                        expiration_policy=expiration_policy,
+                        origin=origin,
+                        filename=filename,
+                    )
+                    if result_key is None:
+                        headers["Content-Length"] = str(encoded_size)
+                        result_key = self._put_direct(
+                            body, key, headers, compress=False
+                        )
+                    if precompressed is None:
+                        metrics.record_uncompressed_size(body_size)
+                    if encoding != "none":
+                        metrics.record_compressed_size(encoded_size, encoding)
+                finally:
+                    if isinstance(contents, bytes):
+                        body.close()
+            else:
+                result_key = self._put_direct(
+                    contents,
+                    key,
+                    headers,
+                    compress=compress_with == "zstd",
+                    metrics=metrics,
+                    record_source=precompressed is None,
+                    encoding=encoding,
+                )
+
+            # Set after the response, since the key may be server-generated.
+            span.set_attribute("objectstore.key", result_key)
+            span.set_attribute("objectstore.compression", encoding)
+            if metrics.uncompressed_size is not None:
+                span.set_attribute(
+                    "objectstore.uncompressed_size", metrics.uncompressed_size
+                )
+            if metrics.compressed_size is not None:
+                span.set_attribute(
+                    "objectstore.compressed_size", metrics.compressed_size
+                )
+            return result_key
+
+    def _put_direct(
+        self,
+        contents: bytes | IO[bytes],
+        key: str | None,
+        headers: dict[str, str],
+        compress: bool,
+        metrics: StorageMetricEmitter | None = None,
+        record_source: bool = True,
+        encoding: Compression = "none",
+    ) -> str:
+        """Stream a direct upload, optionally compressing on the fly."""
+        body = BytesIO(contents) if isinstance(contents, bytes) else contents
+        original_body: IO[bytes] = body
+        retries = None  # by default use the pool's value, set by the Client
+        try:
+            if compress:
+                cctx = zstandard.ZstdCompressor()
+                body = cctx.stream_reader(original_body, closefd=False)
+                body = cast(IO[bytes], utils._ZstdCompressionReaderWrapper(body))
                 # For on-the-fly compression, don't attempt read retries,
                 # as the stream cannot be rewound after data has been consumed.
                 pool_retries = self._pool.retries
@@ -484,23 +611,17 @@ class Session:
 
             # Must do this after streaming `body` as that's what is responsible
             # for advancing the seek position in both streams
-            if precompressed is None:
-                metrics.record_uncompressed_size(original_body.tell())
-            if encoding != "none":
-                metrics.record_compressed_size(body.tell(), encoding)
-
-            # Set after the response, since the key may be server-generated.
-            span.set_attribute("objectstore.key", res["key"])
-            span.set_attribute("objectstore.compression", encoding)
-            if metrics.uncompressed_size is not None:
-                span.set_attribute(
-                    "objectstore.uncompressed_size", metrics.uncompressed_size
-                )
-            if metrics.compressed_size is not None:
-                span.set_attribute(
-                    "objectstore.compressed_size", metrics.compressed_size
-                )
+            if metrics is not None:
+                if record_source:
+                    metrics.record_uncompressed_size(original_body.tell())
+                if encoding != "none":
+                    metrics.record_compressed_size(body.tell(), encoding)
             return res["key"]
+        finally:
+            if body is not original_body:
+                body.close()
+            if isinstance(contents, bytes):
+                original_body.close()
 
     def get(
         self,
