@@ -193,6 +193,24 @@ column families.
  - For **Google Cloud Storage** (GCS), a test bucket is already configured in
   the dev container.
  - For **SeaweedFS** (S3-compatible), a public test bucket is created on startup.
+ - For **Cassandra**, the official `cassandra:5.0.9` image initializes an
+   `objectstore` keyspace and `objects` table, exposing CQL on `localhost:9042`.
+   Startup can take several minutes; wait for the service to become healthy.
+
+To use Cassandra as the high-volume tier, run with
+[`objectstore-server/config/cql.example.yaml`](objectstore-server/config/cql.example.yaml).
+For production, provision the keyspace with your intended replication settings,
+then apply [`schema.cql`](objectstore-service/src/backend/cql/schema.cql) in that
+keyspace. The backend does not create or migrate production schema.
+All Objectstore instances accessing it must use the same local datacenter.
+See the [CQL module documentation](https://getsentry.github.io/objectstore/objectstore_service/backend/cql/index.html)
+for TTL limits and TLS requirements.
+
+Direct CQL backend tests run against the Cassandra devservice, without adding a
+CQL variant of the tiered-storage suite. To run them against a separately
+provisioned Cassandra or Scylla instance, set `CQL_TEST_CONFIG` to the path of a
+JSON `CqlConfig` (the fields under `high_volume` in the example, without `type`),
+then run `cargo test -p objectstore-service --all-features backend::cql`.
 
 The emulators example config is pre-configured with a tiered configuration using
 both backends. To use it:

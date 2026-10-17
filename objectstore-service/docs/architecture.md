@@ -85,6 +85,11 @@ given object size is below this threshold.
 
 See [`backend::StorageConfig`] for available backend implementations.
 
+[`CqlBackend`](backend::cql::CqlBackend) supports Cassandra and Scylla as either
+standalone storage or the high-volume tier. It uses lightweight transactions
+within one configured datacenter and native TTL for expiration. See [`backend::cql`]
+for schema provisioning, consistency, connection security, and expiration limits.
+
 ## Redirect Tombstones
 
 For large objects, `TieredStorage` stores a **redirect tombstone** in the

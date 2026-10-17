@@ -7,6 +7,8 @@ x-sentry-service-config:
       description: Objectstore server
     bigtable:
       description: Google Cloud BigTable emulator
+    cassandra:
+      description: Apache Cassandra CQL storage
     gcs:
       description: Google Cloud Storage emulator
     seaweedfs:
@@ -14,13 +16,39 @@ x-sentry-service-config:
   modes:
     default: []
     containerized: [objectstore]
-    full: [bigtable, gcs, seaweedfs]
+    full: [bigtable, cassandra, gcs, seaweedfs]
 
 x-programs:
   devserver:
     command: cargo run --
 
 services:
+  cassandra:
+    image: cassandra:5.0.9
+    command: /bin/bash /run-cassandra.sh
+    environment:
+      CASSANDRA_DC: datacenter1
+      CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch
+      # The driver discovers this address after contacting the forwarded port.
+      CASSANDRA_BROADCAST_RPC_ADDRESS: 127.0.0.1
+      MAX_HEAP_SIZE: 512M
+      HEAP_NEWSIZE: 100M
+    healthcheck:
+      test: ["CMD", "cqlsh", "localhost", "-e", "SELECT revision FROM objectstore.objects LIMIT 1"]
+      interval: 5s
+      timeout: 10s
+      retries: 36
+      start_period: 30s
+    ports:
+      - 127.0.0.1:9042:9042
+    volumes:
+      - ./run-cassandra.sh:/run-cassandra.sh:ro
+      - ../objectstore-service/src/backend/cql/schema.cql:/schema.cql:ro
+    networks:
+      - devservices
+    labels:
+      - orchestrator=devservices
+    restart: unless-stopped
   objectstore:
     image: ghcr.io/getsentry/objectstore:nightly
     environment:
