@@ -385,7 +385,7 @@ fn matches_redirect(row: &StoredRow, expected: Option<&ObjectId>, now: Timestamp
 ///
 /// Callers need to tell a deadline that actually moved apart from one that already covered the
 /// request, because only the former is a change worth reporting to the
-/// [`ChangeStream`](crate::change_stream::ChangeStream).
+/// [`ChangeStream`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ExpiryOutcome {
     /// The row is absent or expired.
