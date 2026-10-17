@@ -1,4 +1,5 @@
-use crate::change_stream::ChangeStream;
+use crate::change_stream::{ChangeStream, ChangeStreamError};
+use crate::id::ObjectId;
 use async_trait::async_trait;
 use objectstore_types::time::Timestamp;
 use serde::{Deserialize, Serialize};
@@ -47,57 +48,72 @@ impl SqliteGarbageCollectorStream {
 
 #[async_trait]
 impl ChangeStream for SqliteGarbageCollectorStream {
-    fn write(&self, id: &crate::id::ObjectId, _size: u64, expires_at: Option<Timestamp>) {
+    async fn begin_write(
+        &self,
+        id: &ObjectId,
+        expires_at: Option<Timestamp>,
+    ) -> Result<(), ChangeStreamError> {
         let pool = self.pool.clone();
         let id = id.clone();
-
-        self.task_tracker.spawn(async move {
-            let _ = async {
-                sqlx::query("INSERT INTO garbage_collector (object_id, expires_at) VALUES (?, ?) ON CONFLICT (object_id) DO UPDATE SET expires_at = excluded.expires_at")
-                    .bind(id.as_storage_path().to_string())
-                    .bind(expires_at.map(|t| i64::try_from(t.as_secs()).ok()))
-                    .execute(&pool)
-                    .await?;
-
-                Ok::<(), sqlx::Error>(())
-            }
+        let query_result = sqlx::query("INSERT INTO garbage_collector (object_id, expires_at) VALUES (?, ?) ON CONFLICT (object_id) DO UPDATE SET expires_at = excluded.expires_at")
+            .bind(id.as_storage_path().to_string())
+            .bind(expires_at.map(|t| i64::try_from(t.as_secs()).ok()))
+            .execute(&pool)
             .await;
-        });
+
+        if query_result.is_err() {
+            let error = query_result.err();
+            match error {
+                Some(err) => return Err(ChangeStreamError::Failure(Box::new(err))),
+                None => {
+                    return Err(ChangeStreamError::Failure(
+                        "failed to insert row into garbage_collector".into(),
+                    ));
+                }
+            }
+        }
+
+        Ok(())
     }
 
-    fn update(&self, id: &crate::id::ObjectId, expires_at: Option<Timestamp>) {
+    async fn begin_update(
+        &self,
+        id: &ObjectId,
+        expires_at: Option<Timestamp>,
+    ) -> Result<(), ChangeStreamError> {
         let pool = self.pool.clone();
         let id = id.clone();
 
-        self.task_tracker.spawn(async move {
-            let _ = async {
-                sqlx::query("UPDATE garbage_collector SET expires_at = ? WHERE object_id = ?")
-                    .bind(expires_at.map(|t| i64::try_from(t.as_secs()).ok()))
-                    .bind(id.as_storage_path().to_string())
-                    .execute(&pool)
-                    .await?;
+        let query_result =
+            sqlx::query("UPDATE garbage_collector SET expires_at = ? WHERE object_id = ?")
+                .bind(expires_at.map(|t| i64::try_from(t.as_secs()).ok()))
+                .bind(id.as_storage_path().to_string())
+                .execute(&pool)
+                .await;
 
-                Ok::<(), sqlx::Error>(())
+        if query_result.is_err() {
+            let error = query_result.err();
+            match error {
+                Some(err) => return Err(ChangeStreamError::Failure(Box::new(err))),
+                None => {
+                    return Err(ChangeStreamError::Failure(
+                        "failed to update row in garbage_collector".into(),
+                    ));
+                }
             }
-            .await;
-        });
+        } else {
+            Ok(())
+        }
     }
 
-    fn delete(&self, id: &crate::id::ObjectId) {
+    async fn commit_delete(&self, id: &ObjectId) {
         let pool = self.pool.clone();
         let id = id.clone();
 
-        self.task_tracker.spawn(async move {
-            let _ = async {
-                sqlx::query("DELETE FROM garbage_collector WHERE object_id = ?")
-                    .bind(id.as_storage_path().to_string())
-                    .execute(&pool)
-                    .await?;
-
-                Ok::<(), sqlx::Error>(())
-            }
+        let _ = sqlx::query("DELETE FROM garbage_collector WHERE object_id = ?")
+            .bind(id.as_storage_path().to_string())
+            .execute(&pool)
             .await;
-        });
     }
 
     async fn join(&self, timeout: std::time::Duration) {
@@ -154,7 +170,7 @@ mod tests {
         count.0
     }
 
-    /// Stored expiry for `id`, looked up by the same storage path the write path binds.
+    /// Stored expiry for `id`, looked up by the same storage path `begin_write` binds.
     ///
     /// `None` means no row exists, `Some(None)` means a row with a NULL expiry, and
     /// `Some(Some(secs))` is the stored deadline.
@@ -169,6 +185,14 @@ mod tests {
                 .await
                 .unwrap();
         row.map(|(value,)| value)
+    }
+
+    /// Removes the backing table so the next `begin_*` call cannot reach it.
+    async fn drop_table(stream: &SqliteGarbageCollectorStream) {
+        sqlx::query("DROP TABLE garbage_collector")
+            .execute(&stream.pool)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -187,49 +211,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_enqueues_tracked_task() {
+    async fn begin_write_with_no_expiry_stores_null() {
         let (_tempdir, stream) = create_test_stream().await;
-        let id = create_test_id("test-object-1");
+        let id = create_test_id("no-expiry");
 
-        stream.write(&id, 1024, None);
+        stream.begin_write(&id, None).await.unwrap();
 
-        // No await has yielded the runtime yet, so the spawned insert cannot have run or
-        // been reaped: the write is queued but not yet drained.
-        assert_eq!(stream.task_tracker.len(), 1);
-
-        stream.join(Duration::from_secs(5)).await;
-        assert_eq!(stream.task_tracker.len(), 0);
+        // `begin_write` is awaited on the request path, so the row is visible on return.
+        assert_eq!(row_count(&stream).await, 1);
+        // The row exists but carries a NULL expiry, distinct from an absent row.
         assert_eq!(stored_expiry(&stream, &id).await, Some(None));
     }
 
     #[tokio::test]
-    async fn multiple_writes_track_each_task() {
-        let (_tempdir, stream) = create_test_stream().await;
-
-        for i in 0..5 {
-            let id = create_test_id(&format!("test-object-{i}"));
-            stream.write(&id, 1024 * (i + 1) as u64, None);
-        }
-
-        // Each write spawns exactly one tracked task; none can have completed yet.
-        assert_eq!(stream.task_tracker.len(), 5);
-
-        stream.join(Duration::from_secs(5)).await;
-        assert_eq!(stream.task_tracker.len(), 0);
-        assert_eq!(row_count(&stream).await, 5);
-    }
-
-    #[tokio::test]
-    async fn write_stores_expiry_seconds_and_created_at() {
+    async fn begin_write_stores_expiry_seconds_and_created_at() {
         let (_tempdir, stream) = create_test_stream().await;
         let id = create_test_id("expiring");
 
-        stream.write(
-            &id,
-            2048,
-            Some(Timestamp::from_unix_secs(1_234_567_890).unwrap()),
-        );
-        stream.join(Duration::from_secs(5)).await;
+        stream
+            .begin_write(&id, Some(Timestamp::from_unix_secs(1_234_567_890).unwrap()))
+            .await
+            .unwrap();
 
         // The stored deadline is the exact whole-second value the timestamp carried.
         assert_eq!(stored_expiry(&stream, &id).await, Some(Some(1_234_567_890)));
@@ -246,39 +248,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_with_no_expiry_stores_null() {
-        let (_tempdir, stream) = create_test_stream().await;
-        let id = create_test_id("no-expiry");
-
-        stream.write(&id, 1024, None);
-        stream.join(Duration::from_secs(5)).await;
-
-        // The row exists but carries a NULL expiry, distinct from an absent row.
-        assert_eq!(stored_expiry(&stream, &id).await, Some(None));
-    }
-
-    #[tokio::test]
-    async fn write_treats_epoch_expiry_as_zero_not_null() {
+    async fn begin_write_treats_epoch_expiry_as_zero_not_null() {
         let (_tempdir, stream) = create_test_stream().await;
         let id = create_test_id("epoch");
 
-        stream.write(&id, 1024, Some(Timestamp::UNIX_EPOCH));
-        stream.join(Duration::from_secs(5)).await;
+        stream
+            .begin_write(&id, Some(Timestamp::UNIX_EPOCH))
+            .await
+            .unwrap();
 
         // An expiry of 0 must round-trip as 0 rather than collapsing into NULL.
         assert_eq!(stored_expiry(&stream, &id).await, Some(Some(0)));
     }
 
     #[tokio::test]
-    async fn write_upserts_existing_row() {
+    async fn begin_write_upserts_existing_row() {
         let (_tempdir, stream) = create_test_stream().await;
         let id = create_test_id("upsert");
 
-        stream.write(&id, 1024, Some(Timestamp::from_unix_secs(1_000).unwrap()));
-        stream.join(Duration::from_secs(5)).await;
-
-        stream.write(&id, 2048, Some(Timestamp::from_unix_secs(2_000).unwrap()));
-        stream.join(Duration::from_secs(5)).await;
+        stream
+            .begin_write(&id, Some(Timestamp::from_unix_secs(1_000).unwrap()))
+            .await
+            .unwrap();
+        stream
+            .begin_write(&id, Some(Timestamp::from_unix_secs(2_000).unwrap()))
+            .await
+            .unwrap();
 
         // Re-writing the same object updates in place instead of duplicating the row.
         assert_eq!(row_count(&stream).await, 1);
@@ -286,22 +281,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_upsert_can_clear_expiry() {
+    async fn begin_write_upsert_can_clear_expiry() {
         let (_tempdir, stream) = create_test_stream().await;
         let id = create_test_id("upsert-clear");
 
-        stream.write(&id, 1024, Some(Timestamp::from_unix_secs(1_000).unwrap()));
-        stream.join(Duration::from_secs(5)).await;
-
-        stream.write(&id, 1024, None);
-        stream.join(Duration::from_secs(5)).await;
+        stream
+            .begin_write(&id, Some(Timestamp::from_unix_secs(1_000).unwrap()))
+            .await
+            .unwrap();
+        stream.begin_write(&id, None).await.unwrap();
 
         assert_eq!(row_count(&stream).await, 1);
         assert_eq!(stored_expiry(&stream, &id).await, Some(None));
     }
 
     #[tokio::test]
-    async fn writes_with_distinct_usecases_do_not_collide() {
+    async fn begin_writes_with_distinct_usecases_do_not_collide() {
         let (_tempdir, stream) = create_test_stream().await;
         let first = crate::id::ObjectId::from_parts(
             "attachments".into(),
@@ -311,17 +306,14 @@ mod tests {
         let second =
             crate::id::ObjectId::from_parts("replays".into(), Scopes::empty(), "shared-key".into());
 
-        stream.write(
-            &first,
-            1024,
-            Some(Timestamp::from_unix_secs(1_000).unwrap()),
-        );
-        stream.write(
-            &second,
-            1024,
-            Some(Timestamp::from_unix_secs(2_000).unwrap()),
-        );
-        stream.join(Duration::from_secs(5)).await;
+        stream
+            .begin_write(&first, Some(Timestamp::from_unix_secs(1_000).unwrap()))
+            .await
+            .unwrap();
+        stream
+            .begin_write(&second, Some(Timestamp::from_unix_secs(2_000).unwrap()))
+            .await
+            .unwrap();
 
         // The row key is the full storage path, so the usecase partitions the table.
         assert_eq!(row_count(&stream).await, 2);
@@ -330,86 +322,108 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_changes_expiry() {
+    async fn begin_write_reports_failure_when_table_is_missing() {
+        let (_tempdir, stream) = create_test_stream().await;
+        let id = create_test_id("missing-table");
+
+        drop_table(&stream).await;
+
+        // A failed `begin_*` is surfaced so the request can abort before touching storage.
+        let error = stream.begin_write(&id, None).await.unwrap_err();
+        assert!(matches!(error, ChangeStreamError::Failure(_)));
+        assert_eq!(error.to_string(), "change stream failed");
+    }
+
+    #[tokio::test]
+    async fn begin_update_changes_expiry() {
         let (_tempdir, stream) = create_test_stream().await;
         let id = create_test_id("test-update-object");
 
-        stream.write(
-            &id,
-            1024,
-            Some(Timestamp::from_unix_secs(1_000_000).unwrap()),
-        );
-        stream.join(Duration::from_secs(5)).await;
-
-        stream.update(&id, Some(Timestamp::from_unix_secs(2_000_000).unwrap()));
-        stream.join(Duration::from_secs(5)).await;
+        stream
+            .begin_write(&id, Some(Timestamp::from_unix_secs(1_000_000).unwrap()))
+            .await
+            .unwrap();
+        stream
+            .begin_update(&id, Some(Timestamp::from_unix_secs(2_000_000).unwrap()))
+            .await
+            .unwrap();
 
         assert_eq!(stored_expiry(&stream, &id).await, Some(Some(2_000_000)));
     }
 
     #[tokio::test]
-    async fn update_clears_expiry() {
+    async fn begin_update_clears_expiry() {
         let (_tempdir, stream) = create_test_stream().await;
         let id = create_test_id("clear-expiry");
 
-        stream.write(
-            &id,
-            1024,
-            Some(Timestamp::from_unix_secs(1_000_000).unwrap()),
-        );
-        stream.join(Duration::from_secs(5)).await;
-
-        stream.update(&id, None);
-        stream.join(Duration::from_secs(5)).await;
+        stream
+            .begin_write(&id, Some(Timestamp::from_unix_secs(1_000_000).unwrap()))
+            .await
+            .unwrap();
+        stream.begin_update(&id, None).await.unwrap();
 
         assert_eq!(row_count(&stream).await, 1);
         assert_eq!(stored_expiry(&stream, &id).await, Some(None));
     }
 
     #[tokio::test]
-    async fn update_does_not_create_missing_row() {
+    async fn begin_update_does_not_insert_missing_row() {
         let (_tempdir, stream) = create_test_stream().await;
         let id = create_test_id("never-written");
 
-        stream.update(&id, Some(Timestamp::from_unix_secs(1_000_000).unwrap()));
-        stream.join(Duration::from_secs(5)).await;
+        // `begin_update` is a plain UPDATE, not an upsert: a missing row is a no-op, not an
+        // error.
+        stream
+            .begin_update(&id, Some(Timestamp::from_unix_secs(1_000_000).unwrap()))
+            .await
+            .unwrap();
 
-        // `update` is a plain UPDATE, not an upsert.
         assert_eq!(row_count(&stream).await, 0);
         assert_eq!(stored_expiry(&stream, &id).await, None);
     }
 
     #[tokio::test]
-    async fn delete_removes_row() {
+    async fn begin_update_reports_failure_when_table_is_missing() {
+        let (_tempdir, stream) = create_test_stream().await;
+        let id = create_test_id("missing-table-update");
+
+        drop_table(&stream).await;
+
+        let error = stream.begin_update(&id, None).await.unwrap_err();
+        assert!(matches!(error, ChangeStreamError::Failure(_)));
+        assert_eq!(error.to_string(), "change stream failed");
+    }
+
+    #[tokio::test]
+    async fn commit_delete_removes_row() {
         let (_tempdir, stream) = create_test_stream().await;
         let id = create_test_id("test-delete-object");
 
-        stream.write(&id, 1024, None);
-        stream.join(Duration::from_secs(5)).await;
+        stream.begin_write(&id, None).await.unwrap();
         assert_eq!(stored_expiry(&stream, &id).await, Some(None));
 
-        stream.delete(&id);
-        stream.join(Duration::from_secs(5)).await;
+        stream.commit_delete(&id).await;
+
         assert_eq!(stored_expiry(&stream, &id).await, None);
         assert_eq!(row_count(&stream).await, 0);
     }
 
     #[tokio::test]
-    async fn delete_leaves_other_rows_intact() {
+    async fn commit_delete_leaves_other_rows_intact() {
         let (_tempdir, stream) = create_test_stream().await;
         let kept = create_test_id("kept");
         let removed = create_test_id("removed");
 
-        stream.write(&kept, 1024, Some(Timestamp::from_unix_secs(1_000).unwrap()));
-        stream.write(
-            &removed,
-            1024,
-            Some(Timestamp::from_unix_secs(2_000).unwrap()),
-        );
-        stream.join(Duration::from_secs(5)).await;
+        stream
+            .begin_write(&kept, Some(Timestamp::from_unix_secs(1_000).unwrap()))
+            .await
+            .unwrap();
+        stream
+            .begin_write(&removed, Some(Timestamp::from_unix_secs(2_000).unwrap()))
+            .await
+            .unwrap();
 
-        stream.delete(&removed);
-        stream.join(Duration::from_secs(5)).await;
+        stream.commit_delete(&removed).await;
 
         assert_eq!(row_count(&stream).await, 1);
         assert_eq!(stored_expiry(&stream, &removed).await, None);
@@ -417,12 +431,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_of_missing_row_is_a_no_op() {
+    async fn commit_delete_of_missing_row_is_a_no_op() {
         let (_tempdir, stream) = create_test_stream().await;
         let id = create_test_id("never-written");
 
-        stream.delete(&id);
-        stream.join(Duration::from_secs(5)).await;
+        stream.commit_delete(&id).await;
 
         assert_eq!(row_count(&stream).await, 0);
     }
@@ -434,59 +447,24 @@ mod tests {
         let id2 = create_test_id("mixed-2");
         let id3 = create_test_id("mixed-3");
 
-        // Each phase flushes so consecutive operations on the same row cannot interleave
-        // nondeterministically on the backing table.
-        stream.write(&id1, 1024, None);
-        stream.write(&id2, 2048, None);
-        stream.write(&id3, 4096, None);
-        stream.join(Duration::from_secs(5)).await;
+        // Every call is awaited before the next, so operations on the same row cannot
+        // interleave nondeterministically on the backing table.
+        stream.begin_write(&id1, None).await.unwrap();
+        stream.begin_write(&id2, None).await.unwrap();
+        stream.begin_write(&id3, None).await.unwrap();
         assert_eq!(row_count(&stream).await, 3);
 
-        stream.update(&id2, Some(Timestamp::from_unix_secs(9_999).unwrap()));
-        stream.delete(&id1);
-        stream.join(Duration::from_secs(5)).await;
+        stream
+            .begin_update(&id2, Some(Timestamp::from_unix_secs(9_999).unwrap()))
+            .await
+            .unwrap();
+        stream.commit_delete(&id1).await;
 
         // Only id2 and id3 remain, each holding exactly the value its operation set.
         assert_eq!(row_count(&stream).await, 2);
         assert_eq!(stored_expiry(&stream, &id1).await, None);
         assert_eq!(stored_expiry(&stream, &id2).await, Some(Some(9_999)));
         assert_eq!(stored_expiry(&stream, &id3).await, Some(None));
-    }
-
-    #[tokio::test]
-    async fn join_waits_for_pending_writes() {
-        let (_tempdir, stream) = create_test_stream().await;
-        let id = create_test_id("flush");
-
-        stream.write(&id, 1024, None);
-
-        // Tracked but not yet run: nothing has yielded the runtime since the write.
-        assert_eq!(stream.task_tracker.len(), 1);
-
-        stream.join(Duration::from_secs(5)).await;
-
-        // `join` only returns once every tracked task has been reaped and its row landed.
-        assert_eq!(stream.task_tracker.len(), 0);
-        assert_eq!(stored_expiry(&stream, &id).await, Some(None));
-    }
-
-    #[tokio::test]
-    async fn writes_after_a_flush_still_persist() {
-        let (_tempdir, stream) = create_test_stream().await;
-        let first = create_test_id("cycle-1");
-        let second = create_test_id("cycle-2");
-
-        stream.write(&first, 1024, None);
-        stream.join(Duration::from_secs(5)).await;
-
-        stream.write(&second, 1024, None);
-        stream.join(Duration::from_secs(5)).await;
-
-        // A flush closes the tracker for waiting but leaves it usable for further work.
-        assert_eq!(stream.task_tracker.len(), 0);
-        assert_eq!(row_count(&stream).await, 2);
-        assert_eq!(stored_expiry(&stream, &first).await, Some(None));
-        assert_eq!(stored_expiry(&stream, &second).await, Some(None));
     }
 
     #[tokio::test]
@@ -499,7 +477,7 @@ mod tests {
             let stream = std::sync::Arc::clone(&stream);
             handles.push(tokio::spawn(async move {
                 let id = create_test_id(&format!("concurrent-{i}"));
-                stream.write(&id, 1024 * (i + 1) as u64, None);
+                stream.begin_write(&id, None).await.unwrap();
             }));
         }
         for handle in handles {
@@ -508,8 +486,25 @@ mod tests {
 
         stream.join(Duration::from_secs(5)).await;
 
-        // Ten racing writers leave ten rows and a fully drained tracker.
-        assert_eq!(stream.task_tracker.len(), 0);
+        // Ten racing writers leave ten rows.
         assert_eq!(row_count(&stream).await, 10);
+    }
+
+    #[tokio::test]
+    async fn join_is_repeatable_and_preserves_rows() {
+        let (_tempdir, stream) = create_test_stream().await;
+        let first = create_test_id("cycle-1");
+        let second = create_test_id("cycle-2");
+
+        stream.begin_write(&first, None).await.unwrap();
+        stream.join(Duration::from_secs(5)).await;
+
+        // `join` may run on every shutdown drain without breaking subsequent work.
+        stream.begin_write(&second, None).await.unwrap();
+        stream.join(Duration::from_secs(5)).await;
+
+        assert_eq!(row_count(&stream).await, 2);
+        assert_eq!(stored_expiry(&stream, &first).await, Some(None));
+        assert_eq!(stored_expiry(&stream, &second).await, Some(None));
     }
 }
