@@ -3,7 +3,7 @@
 Wrapper around a Kafka producer that a storage service can use to emit a
 lightweight change stream.
 
-Produces to Kafka via [`rdkafka`](https://docs.rs/rdkafka).
+Produces to Kafka via [`sentry_arroyo`](https://docs.rs/sentry_arroyo).
 Message schema is defined in [sentry-kafka-schemas](https://github.com/getsentry/sentry-kafka-schemas).
 
 ## Why
