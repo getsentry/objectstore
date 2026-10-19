@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import random
+import shutil
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
-from io import SEEK_END
+from io import SEEK_END, BufferedRandom, BufferedReader, BytesIO, FileIO
+from os import PathLike, fstat
+from stat import S_ISREG
+from tempfile import TemporaryFile
 from typing import IO, TYPE_CHECKING
 from urllib.parse import urlencode
 
 import urllib3
+import zstandard
 
 from objectstore_client.errors import RequestError, raise_for_status
 from objectstore_client.metadata import Compression, ExpirationPolicy
@@ -220,22 +227,73 @@ class ResumableUpload:
             raise_for_status(response, error_type=error_type)
 
 
-def get_size(contents: bytes | IO[bytes]) -> int | None:
-    if isinstance(contents, bytes):
-        return len(contents)
+@contextmanager
+def prepare_body(
+    contents: bytes | IO[bytes],
+    compress: bool,
+    spool_dir: str | PathLike[str] | None,
+) -> Iterator[tuple[IO[bytes], int, int] | None]:
+    """Yield the body, source size, and compressed size (equal if uncompressed).
+
+    Reuse plain files and buffers when no compression is needed. Other streams
+    are read from their current position without seeking or closing them.
+    Yield None if temporary-file creation fails, before consuming any input.
+    """
+    with (
+        BytesIO(contents) if isinstance(contents, bytes) else nullcontext(contents)
+    ) as source:
+        if not compress:
+            size = get_size(source)
+            if size is not None:
+                yield source, size, size
+                return
+
+        try:
+            temporary = TemporaryFile(dir=spool_dir)
+        except OSError:
+            yield None
+            return
+
+        with temporary as body:
+            if compress:
+                source_size, compressed_size = zstandard.ZstdCompressor().copy_stream(
+                    source, body
+                )
+            else:
+                shutil.copyfileobj(source, body)
+                source_size = compressed_size = body.tell()
+            body.seek(0)
+            yield body, source_size, compressed_size
+
+
+def get_size(source: IO[bytes]) -> int | None:
+    """Return the remaining byte count without reading, or None if unknown.
+
+    Inspect exact BytesIO and BufferedReader/BufferedRandom over regular FileIO.
+    Other wrappers may transform the bytes.
+    """
     try:
-        if not contents.seekable():
+        if type(source) is BytesIO:
+            # Seek to measure the buffer without getbuffer()'s possible copy.
+            start = source.tell()
+            try:
+                return max(0, source.seek(0, SEEK_END) - start)
+            finally:
+                source.seek(start)
+        if type(source) is not BufferedReader and type(source) is not BufferedRandom:
             return None
-        start = contents.tell()
+        if type(source.raw) is not FileIO:
+            return None
+
+        if type(source) is BufferedRandom:
+            source.flush()  # Include any buffered writes in the file size.
+        info = fstat(source.fileno())
+        if not S_ISREG(info.st_mode):  # Pipes and devices have no useful file size.
+            return None
+        return max(0, info.st_size - source.tell())
     except (OSError, ValueError):
+        # Sizing is optional; a readable stream may still be uploaded directly.
         return None
-    try:
-        end = contents.seek(0, SEEK_END)
-    except (OSError, ValueError):
-        return None
-    finally:
-        contents.seek(start)
-    return max(0, end - start)
 
 
 def is_transient(error: Exception) -> bool:
@@ -258,7 +316,7 @@ def is_transient(error: Exception) -> bool:
 def upload(
     session: Session,
     body: IO[bytes],
-    encoded_size: int,
+    compressed_size: int,
     key: str | None = None,
     compression: Compression | None = None,
     content_type: str | None = None,
@@ -271,7 +329,7 @@ def upload(
     start = body.tell()
     try:
         handle = session._create_upload(
-            encoded_size,
+            compressed_size,
             key=key,
             compression=compression,
             content_type=content_type,
@@ -295,7 +353,7 @@ def upload(
                     result = handle.progress()
                 else:
                     body.seek(start + offset)
-                    result = handle.put(offset, (body, encoded_size - offset))
+                    result = handle.put(offset, (body, compressed_size - offset))
             except UploadOffsetMismatch as error:
                 result = UploadIncomplete(error.offset)
             except Exception as error:
@@ -308,7 +366,7 @@ def upload(
 
             if isinstance(result, UploadComplete):
                 return handle.key
-            if not offset <= result.offset <= encoded_size:
+            if not offset <= result.offset <= compressed_size:
                 raise ValueError("Invalid upload offset")
             if result.offset == offset and not probe:
                 raise ValueError("Upload made no progress")

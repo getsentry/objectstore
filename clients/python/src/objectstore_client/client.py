@@ -3,10 +3,12 @@ from __future__ import annotations
 import math
 import warnings
 from collections.abc import Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from importlib.metadata import version
-from io import BytesIO
+from io import SEEK_CUR, SEEK_SET, BytesIO
+from os import PathLike
 from typing import IO, Any, Literal, NamedTuple, cast
 from urllib.parse import urlparse
 
@@ -37,7 +39,6 @@ from objectstore_client.metadata import (
 from objectstore_client.metrics import (
     MetricsBackend,
     NoOpMetricsBackend,
-    StorageMetricEmitter,
     measure_storage_operation,
 )
 from objectstore_client.multipart import MultipartUpload
@@ -89,8 +90,8 @@ class Usecase:
     Objectstore can make decisions based on the Usecase. For example, choosing the most
     suitable storage backend.
 
-    ``resumable_threshold_bytes`` defaults to 32 MiB of remaining source bytes,
-    before any compression. ``None`` disables resumable uploads.
+    ``resumable_threshold_bytes`` defaults to 256 MiB of remaining source bytes,
+    before any compression. ``"none"`` disables resumable uploads.
     ``resumable_retries`` configures recovery via `ResumableRetryPolicy`.
     """
 
@@ -103,11 +104,15 @@ class Usecase:
         name: str,
         compression: Compression = "zstd",
         expiration_policy: ExpirationPolicy | None = None,
-        resumable_threshold_bytes: int | None = 32 * 1024 * 1024,
+        resumable_threshold_bytes: int | Literal["none"] = 256 * 1024 * 1024,
         resumable_retries: ResumableRetryPolicy = ResumableRetryPolicy(),
     ):
-        if resumable_threshold_bytes is not None and resumable_threshold_bytes < 0:
-            raise ValueError("resumable_threshold_bytes must be non-negative")
+        if resumable_threshold_bytes != "none" and (
+            type(resumable_threshold_bytes) is not int or resumable_threshold_bytes < 0
+        ):
+            raise ValueError(
+                'resumable_threshold_bytes must be a non-negative integer or "none"'
+            )
         self.name = name
         self._compression = compression
         self._expiration_policy = expiration_policy
@@ -181,6 +186,8 @@ class Client:
             as-is for every request. Use a ``SecretKey`` for internal
             services that have access to the signing key, and a string for
             external services that receive a token from another source.
+        spool_dir: Directory that temporary files are created in when preparing
+            resumable uploads. ``None`` uses Python's default temporary directory.
     """
 
     def __init__(
@@ -192,6 +199,7 @@ class Client:
         timeout_ms: float | None = None,
         connection_kwargs: Mapping[str, Any] | None = None,
         token: TokenProvider | None = None,
+        spool_dir: str | PathLike[str] | None = None,
     ):
         if propagate_traces:
             warnings.warn(
@@ -230,6 +238,7 @@ class Client:
         self._metrics_backend = metrics_backend or NoOpMetricsBackend()
         self._propagate_traces = propagate_traces
         self._token = token
+        self._spool_dir = spool_dir
 
     def session(self, usecase: Usecase, **scopes: str | int | bool) -> Session:
         """
@@ -265,6 +274,7 @@ class Client:
             usecase,
             Scope(**scopes),
             self._token,
+            self._spool_dir,
         )
 
 
@@ -284,6 +294,7 @@ class Session:
         usecase: Usecase,
         scope: Scope,
         token: TokenProvider | None = None,
+        spool_dir: str | PathLike[str] | None = None,
     ):
         self._pool = pool
         self._base_path = base_path
@@ -292,6 +303,7 @@ class Session:
         self._usecase = usecase
         self._scope = scope
         self._token = token
+        self._spool_dir = spool_dir
 
     def mint_token(
         self,
@@ -428,7 +440,8 @@ class Session:
         expiration_policy: ExpirationPolicy | None = None,
         origin: str | None = None,
         filename: str | None = None,
-        resumable_threshold_bytes: int | None | Literal["unset"] = "unset",
+        resumable_threshold_bytes: int | Literal["none"] | None = None,
+        size_hint: int | None = None,
     ) -> str:
         """
         Uploads the given `contents` to blob storage.
@@ -436,7 +449,7 @@ class Session:
         If no `key` is provided, one will be automatically generated and returned
         from this function.
 
-        The client will select the configured `default_compression` if none is given
+        The client will select the Usecase's configured compression if none is given
         explicitly. This can be overridden by explicitly giving a `compress` argument.
         Providing `"none"` as the argument will instruct the client to not apply
         any compression to this upload, which is useful for uncompressible formats.
@@ -448,11 +461,26 @@ class Session:
         You can use the utility function `objectstore_client.utils.guess_mime_type`
         to attempt to guess a `content_type` based on magic bytes.
 
-        ``resumable_threshold_bytes`` overrides the Usecase threshold when supplied;
-        ``None`` disables resumable uploads. Eligible uploads use the Usecase's
-        ``resumable_retries`` policy; a retry count of zero disables resumable uploads.
-
         `compression` is deprecated in favor of `compress`.
+
+        ### Resumable Uploads
+
+        This method uses Objectstore's Resumable Uploads API when:
+        - The size of ``contents`` is at least ``resumable_threshold_bytes``.
+          Pass ``resumable_threshold_bytes="none"`` to disable Resumable Uploads.
+          When not overridden, this threshold defaults to the one set on the Usecase.
+        - The ``resumable_retries`` policy configured on the Usecase permits retries.
+
+        When ``compress`` is an instance of ``IO[bytes]``, ``objectstore_client`` will
+        attempt to determine its size on a best-effort basis, falling back to a
+        regular upload if the size cannot be determined.
+        You should provide the `size_hint` argument whenever possible, which will be
+        used to choose the upload protocol.
+
+        In general, the final payload to be transmitted is spooled in a temporary
+        file (``tempfile.TemporaryFile``) on disk before sending.
+        Set ``Client(spool_dir=<path>)`` if you wish to customize the directory where
+        the temporary files are created in.
         """
         if compression is not None:
             warnings.warn(
@@ -471,27 +499,29 @@ class Session:
         if precompressed and precompressed != "zstd":
             raise ValueError(f"Invalid compression: {precompressed}")
 
-        if resumable_threshold_bytes == "unset":
+        if resumable_threshold_bytes is None:
             resumable_threshold_bytes = self._usecase._resumable_threshold_bytes
-        if resumable_threshold_bytes is not None and resumable_threshold_bytes < 0:
-            raise ValueError("resumable_threshold_bytes must be non-negative")
+        if resumable_threshold_bytes != "none" and (
+            type(resumable_threshold_bytes) is not int or resumable_threshold_bytes < 0
+        ):
+            raise ValueError(
+                'resumable_threshold_bytes must be a non-negative integer or "none"'
+            )
 
-        encoding = precompressed or compress or self._usecase._compression
+        if size_hint is not None and (type(size_hint) is not int or size_hint < 0):
+            raise ValueError("size_hint must be a non-negative integer or None")
+        source_size = size_hint
+        if isinstance(contents, bytes):
+            source_size = len(contents)
+        elif type(contents) is BytesIO or size_hint is None:
+            source_size = _resumable.get_size(contents)
 
-        compress_with = encoding if precompressed is None else "none"
+        payload_compression = precompressed or compress or self._usecase._compression
 
-        replayable = isinstance(contents, bytes) or compress_with == "none"
-        body_size = _resumable.get_size(contents)
-        use_resumable = (
-            body_size is not None
-            and resumable_threshold_bytes is not None
-            and self._usecase._resumable_retries.retries > 0
-            and replayable
-            and body_size >= resumable_threshold_bytes
-        )
+        should_compress = precompressed is None and payload_compression != "none"
 
         headers = self._metadata_headers(
-            compression=encoding,
+            compression=payload_compression,
             content_type=content_type,
             metadata=metadata,
             expiration_policy=expiration_policy,
@@ -508,58 +538,54 @@ class Session:
                 self._metrics_backend, "put", self._usecase.name
             ) as metrics,
         ):
-            if use_resumable:
-                assert body_size is not None
-                if isinstance(contents, bytes):
-                    encoded = (
-                        zstandard.ZstdCompressor().compress(contents)
-                        if compress_with == "zstd"
-                        else contents
-                    )
-                    body: IO[bytes] = BytesIO(encoded)
-                    encoded_size = len(encoded)
-                else:
-                    body = contents
-                    encoded_size = body_size
-                try:
-                    result_key = _resumable.upload(
-                        self,
-                        body,
-                        encoded_size,
-                        key=key,
-                        compression=encoding,
-                        content_type=content_type,
-                        metadata=metadata,
-                        expiration_policy=expiration_policy,
-                        origin=origin,
-                        filename=filename,
-                    )
-                    if result_key is None:
-                        headers["Content-Length"] = str(encoded_size)
-                        result_key = self._put_direct(
-                            body, key, headers, compress=False
-                        )
-                    if precompressed is None:
-                        metrics.record_uncompressed_size(body_size)
-                    if encoding != "none":
-                        metrics.record_compressed_size(encoded_size, encoding)
-                finally:
-                    if isinstance(contents, bytes):
-                        body.close()
-            else:
-                result_key = self._put_direct(
+            result_key: str | None
+            if (
+                resumable_threshold_bytes != "none"
+                and source_size is not None
+                and source_size >= resumable_threshold_bytes
+                and self._usecase._resumable_retries.retries > 0
+            ):
+                with _resumable.prepare_body(
                     contents,
-                    key,
-                    headers,
-                    compress=compress_with == "zstd",
-                    metrics=metrics,
-                    record_source=precompressed is None,
-                    encoding=encoding,
+                    should_compress,
+                    self._spool_dir,
+                ) as prepared:
+                    if prepared is None:
+                        result_key, source_size, compressed_size = self._put_direct(
+                            contents, key, headers, compress=should_compress
+                        )
+                    else:
+                        body, source_size, compressed_size = prepared
+                        result_key = _resumable.upload(
+                            self,
+                            body,
+                            compressed_size,
+                            key=key,
+                            compression=payload_compression,
+                            content_type=content_type,
+                            metadata=metadata,
+                            expiration_policy=expiration_policy,
+                            origin=origin,
+                            filename=filename,
+                        )
+                        if result_key is None:
+                            headers["Content-Length"] = str(compressed_size)
+                            result_key, _, _ = self._put_direct(
+                                body, key, headers, compress=False
+                            )
+            else:
+                result_key, source_size, compressed_size = self._put_direct(
+                    contents, key, headers, compress=should_compress
                 )
+
+            if precompressed is None:
+                metrics.record_uncompressed_size(source_size)
+            if payload_compression != "none":
+                metrics.record_compressed_size(compressed_size, payload_compression)
 
             # Set after the response, since the key may be server-generated.
             span.set_attribute("objectstore.key", result_key)
-            span.set_attribute("objectstore.compression", encoding)
+            span.set_attribute("objectstore.compression", payload_compression)
             if metrics.uncompressed_size is not None:
                 span.set_attribute(
                     "objectstore.uncompressed_size", metrics.uncompressed_size
@@ -576,52 +602,43 @@ class Session:
         key: str | None,
         headers: dict[str, str],
         compress: bool,
-        metrics: StorageMetricEmitter | None = None,
-        record_source: bool = True,
-        encoding: Compression = "none",
-    ) -> str:
-        """Stream a direct upload, optionally compressing on the fly."""
-        body = BytesIO(contents) if isinstance(contents, bytes) else contents
-        original_body: IO[bytes] = body
-        retries = None  # by default use the pool's value, set by the Client
-        try:
-            if compress:
-                cctx = zstandard.ZstdCompressor()
-                body = cctx.stream_reader(original_body, closefd=False)
-                body = cast(IO[bytes], utils._ZstdCompressionReaderWrapper(body))
-                # For on-the-fly compression, don't attempt read retries,
-                # as the stream cannot be rewound after data has been consumed.
-                pool_retries = self._pool.retries
-                if isinstance(pool_retries, urllib3.Retry):
-                    retries = pool_retries.new(read=0)
-                elif isinstance(pool_retries, int):
-                    retries = urllib3.Retry(pool_retries, read=0)
+    ) -> tuple[str, int, int]:
+        """Return the key, source size, and compressed size (equal if uncompressed)."""
+        with (
+            BytesIO(contents) if isinstance(contents, bytes) else nullcontext(contents)
+        ) as source:
+            counter = cast(IO[bytes], _CountingReader(source))
+            body = counter
+            retries = None  # by default use the pool's value, set by the Client
+            try:
+                if compress:
+                    cctx = zstandard.ZstdCompressor()
+                    body = cctx.stream_reader(counter, closefd=False)
+                    body = cast(IO[bytes], utils._ZstdCompressionReaderWrapper(body))
+                    # For on-the-fly compression, don't attempt read retries,
+                    # as the stream cannot be rewound after data has been consumed.
+                    pool_retries = self._pool.retries
+                    if isinstance(pool_retries, urllib3.Retry):
+                        retries = pool_retries.new(read=0)
+                    elif isinstance(pool_retries, int):
+                        retries = urllib3.Retry(pool_retries, read=0)
 
-            response = self._pool.request(
-                "POST" if not key else "PUT",
-                self._make_url(key),
-                body=body,
-                headers=headers,
-                preload_content=True,
-                decode_content=True,
-                retries=retries,
-            )
-            raise_for_status(response)
-            res = response.json()
+                response = self._pool.request(
+                    "POST" if not key else "PUT",
+                    self._make_url(key),
+                    body=body,
+                    headers=headers,
+                    preload_content=True,
+                    decode_content=True,
+                    retries=retries,
+                )
+                raise_for_status(response)
+                res = response.json()
 
-            # Must do this after streaming `body` as that's what is responsible
-            # for advancing the seek position in both streams
-            if metrics is not None:
-                if record_source:
-                    metrics.record_uncompressed_size(original_body.tell())
-                if encoding != "none":
-                    metrics.record_compressed_size(body.tell(), encoding)
-            return res["key"]
-        finally:
-            if body is not original_body:
-                body.close()
-            if isinstance(contents, bytes):
-                original_body.close()
+                return res["key"], counter.tell(), body.tell()
+            finally:
+                if body is not counter:
+                    body.close()
 
     def get(
         self,
@@ -1053,3 +1070,32 @@ class Session:
         continue an upload started elsewhere.
         """
         return MultipartUpload(self, key, upload_id)
+
+
+class _CountingReader:
+    """Count bytes for direct uploads, which do not spool their input.
+
+    The source need not support tell(). Positions are relative to the start of
+    this upload. Rewinds requested by urllib3 are translated to relative seeks
+    on the underlying stream.
+    """
+
+    def __init__(self, source: IO[bytes]) -> None:
+        self._source = source
+        self._position = 0
+
+    def read(self, size: int = -1) -> bytes:
+        data = self._source.read(size)
+        self._position += len(data)
+        return data
+
+    def tell(self) -> int:
+        return self._position
+
+    def seek(self, offset: int, whence: int = SEEK_SET) -> int:
+        if whence != SEEK_SET:
+            raise OSError("Only absolute upload positions are supported")
+        if offset != self._position:
+            self._source.seek(offset - self._position, SEEK_CUR)
+            self._position = offset
+        return self._position

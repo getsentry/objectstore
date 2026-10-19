@@ -1157,14 +1157,20 @@ def test_put_stores_under_literal_key(server_url: str) -> None:
     assert body == payload
 
 
-@pytest.mark.parametrize("source_kind", ["bytes", "precompressed_bytes", "stream"])
-def test_automatic_resumable_upload(server_url: str, source_kind: str) -> None:
+@pytest.mark.parametrize(
+    "source_kind",
+    ["bytes", "precompressed_bytes", "buffer", "stream", "unhinted_stream"],
+)
+@pytest.mark.parametrize("threshold", [1, 2048])
+def test_automatic_resumable_upload(
+    server_url: str, source_kind: str, threshold: int
+) -> None:
     session = Client(server_url, token=TestSecretKey.get()).session(
         Usecase(
             "test-usecase",
             compression="none",
             expiration_policy=TimeToLive(timedelta(days=1)),
-            resumable_threshold_bytes=1,
+            resumable_threshold_bytes=threshold,
         ),
         org=42,
     )
@@ -1174,7 +1180,7 @@ def test_automatic_resumable_upload(server_url: str, source_kind: str) -> None:
         zstandard.ZstdCompressor().compress(contents) if precompressed else contents
     )
     with (
-        tempfile.TemporaryFile() as source,
+        BytesIO() if source_kind == "buffer" else tempfile.TemporaryFile() as source,
         patch.object(
             ResumableUpload, "put", autospec=True, side_effect=ResumableUpload.put
         ) as put,
@@ -1182,14 +1188,17 @@ def test_automatic_resumable_upload(server_url: str, source_kind: str) -> None:
         source.write(b"skip this prefix" + encoded)
         source.seek(len(b"skip this prefix"))
         key = session.put(
-            source if source_kind == "stream" else encoded,
+            source
+            if source_kind in ("buffer", "stream", "unhinted_stream")
+            else encoded,
             precompressed="zstd" if precompressed else None,
+            size_hint=len(encoded) if source_kind == "stream" else None,
             content_type="text/plain",
             metadata={"source": "file"},
             origin="203.0.113.42",
             filename="example.txt",
         )
-        put.assert_called_once()
+        assert put.call_count == int(threshold == 1)
         assert not source.closed
         stored = session.head(key)
         assert stored is not None

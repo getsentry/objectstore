@@ -102,11 +102,9 @@ session.put(zstd_data, precompressed="zstd")
 
 ### Resumable Uploads
 
-`Session.put()` automatically uses resumable uploads for eligible sources of at
-least 32 MiB. Set `resumable_threshold_bytes` on `Usecase` or override it on an
-individual `put()`; `None` disables resumable uploads. Configure recovery with
-`Usecase(resumable_retries=ResumableRetryPolicy(...))`; zero retries also disables
-resumable uploads. See `Session.put()` and `ResumableRetryPolicy` for details.
+The client automatically uses resumable uploads when eligible and may create
+temporary files for spooling. See [`Session.put()`](src/objectstore_client/client.py)
+for eligibility, configuration, and upload behavior.
 
 ### Custom Metadata
 
