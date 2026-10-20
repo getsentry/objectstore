@@ -25,8 +25,6 @@
 //! strings are rejected by JSON deserialization with 422. Requests exceeding the
 //! usecase's `expiration.max`, measured from request time, return 400.
 
-use std::fmt::Write as _;
-
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::handler::Handler;
@@ -37,7 +35,6 @@ use axum::{Json, Router};
 use objectstore_service::backend::common::{ExpiryTarget, ExpiryUpdate, SetExpiryResponse};
 use objectstore_service::error::ErrorKind;
 use objectstore_service::id::{ObjectContext, ObjectId};
-use objectstore_types::headers::ExtValue;
 use objectstore_types::metadata::{ExpiryAnchor, ExpiryExtension, Metadata, MetadataUpdate};
 use objectstore_types::range::ContentRange;
 use serde::Serialize;
@@ -48,6 +45,7 @@ use crate::endpoints::resumable;
 use crate::extractors::byte_range::OptionalByteRange;
 use crate::extractors::request_time::RequestTime;
 use crate::extractors::{Xt, body::MeteredBody};
+use crate::response_options::ResponseOptions;
 use crate::resumable::ResumableTarget;
 use crate::state::ServiceState;
 
@@ -176,7 +174,7 @@ async fn object_get(
     service: AuthAwareService,
     State(state): State<ServiceState>,
     Xt(id): Xt<ObjectId>,
-    _headers: HeaderMap,
+    options: ResponseOptions,
     RequestTime(access_time): RequestTime,
     OptionalByteRange(byte_range): OptionalByteRange,
 ) -> ApiResult<Response> {
@@ -230,14 +228,14 @@ async fn object_get(
         }
     };
 
-    insert_content_disposition(&mut response, &metadata);
     insert_accept_ranges(&mut response);
 
-    Ok(response)
+    Ok((options.into_headers(metadata.filename.as_deref()), response).into_response())
 }
 
 async fn object_head(
     service: AuthAwareService,
+    options: ResponseOptions,
     Xt(id): Xt<ObjectId>,
     RequestTime(access_time): RequestTime,
 ) -> ApiResult<Response> {
@@ -251,9 +249,8 @@ async fn object_head(
     insert_content_length(&mut headers, &metadata);
 
     let mut response = (StatusCode::OK, headers).into_response();
-    insert_content_disposition(&mut response, &metadata);
     insert_accept_ranges(&mut response);
-    Ok(response)
+    Ok((options.into_headers(metadata.filename.as_deref()), response).into_response())
 }
 
 /// Inserts a `Content-Length` header covering the complete object.
@@ -268,55 +265,6 @@ fn insert_content_length(headers: &mut HeaderMap, metadata: &Metadata) {
             http::HeaderValue::from(size as u64),
         );
     }
-}
-
-/// Serves every object as an attachment, named after its filename when it has one.
-fn insert_content_disposition(response: &mut Response, metadata: &Metadata) {
-    let value = match metadata.filename.as_deref() {
-        Some(filename) => format_content_disposition(filename),
-        None => http::HeaderValue::from_static("attachment"),
-    };
-    response
-        .headers_mut()
-        .insert(http::header::CONTENT_DISPOSITION, value);
-}
-
-/// Formats a `Content-Disposition: attachment; filename="..."` header value.
-///
-/// The filename is sanitized (`/` and `\` become `-`, dots-only names become all dashes, non-ASCII
-/// and control characters become `_`) and then escaped for the RFC 6266 quoted-string (`"` is
-/// backslash-escaped).
-///
-/// A filename that is not pure ASCII cannot be represented in that quoted-string, so it
-/// additionally gets an RFC 8187 `filename*` parameter carrying the full UTF-8 value. The
-/// quoted-string then serves as the ASCII fallback for clients that ignore `filename*`.
-fn format_content_disposition(filename: &str) -> http::HeaderValue {
-    let all_dots = filename.chars().all(|c| c == '.');
-
-    let mut result = String::from("attachment; filename=\"");
-    for c in filename.chars() {
-        let c = match c {
-            '/' | '\\' => '-',
-            '.' if all_dots => '-',
-            '"' => {
-                result.push('\\');
-                '"'
-            }
-            c if !c.is_ascii() || c.is_control() => '_',
-            c => c,
-        };
-        result.push(c);
-    }
-    result.push('"');
-
-    if !filename.is_ascii() {
-        write!(result, "; filename*={}", ExtValue(filename))
-            .expect("writing to a string cannot fail");
-    }
-
-    // INVARIANT: every character written above is visible ASCII — the quoted-string replaces
-    // non-ASCII and control characters with `_`, and the `ext-value` is percent-encoded.
-    http::HeaderValue::from_str(&result).expect("content disposition is a valid header value")
 }
 
 async fn insert_object(

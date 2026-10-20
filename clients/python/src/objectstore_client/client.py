@@ -10,7 +10,7 @@ from importlib.metadata import version
 from io import BytesIO
 from os import PathLike
 from typing import IO, Any, Literal, NamedTuple, cast
-from urllib.parse import urlparse
+from urllib.parse import quote, urlencode, urlparse
 
 import sentry_sdk
 import urllib3
@@ -50,6 +50,23 @@ PARAM_AUTH = "os_auth"
 
 # Identifies this library to the server, mirroring the Rust client's user agent.
 USER_AGENT = f"objectstore-client/{version('objectstore-client')}"
+
+
+def _response_options_query(
+    disposition: Literal["inline", "attachment"] | None,
+    cache_control: str | None,
+) -> str:
+    """Encode individual response options without changing legacy URLs."""
+    pairs: list[tuple[str, str]] = []
+    if disposition is not None:
+        if disposition not in ("inline", "attachment"):
+            raise ValueError(
+                f"unsupported response content disposition {disposition!r}"
+            )
+        pairs.append(("response-content-disposition", disposition))
+    if cache_control is not None:
+        pairs.append(("response-cache-control", cache_control))
+    return urlencode(pairs, quote_via=quote)
 
 
 class GetResponse(NamedTuple):
@@ -94,7 +111,7 @@ class Usecase:
                 "usecase name must contain only ASCII letters, digits, '_' or '-'"
             )
         self._name = name
-        
+
         if resumable_threshold_bytes != "none" and (
             type(resumable_threshold_bytes) is not int or resumable_threshold_bytes < 0
         ):
@@ -709,7 +726,14 @@ class Session:
             span.set_attribute("objectstore.decompressed", decompressed)
             return GetResponse(metadata, stream)
 
-    def object_url(self, key: str, token_validity: timedelta | None = None) -> str:
+    def object_url(
+        self,
+        key: str,
+        token_validity: timedelta | None = None,
+        *,
+        response_content_disposition: Literal["inline", "attachment"] | None = None,
+        response_cache_control: str | None = None,
+    ) -> str:
         """
         Generates a GET url to the object with the given `key`.
 
@@ -721,10 +745,23 @@ class Session:
         information is embedded in the returned URL's query string, valid
         for the given duration.
 
+        Response options apply only to successful GET/HEAD responses. Disposition
+        defaults to attachment; inline responses include browser sandboxing without
+        restricting MIME types. Cache control is passed through independently of
+        authorization expiry, so cached responses can outlive the URL's validity.
+
+        These options are not bound by the JWT and can be changed by recipients.
+        Use :meth:`presigned_object_url` to bind the options to a signature.
+
         Raises ``ValueError`` if ``token_validity`` is provided but no
-        ``SecretKey`` is configured on this session.
+        ``SecretKey`` is configured on this session, or if disposition is invalid.
         """
         url = self._make_url(key, full=True)
+        query = _response_options_query(
+            response_content_disposition, response_cache_control
+        )
+        if query:
+            url = f"{url}?{query}"
         if token_validity is None:
             return url
 
@@ -734,13 +771,17 @@ class Session:
         )
         # A JWT's compact serialization is base64url, whose alphabet is URL-safe,
         # so it can go in the query string as-is with no further encoding.
-        return f"{url}?{PARAM_AUTH}={token}"
+        separator = "&" if query else "?"
+        return f"{url}{separator}{PARAM_AUTH}={token}"
 
     def presigned_object_url(
         self,
         method: Literal["GET", "HEAD"],
         key: str,
         duration: timedelta = timedelta(hours=1),
+        *,
+        response_content_disposition: Literal["inline", "attachment"] | None = None,
+        response_cache_control: str | None = None,
     ) -> str:
         """
         Generates a pre-signed URL authorizing a single ``method`` request on the
@@ -752,11 +793,18 @@ class Session:
 
         Raises ``ValueError`` if no ``SecretKey`` is configured on this
         session's client, if ``method`` is not supported, or if ``duration``
-        is above the one-week maximum.
+        is above the one-week maximum, or if disposition is invalid.
 
         The returned URL carries a signature that allows the recipient to perform
         a request without an auth token. It can be handed to any HTTP client;
         the URL is already percent-encoded, and must be transmitted verbatim.
+
+        Response options apply only to successful GET/HEAD responses. Disposition
+        defaults to attachment; inline responses include browser sandboxing without
+        restricting MIME types. Cache control is passed through independently of
+        authorization expiry, so cached responses can outlive the URL's validity.
+
+        Both response options are included in the signature when supplied.
 
         Note that `HEAD` and `GET` are considered equivalent from the point of view
         of signatures, meaning that a signature for `GET` can also be used for
@@ -794,6 +842,12 @@ class Session:
                 f"&{presign.PARAM_TIMESTAMP}={timestamp}"
                 f"&{presign.PARAM_DURATION}={duration_secs}"
             )
+
+            response_query = _response_options_query(
+                response_content_disposition, response_cache_control
+            )
+            if response_query:
+                encoded_query = f"{encoded_query}&{response_query}"
 
             canonical = presign.build_canonical_form(
                 method, encoded_path, encoded_query
