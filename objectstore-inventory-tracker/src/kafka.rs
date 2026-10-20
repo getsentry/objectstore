@@ -1,14 +1,14 @@
-//! A [`Producer`] backed by [`rdkafka`].
+//! A [`Producer`] backed by [`sentry_arroyo`]'s Kafka producer.
 
 use std::collections::HashMap;
 use std::time::Duration;
 
-use rdkafka::ClientConfig;
 use rdkafka::client::ClientContext;
 use rdkafka::error::KafkaError;
-use rdkafka::producer::{
-    BaseRecord, DeliveryResult, Producer as RdKafkaProducer, ProducerContext, ThreadedProducer,
-};
+use rdkafka::producer::{BaseRecord, DeliveryResult, ProducerContext};
+use sentry_arroyo::backends::ProducerError;
+use sentry_arroyo::backends::kafka::config::KafkaConfig as ArroyoKafkaConfig;
+use sentry_arroyo::backends::kafka::producer::KafkaProducer as ArroyoKafkaProducer;
 
 use crate::producer::Producer;
 
@@ -50,7 +50,7 @@ pub enum KafkaProducerError {
     /// This may mean the local queue is full, which may be caused by the broker being
     /// unreachable or backed up.
     #[error("failed to enqueue inventory record")]
-    SendFailed(#[source] KafkaError),
+    SendFailed(#[source] ProducerError),
 
     /// The local queue was not emptied before the flush timeout elapsed.
     #[error("failed to flush inventory records")]
@@ -97,7 +97,7 @@ impl ProducerContext for DeliveryReporter {
 /// rather than waiting.
 pub struct KafkaProducer {
     topic: String,
-    producer: ThreadedProducer<DeliveryReporter>,
+    producer: ArroyoKafkaProducer<DeliveryReporter>,
 }
 
 impl std::fmt::Debug for KafkaProducer {
@@ -119,19 +119,18 @@ impl KafkaProducer {
         config: KafkaConfig,
         on_delivery_failure: Option<OnDeliveryFailure>,
     ) -> Result<Self, KafkaProducerError> {
-        let mut client_config = ClientConfig::new();
-        client_config.set("bootstrap.servers", config.bootstrap_servers.join(","));
+        // Overrides are applied after the broker list, so a caller can override it too.
+        // Not `new_producer_config`: it enables per-second stats, which rdkafka logs at info.
+        let client_config =
+            ArroyoKafkaConfig::new_config(config.bootstrap_servers, Some(config.override_params));
 
-        // Applied after the broker list so that a caller can override it if they need to.
-        for (key, value) in &config.override_params {
-            client_config.set(key, value);
-        }
-
-        let producer = client_config
-            .create_with_context(DeliveryReporter {
+        let producer = ArroyoKafkaProducer::new_with_context(
+            client_config,
+            DeliveryReporter {
                 on_failure: on_delivery_failure,
-            })
-            .map_err(KafkaProducerError::InvalidConfig)?;
+            },
+        )
+        .map_err(KafkaProducerError::InvalidConfig)?;
 
         Ok(Self {
             topic: config.topic,
@@ -148,13 +147,13 @@ impl Producer for KafkaProducer {
             BaseRecord::to(&self.topic).key(key).payload(&payload);
 
         self.producer
-            .send(record)
-            .map_err(|(error, _)| KafkaProducerError::SendFailed(error))
+            .produce_record(record)
+            .map_err(KafkaProducerError::SendFailed)
     }
 
     fn join_blocking(&self, timeout: Duration) -> Result<(), Self::Error> {
         self.producer
-            .flush(timeout)
+            .flush_for(timeout)
             .map_err(KafkaProducerError::FlushFailed)
     }
 }
