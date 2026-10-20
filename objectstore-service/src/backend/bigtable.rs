@@ -3102,6 +3102,34 @@ mod tests {
 
     #[cfg(feature = "storage-cogs")]
     #[tokio::test]
+    async fn change_stream_reports_upload_markers() -> Result<()> {
+        let (backend, producer) = create_test_backend_with_change_stream().await?;
+        let revision = new_test_revision(&make_id());
+        let now = Timestamp::now();
+        let expires_at = now + Duration::from_secs(3600);
+
+        backend.create_upload_marker(&revision, expires_at).await?;
+        assert!(backend.delete_upload_marker(&revision, now).await?);
+        assert!(!backend.delete_upload_marker(&revision, now).await?);
+
+        let records = producer.records();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].op_type, OpType::Write);
+        assert_eq!(
+            records[0].size,
+            Some(revision.as_upload_path().to_string().len() as u64 + 1)
+        );
+        assert_eq!(
+            records[0].expiration_time,
+            Some(expires_at.as_micros() as i64)
+        );
+        assert_eq!(records[1].op_type, OpType::Delete);
+        assert_eq!(records[1].record_id, records[0].record_id);
+        Ok(())
+    }
+
+    #[cfg(feature = "storage-cogs")]
+    #[tokio::test]
     async fn delete_non_tombstone_reclaims_expired_rows() -> Result<()> {
         let (backend, producer) = create_test_backend_with_change_stream().await?;
 
