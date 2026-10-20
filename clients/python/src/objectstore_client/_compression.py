@@ -3,21 +3,28 @@
 from __future__ import annotations
 
 import gzip
-import io
 import zlib
 from typing import IO, cast
 
 import zstandard
 
 from objectstore_client.metadata import Compression
-from objectstore_client.utils import _ZstdCompressionReaderWrapper
+from objectstore_client.utils import _CompressionReader, _Compressor
 
 SUPPORTED_COMPRESSIONS: tuple[Compression, ...] = ("zstd", "gzip")
 """Compression algorithms that the client can apply and transparently decode."""
 
 _CHUNK_SIZE = 64 * 1024
-# `wbits` for `zlib` that produces and consumes the gzip container format.
-_GZIP_WBITS = 16 + zlib.MAX_WBITS
+
+
+def _gzip_compressor() -> _Compressor:
+    """Return a zlib compressor that emits the gzip format.
+
+    By default, zlib wraps deflate data in the zlib format. Adding 16 to the window
+    size (`wbits`) selects the gzip header and trailer instead, which is what
+    `Content-Encoding: gzip` requires. See `zlib.compressobj`.
+    """
+    return zlib.compressobj(wbits=16 + zlib.MAX_WBITS)
 
 
 def validate(compression: str | None, *, allow_none: bool = True) -> None:
@@ -39,10 +46,10 @@ def compressing_reader(source: IO[bytes], compression: Compression) -> IO[bytes]
     reading starts. Closing it does not close `source`.
     """
     if compression == "zstd":
-        reader = zstandard.ZstdCompressor().stream_reader(source, closefd=False)
-        return cast(IO[bytes], _ZstdCompressionReaderWrapper(reader))
+        compressor = zstandard.ZstdCompressor().compressobj()
+        return cast(IO[bytes], _CompressionReader(source, compressor))
     if compression == "gzip":
-        return cast(IO[bytes], _GzipCompressionReader(source))
+        return cast(IO[bytes], _CompressionReader(source, _gzip_compressor()))
     raise ValueError(f"Invalid compression: {compression}")
 
 
@@ -54,7 +61,7 @@ def compress_into(
         read, written = zstandard.ZstdCompressor().copy_stream(source, dest)
         return read, written
     if compression == "gzip":
-        compressor = zlib.compressobj(wbits=_GZIP_WBITS)
+        compressor = _gzip_compressor()
         read = written = 0
         while chunk := source.read(_CHUNK_SIZE):
             read += len(chunk)
@@ -78,56 +85,3 @@ def decompressing_reader(stream: IO[bytes], compression: str) -> IO[bytes]:
     raise NotImplementedError(
         f"Transparent decoding of `{compression}` is not implemented"
     )
-
-
-class _GzipCompressionReader(io.RawIOBase):
-    """A readable stream that gzip-compresses `source` as it is read.
-
-    Like :class:`_ZstdCompressionReaderWrapper`, it allows `seek(0)` as long as
-    no data has been read yet, so that urllib3 can record the body position.
-    """
-
-    def __init__(self, source: IO[bytes]) -> None:
-        super().__init__()
-        self._source = source
-        self._compressor = zlib.compressobj(wbits=_GZIP_WBITS)
-        self._buffer = bytearray()
-        self._finished = False
-        self._position = 0
-
-    def readable(self) -> bool:
-        return True
-
-    def read(self, size: int | None = -1, /) -> bytes:
-        if size is None or size < 0:
-            size = -1
-        while not self._finished and (size < 0 or len(self._buffer) < size):
-            chunk = self._source.read(_CHUNK_SIZE)
-            if chunk:
-                self._buffer += self._compressor.compress(chunk)
-            else:
-                self._buffer += self._compressor.flush()
-                self._finished = True
-
-        if size < 0:
-            size = len(self._buffer)
-        out = bytes(self._buffer[:size])
-        del self._buffer[:size]
-        self._position += len(out)
-        return out
-
-    def readall(self) -> bytes:
-        return self.read(-1)
-
-    def readinto(self, buffer: memoryview | bytearray) -> int:  # type: ignore[override]
-        data = self.read(len(buffer))
-        buffer[: len(data)] = data
-        return len(data)
-
-    def tell(self) -> int:
-        return self._position
-
-    def seek(self, offset: int, whence: int = io.SEEK_SET, /) -> int:
-        if offset == 0 and whence == io.SEEK_SET and self._position == 0:
-            return 0
-        raise OSError("Cannot seek in a compressed stream after reading has started")

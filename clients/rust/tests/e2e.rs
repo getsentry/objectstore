@@ -120,7 +120,9 @@ async fn roundtrips_gzip() {
         .token(test_token_generator())
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase").with_compression(Compression::Gzip);
+    let usecase = Usecase::new("usecase")
+        .unwrap()
+        .with_compression(Compression::Gzip);
     let session = client.session(usecase.for_organization(12345)).unwrap();
 
     let stored_id = session.put("oh hai!").send().await.unwrap().key;

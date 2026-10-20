@@ -3,17 +3,16 @@ import io
 import pytest
 import zstandard
 from objectstore_client.utils import (
-    _ZstdCompressionReaderWrapper,
+    _CompressionReader,
     decode_header_value,
     encode_header_value,
     parse_accept_encoding,
 )
 
 
-def _make_wrapper(data: bytes = b"hello world") -> _ZstdCompressionReaderWrapper:
-    cctx = zstandard.ZstdCompressor()
-    reader = cctx.stream_reader(io.BytesIO(data))
-    return _ZstdCompressionReaderWrapper(reader)
+def _make_wrapper(data: bytes = b"hello world") -> _CompressionReader:
+    compressor = zstandard.ZstdCompressor().compressobj()
+    return _CompressionReader(io.BytesIO(data), compressor)
 
 
 def test_seek_zero_before_read() -> None:
