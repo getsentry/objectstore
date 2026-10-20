@@ -1160,25 +1160,23 @@ def test_put_stores_under_literal_key(server_url: str) -> None:
     assert body == payload
 
 
-@pytest.mark.parametrize(
-    "source_kind",
-    ["bytes", "precompressed_bytes", "buffer", "stream"],
-)
+@pytest.mark.parametrize("source_kind", ["bytes", "buffer", "stream"])
+@pytest.mark.parametrize("compression", ["none", "zstd", "precompressed"])
 @pytest.mark.parametrize("threshold", [1, 2048])
 def test_automatic_resumable_upload(
-    server_url: str, source_kind: str, threshold: int
+    server_url: str, source_kind: str, compression: str, threshold: int
 ) -> None:
     session = Client(server_url, token=TestSecretKey.get()).session(
         Usecase(
             "test-usecase",
-            compression="none",
+            compression="zstd" if compression == "zstd" else "none",
             expiration_policy=TimeToLive(timedelta(days=1)),
             resumable_threshold_bytes=threshold,
         ),
         org=42,
     )
     contents = b"file contents\n" * 100
-    precompressed = source_kind == "precompressed_bytes"
+    precompressed = compression == "precompressed"
     encoded = (
         zstandard.ZstdCompressor().compress(contents) if precompressed else contents
     )
@@ -1204,7 +1202,7 @@ def test_automatic_resumable_upload(
         assert not source.closed
         stored = session.head(key)
         assert stored is not None
-        assert stored.compression == ("zstd" if precompressed else None)
+        assert stored.compression == ("zstd" if compression != "none" else None)
         assert stored.content_type == "text/plain"
         assert stored.filename == "example.txt"
         assert stored.origin == "203.0.113.42"
@@ -1212,6 +1210,10 @@ def test_automatic_resumable_upload(
         retrieved = session.get(key)
         assert retrieved is not None
         assert retrieved.payload.read() == contents
+        if precompressed:
+            raw = session.get(key, decompress=False)
+            assert raw is not None
+            assert raw.payload.read() == encoded
 
 
 @pytest.mark.parametrize(
