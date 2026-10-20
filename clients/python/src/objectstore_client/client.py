@@ -441,7 +441,6 @@ class Session:
         origin: str | None = None,
         filename: str | None = None,
         resumable_threshold_bytes: int | Literal["none"] | None = None,
-        size_hint: int | None = None,
     ) -> str:
         """
         Uploads the given `contents` to blob storage.
@@ -471,14 +470,15 @@ class Session:
           When not overridden, this threshold defaults to the one set on the Usecase.
         - The ``resumable_retries`` policy configured on the Usecase permits retries.
 
-        When ``compress`` is an instance of ``IO[bytes]``, ``objectstore_client`` will
-        attempt to determine its size on a best-effort basis, falling back to a
-        regular upload if the size cannot be determined.
-        You should provide the `size_hint` argument whenever possible, which will be
-        used to choose the upload protocol.
+        For seekable binary streams, the remaining size is measured by seeking to
+        the end and restoring the original position. Prefer streams with efficient
+        seeking: transforming streams may read their entire input to find the end.
+        Non-seekable streams and streams whose size cannot be determined use a
+        regular upload without spooling.
 
-        In general, the final payload to be transmitted is spooled in a temporary
-        file (``tempfile.TemporaryFile``) on disk before sending.
+        Resumable uploads reuse the input unless compression is needed, in which
+        case the compressed payload is spooled in a temporary file
+        (``tempfile.TemporaryFile``) on disk before sending.
         Set ``Client(spool_dir=<path>)`` if you wish to customize the directory where
         the temporary files are created in.
         """
@@ -508,13 +508,16 @@ class Session:
                 'resumable_threshold_bytes must be a non-negative integer or "none"'
             )
 
-        if size_hint is not None and (type(size_hint) is not int or size_hint < 0):
-            raise ValueError("size_hint must be a non-negative integer or None")
-        source_size = size_hint
-        if isinstance(contents, bytes):
-            source_size = len(contents)
-        elif type(contents) is BytesIO or size_hint is None:
-            source_size = _resumable.get_size(contents)
+        source_size = None
+        if (
+            resumable_threshold_bytes != "none"
+            and self._usecase._resumable_retries.retries > 0
+        ):
+            source_size = (
+                len(contents)
+                if isinstance(contents, bytes)
+                else _resumable.get_size(contents)
+            )
 
         payload_compression = precompressed or compress or self._usecase._compression
 
@@ -543,10 +546,10 @@ class Session:
                 resumable_threshold_bytes != "none"
                 and source_size is not None
                 and source_size >= resumable_threshold_bytes
-                and self._usecase._resumable_retries.retries > 0
             ):
                 with _resumable.prepare_body(
                     contents,
+                    source_size,
                     should_compress,
                     self._spool_dir,
                 ) as prepared:
@@ -615,13 +618,12 @@ class Session:
                     cctx = zstandard.ZstdCompressor()
                     body = cctx.stream_reader(counter, closefd=False)
                     body = cast(IO[bytes], utils._ZstdCompressionReaderWrapper(body))
-                    # For on-the-fly compression, don't attempt read retries,
-                    # as the stream cannot be rewound after data has been consumed.
-                    pool_retries = self._pool.retries
-                    if isinstance(pool_retries, urllib3.Retry):
-                        retries = pool_retries.new(read=0)
-                    elif isinstance(pool_retries, int):
-                        retries = urllib3.Retry(pool_retries, read=0)
+
+                if compress or not getattr(source, "seekable", lambda: False)():
+                    # Only connection retries are safe when the body cannot be replayed.
+                    retries = urllib3.Retry.from_int(self._pool.retries).new(
+                        read=0, status=0, other=0
+                    )
 
                 response = self._pool.request(
                     "POST" if not key else "PUT",

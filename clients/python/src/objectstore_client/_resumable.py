@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import random
-import shutil
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
-from io import SEEK_END, BufferedRandom, BufferedReader, BytesIO, FileIO
-from os import PathLike, fstat
-from stat import S_ISREG
+from io import SEEK_END, BytesIO
+from os import PathLike
 from tempfile import TemporaryFile
 from typing import IO, TYPE_CHECKING
 from urllib.parse import urlencode
@@ -230,23 +228,22 @@ class ResumableUpload:
 @contextmanager
 def prepare_body(
     contents: bytes | IO[bytes],
+    source_size: int,
     compress: bool,
     spool_dir: str | PathLike[str] | None,
 ) -> Iterator[tuple[IO[bytes], int, int] | None]:
     """Yield the body, source size, and compressed size (equal if uncompressed).
 
-    Reuse plain files and buffers when no compression is needed. Other streams
-    are read from their current position without seeking or closing them.
+    Reuse sized, seekable input when no compression is needed. Otherwise spool
+    the compressed bytes without closing the caller's stream.
     Yield None if temporary-file creation fails, before consuming any input.
     """
     with (
         BytesIO(contents) if isinstance(contents, bytes) else nullcontext(contents)
     ) as source:
         if not compress:
-            size = get_size(source)
-            if size is not None:
-                yield source, size, size
-                return
+            yield source, source_size, source_size
+            return
 
         try:
             temporary = TemporaryFile(dir=spool_dir)
@@ -255,45 +252,33 @@ def prepare_body(
             return
 
         with temporary as body:
-            if compress:
-                source_size, compressed_size = zstandard.ZstdCompressor().copy_stream(
-                    source, body
-                )
-            else:
-                shutil.copyfileobj(source, body)
-                source_size = compressed_size = body.tell()
+            source_size, compressed_size = zstandard.ZstdCompressor().copy_stream(
+                source, body
+            )
             body.seek(0)
             yield body, source_size, compressed_size
 
 
 def get_size(source: IO[bytes]) -> int | None:
-    """Return the remaining byte count without reading, or None if unknown.
+    """Measure remaining bytes by seeking to the end, or return None if unsupported.
 
-    Inspect exact BytesIO and BufferedReader/BufferedRandom over regular FileIO.
-    Other wrappers may transform the bytes.
+    Seeking may read data in transforming streams. Failure to restore the original
+    position propagates so callers cannot upload from an unexpected position.
     """
     try:
-        if type(source) is BytesIO:
-            # Seek to measure the buffer without getbuffer()'s possible copy.
-            start = source.tell()
-            try:
-                return max(0, source.seek(0, SEEK_END) - start)
-            finally:
-                source.seek(start)
-        if type(source) is not BufferedReader and type(source) is not BufferedRandom:
+        if not source.seekable():
             return None
-        if type(source.raw) is not FileIO:
-            return None
-
-        if type(source) is BufferedRandom:
-            source.flush()  # Include any buffered writes in the file size.
-        info = fstat(source.fileno())
-        if not S_ISREG(info.st_mode):  # Pipes and devices have no useful file size.
-            return None
-        return max(0, info.st_size - source.tell())
-    except (OSError, ValueError):
-        # Sizing is optional; a readable stream may still be uploaded directly.
+        start = source.tell()
+    except (AttributeError, OSError, ValueError):
         return None
+
+    try:
+        source.seek(0, SEEK_END)
+        return max(0, source.tell() - start)
+    except (OSError, ValueError):
+        return None
+    finally:
+        source.seek(start)
 
 
 def is_transient(error: Exception) -> bool:
