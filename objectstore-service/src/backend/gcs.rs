@@ -983,7 +983,15 @@ impl Backend for GcsBackend {
 
             let payload_response = self
                 .with_retry("get_payload", || async {
-                    let mut req = self.request(Method::GET, download_url.clone()).await?;
+                    // GCS transparently decompresses objects stored with `Content-Encoding: gzip`
+                    // unless the request accepts gzip (decompressive transcoding). We always return
+                    // payloads exactly as stored, so opt out of it. This also keeps range reads
+                    // applying to the stored bytes. See:
+                    // https://cloud.google.com/storage/docs/transcoding#decompressive_transcoding
+                    let mut req = self
+                        .request(Method::GET, download_url.clone())
+                        .await?
+                        .header(header::ACCEPT_ENCODING, "gzip");
                     if let Some(r) = range {
                         req = req.header(header::RANGE, r.to_header_value());
                     }
@@ -1972,6 +1980,15 @@ mod tests {
         assert!(requests[1].contains("alt=media&ifGenerationMatch=1"));
         assert!(!requests[2].contains("alt=media"));
         assert!(requests[3].contains("alt=media&ifGenerationMatch=2"));
+        // Payload downloads opt out of GCS decompressive transcoding.
+        for request in [&requests[1], &requests[3]] {
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("\r\naccept-encoding: gzip\r\n"),
+                "missing accept-encoding: {request}"
+            );
+        }
         server.join().unwrap();
 
         Ok(())
@@ -2831,6 +2848,101 @@ mod tests {
             payload, compressed,
             "Payload should be returned still compressed, not auto-decompressed"
         );
+
+        Ok(())
+    }
+
+    fn gzip_encode(data: &[u8]) -> Vec<u8> {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(data).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    /// GCS decompresses `Content-Encoding: gzip` objects on download unless the request accepts
+    /// gzip. The backend must return the payload exactly as stored.
+    #[tokio::test]
+    async fn test_gzip_payload_roundtrip() -> Result<()> {
+        use objectstore_types::metadata::Compression;
+
+        let backend = create_test_backend().await?;
+
+        let plaintext = b"hello, world (but compressed with gzip)";
+        let compressed = gzip_encode(plaintext);
+
+        let id = make_id();
+        let metadata = Metadata {
+            content_type: "text/plain".into(),
+            compression: Some(Compression::Gzip),
+            ..Default::default()
+        };
+
+        backend
+            .put_object(
+                &id,
+                &metadata,
+                stream::single(compressed.clone()),
+                Timestamp::now(),
+            )
+            .await?;
+
+        let (meta, _, stream) = backend
+            .get_object(&id, Timestamp::now(), None)
+            .await?
+            .unwrap();
+        let payload = stream::read_to_vec(stream).await?;
+
+        assert_eq!(meta.compression, Some(Compression::Gzip));
+        assert_eq!(
+            payload, compressed,
+            "Payload should be returned still compressed, not transcoded"
+        );
+
+        Ok(())
+    }
+
+    /// Range reads of gzip objects must apply to the stored (compressed) bytes, which requires
+    /// opting out of decompressive transcoding.
+    #[tokio::test]
+    async fn test_gzip_payload_range_read() -> Result<()> {
+        use objectstore_types::metadata::Compression;
+
+        let backend = create_test_backend().await?;
+
+        let plaintext = b"hello, world (but compressed with gzip)";
+        let compressed = gzip_encode(plaintext);
+
+        let id = make_id();
+        let metadata = Metadata {
+            content_type: "text/plain".into(),
+            compression: Some(Compression::Gzip),
+            ..Default::default()
+        };
+
+        backend
+            .put_object(
+                &id,
+                &metadata,
+                stream::single(compressed.clone()),
+                Timestamp::now(),
+            )
+            .await?;
+
+        let (meta, content_range, stream) = backend
+            .get_object(&id, Timestamp::now(), Some(ByteRange::Bounded(2, 9)))
+            .await?
+            .unwrap();
+        let payload = stream::read_to_vec(stream).await?;
+
+        assert_eq!(meta.compression, Some(Compression::Gzip));
+        assert_eq!(
+            content_range,
+            Some(ContentRange {
+                start: 2,
+                end: 9,
+                total: compressed.len() as u64,
+            })
+        );
+        assert_eq!(payload, &compressed[2..=9]);
 
         Ok(())
     }

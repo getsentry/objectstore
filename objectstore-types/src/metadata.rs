@@ -283,16 +283,14 @@ impl FromStr for ExpirationPolicy {
 
 /// The compression algorithm applied to an object's payload.
 ///
-/// Transmitted via the standard `Content-Encoding` HTTP header. Currently only
-/// Zstandard (`zstd`) is supported.
+/// Transmitted via the standard `Content-Encoding` HTTP header. Supported
+/// algorithms are Zstandard (`zstd`) and `gzip`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Compression {
     /// Compressed using `zstd`.
     Zstd,
-    // /// Compressed using `gzip`.
-    // Gzip,
-    // /// Compressed using `lz4`.
-    // Lz4,
+    /// Compressed using `gzip`.
+    Gzip,
 }
 
 impl Compression {
@@ -300,8 +298,7 @@ impl Compression {
     pub fn as_str(&self) -> &str {
         match self {
             Compression::Zstd => "zstd",
-            // Compression::Gzip => "gzip",
-            // Compression::Lz4 => "lz4",
+            Compression::Gzip => "gzip",
         }
     }
 }
@@ -318,8 +315,7 @@ impl FromStr for Compression {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "zstd" => Ok(Compression::Zstd),
-            // "gzip" => Compression::Gzip,
-            // "lz4" => Compression::Lz4,
+            "gzip" => Ok(Compression::Gzip),
             _ => Err(Error::Compression),
         }
     }
@@ -1242,15 +1238,17 @@ mod tests {
 
     #[test]
     fn compression_display_roundtrip() {
-        let displayed = Compression::Zstd.to_string();
-        assert_eq!(displayed, "zstd");
-        let parsed: Compression = displayed.parse().unwrap();
-        assert_eq!(parsed, Compression::Zstd);
+        for (compression, expected) in [(Compression::Zstd, "zstd"), (Compression::Gzip, "gzip")] {
+            let displayed = compression.to_string();
+            assert_eq!(displayed, expected);
+            let parsed: Compression = displayed.parse().unwrap();
+            assert_eq!(parsed, compression);
+        }
     }
 
     #[test]
     fn compression_parse_invalid() {
-        assert!(Compression::from_str("gzip").is_err());
+        assert!(Compression::from_str("lz4").is_err());
         assert!(Compression::from_str("").is_err());
     }
 

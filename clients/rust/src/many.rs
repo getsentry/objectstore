@@ -531,6 +531,15 @@ async fn send_batch(
     Ok(results)
 }
 
+/// Returns the worst-case size of `size` bytes after compressing them with `compression`.
+fn compress_bound(compression: Compression, size: usize) -> usize {
+    match compression {
+        Compression::Zstd => zstd_safe::compress_bound(size),
+        // zlib's conservative `deflateBound`, plus 18 bytes of gzip header and trailer.
+        Compression::Gzip => size + (size >> 12) + (size >> 14) + (size >> 25) + 7 + 18,
+    }
+}
+
 fn classify_fail(key: Option<ObjectKey>, error: Error) -> Classified {
     Classified::Failed(OperationResult::Put(
         key.unwrap_or_else(|| "<unknown>".to_owned()),
@@ -567,9 +576,9 @@ async fn classify(op: BatchOperation) -> Classified {
             // Client-side compression happens while streaming the body, so the on-wire size is
             // only known up to its worst case. Precompressed bodies are sent as-is.
             let size = match (compression, size) {
-                (Some(CompressionMode::Compress(Compression::Zstd)), Some(size)) => {
-                    usize::try_from(size).ok().map(zstd_safe::compress_bound)
-                }
+                (Some(CompressionMode::Compress(compression)), Some(size)) => usize::try_from(size)
+                    .ok()
+                    .map(|size| compress_bound(compression, size)),
                 (Some(CompressionMode::Precompressed(_)) | None, Some(size)) => {
                     usize::try_from(size).ok()
                 }
@@ -851,6 +860,43 @@ mod tests {
             classify(put_with_zstd(size)).await,
             Classified::Individual(_)
         );
+    }
+
+    #[tokio::test]
+    async fn gzip_put_uses_compress_bound() {
+        let size = 1_000_000;
+        let op = put_with_compression(size, CompressionMode::Compress(Compression::Gzip));
+        core::assert_matches!(
+            classify(op).await,
+            Classified::Batchable(_, s) if s == compress_bound(Compression::Gzip, size) as u64
+        );
+    }
+
+    #[tokio::test]
+    async fn gzip_compress_bound_holds_for_incompressible_data() {
+        use tokio::io::AsyncReadExt as _;
+
+        // A cheap xorshift generator, so the payload does not compress.
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let payload: Vec<u8> = (0..(MAX_BATCH_PART_SIZE as usize))
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect();
+
+        for size in [0, 1, 1_000, 65_536, 300_000, payload.len()] {
+            let mut encoder = async_compression::tokio::bufread::GzipEncoder::new(&payload[..size]);
+            let mut compressed = Vec::new();
+            encoder.read_to_end(&mut compressed).await.unwrap();
+            assert!(
+                compressed.len() <= compress_bound(Compression::Gzip, size),
+                "{} > bound for {size}",
+                compressed.len()
+            );
+        }
     }
 
     #[tokio::test]
