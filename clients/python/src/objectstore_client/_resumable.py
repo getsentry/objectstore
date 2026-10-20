@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+import random
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
+from io import SEEK_END, BytesIO
+from os import PathLike
+from tempfile import TemporaryFile
 from typing import IO, TYPE_CHECKING
 from urllib.parse import urlencode
 
 import urllib3
+import zstandard
 
 from objectstore_client.errors import RequestError, raise_for_status
+from objectstore_client.metadata import Compression, ExpirationPolicy
 from objectstore_client.metrics import measure_storage_operation
 from objectstore_client.tracing import storage_span
 
@@ -32,6 +41,13 @@ class UploadOffsetMismatch(RequestError):
 
 class ChunkTooSmall(ValueError):
     """A non-final chunk is shorter than the upload granularity."""
+
+
+class NoUploadProgress(Exception):
+    """A write completed without advancing the server's upload offset."""
+
+    def __init__(self) -> None:
+        super().__init__("Upload made no progress")
 
 
 @dataclass(frozen=True)
@@ -156,6 +172,12 @@ class ResumableUpload:
         headers = session._make_headers()
         headers["Upload-Offset"] = str(offset)
         headers["Content-Length"] = str(length)
+        # Disable pool retries that replay the body. The resumable upload loop
+        # probes the persisted offset before resending data; connection retries
+        # retain the pool's policy.
+        retries = urllib3.Retry.from_int(session._pool.retries).new(
+            read=0, status=0, other=0, raise_on_status=False
+        )
         with (
             storage_span(
                 "resumable.put",
@@ -174,6 +196,7 @@ class ResumableUpload:
                 f"{session._make_url(self.key)}?{query}",
                 headers=headers,
                 body=body,
+                retries=retries,
                 preload_content=True,
                 decode_content=True,
             )
@@ -207,3 +230,156 @@ class ResumableUpload:
                 else RequestError
             )
             raise_for_status(response, error_type=error_type)
+
+
+@contextmanager
+def prepare_body(
+    contents: bytes | IO[bytes],
+    source_size: int,
+    compress: bool,
+    spool_dir: str | PathLike[str] | None,
+) -> Iterator[tuple[IO[bytes], int, int] | None]:
+    """Yield the body, source size, and compressed size (equal if uncompressed).
+
+    Reuse sized, seekable input when no compression is needed. Otherwise spool
+    the compressed bytes without closing the caller's stream.
+    Yield None if temporary-file creation fails, before consuming any input.
+    """
+    with (
+        BytesIO(contents) if isinstance(contents, bytes) else nullcontext(contents)
+    ) as source:
+        if not compress:
+            yield source, source_size, source_size
+            return
+
+        try:
+            temporary = TemporaryFile(dir=spool_dir)
+        except OSError:
+            yield None
+            return
+
+        with temporary as body:
+            source_size, compressed_size = zstandard.ZstdCompressor().copy_stream(
+                source, body
+            )
+            body.seek(0)
+            yield body, source_size, compressed_size
+
+
+def get_size(source: bytes | IO[bytes]) -> int | None:
+    """Return the buffer length or remaining stream size, or None if unsupported.
+
+    Streams are measured by seeking to the end, which may read data in transforming
+    streams. Failure to restore the original position propagates so callers cannot
+    upload from an unexpected position.
+    """
+    if isinstance(source, bytes):
+        return len(source)
+
+    try:
+        if not source.seekable():
+            return None
+        start = source.tell()
+    except (AttributeError, OSError):
+        return None
+
+    try:
+        source.seek(0, SEEK_END)
+        return max(0, source.tell() - start)
+    except OSError:
+        return None
+    finally:
+        source.seek(start)
+
+
+def is_transient(error: Exception) -> bool:
+    if isinstance(error, urllib3.exceptions.MaxRetryError):
+        # Exhausted status retries carry ResponseError rather than the response.
+        return isinstance(error.reason, urllib3.exceptions.ResponseError) or (
+            isinstance(error.reason, Exception) and is_transient(error.reason)
+        )
+    if isinstance(error, RequestError):
+        return error.status in (408, 429, 502, 503, 504)
+    return isinstance(
+        error,
+        (
+            NoUploadProgress,
+            urllib3.exceptions.ReadTimeoutError,
+            urllib3.exceptions.ProtocolError,
+        ),
+    )
+
+
+def upload(
+    session: Session,
+    body: IO[bytes],
+    compressed_size: int,
+    key: str | None = None,
+    compression: Compression | None = None,
+    content_type: str | None = None,
+    metadata: dict[str, str] | None = None,
+    expiration_policy: ExpirationPolicy | None = None,
+    origin: str | None = None,
+    filename: str | None = None,
+) -> str | None:
+    start = body.tell()
+    try:
+        handle = session._create_upload(
+            compressed_size,
+            key=key,
+            compression=compression,
+            content_type=content_type,
+            metadata=metadata,
+            expiration_policy=expiration_policy,
+            origin=origin,
+            filename=filename,
+        )
+    except Exception:
+        handle = None
+    if handle is None:
+        return None
+
+    try:
+        offset = 0
+        retries = 0
+        probe = False
+        while True:
+            try:
+                if probe:
+                    result = handle.progress()
+                else:
+                    body.seek(start + offset)
+                    try:
+                        result = handle.put(offset, (body, compressed_size - offset))
+                    except UploadOffsetMismatch as error:
+                        result = UploadIncomplete(error.offset)
+                if (
+                    isinstance(result, UploadIncomplete)
+                    and result.offset == offset
+                    and not probe
+                ):
+                    raise NoUploadProgress()
+            except Exception as error:
+                if not is_transient(error) or retries >= 2:
+                    raise
+                time.sleep(2 * 2**retries + random.uniform(0, 1))
+                retries += 1
+                probe = True
+                continue
+
+            if isinstance(result, UploadComplete):
+                return handle.key
+            if not offset <= result.offset <= compressed_size:
+                raise ValueError("Invalid upload offset")
+            if result.offset > offset:
+                retries = 0
+            offset = result.offset
+            probe = False
+    except Exception as error:
+        try:
+            handle.cancel()
+        except Exception:
+            pass
+        status = error.status if isinstance(error, RequestError) else None
+        response = error.response if isinstance(error, RequestError) else None
+        raise RequestError("upload failed", status, response) from error

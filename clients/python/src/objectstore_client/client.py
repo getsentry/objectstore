@@ -3,10 +3,12 @@ from __future__ import annotations
 import math
 import warnings
 from collections.abc import Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from importlib.metadata import version
 from io import BytesIO
+from os import PathLike
 from typing import IO, Any, Literal, NamedTuple, cast
 from urllib.parse import urlparse
 
@@ -78,10 +80,12 @@ class Usecase:
         name: str,
         compression: Compression = "zstd",
         expiration_policy: ExpirationPolicy | None = None,
+        resumable_threshold_bytes: int | Literal["none"] = 256 * 1024 * 1024,
     ):
         """Create a usecase.
 
-        Raises ``ValueError`` if the name violates the naming rules on ``Usecase``.
+        Raises ``ValueError`` if the name violates the naming rules on ``Usecase``,
+        or if the ``resumable_threshold_bytes`` is invalid.
         """
         if not 3 <= len(name) <= 64:
             raise ValueError("usecase name must be 3–64 ASCII characters long")
@@ -90,6 +94,14 @@ class Usecase:
                 "usecase name must contain only ASCII letters, digits, '_' or '-'"
             )
         self._name = name
+        
+        if resumable_threshold_bytes != "none" and (
+            type(resumable_threshold_bytes) is not int or resumable_threshold_bytes < 0
+        ):
+            raise ValueError(
+                'resumable_threshold_bytes must be a non-negative integer or "none"'
+            )
+        self._resumable_threshold_bytes = resumable_threshold_bytes
         self._compression = compression
         self._expiration_policy = expiration_policy
 
@@ -165,6 +177,8 @@ class Client:
             as-is for every request. Use a ``SecretKey`` for internal
             services that have access to the signing key, and a string for
             external services that receive a token from another source.
+        spool_dir: Directory that temporary files are created in when preparing
+            resumable uploads. ``None`` uses Python's default temporary directory.
     """
 
     def __init__(
@@ -176,6 +190,7 @@ class Client:
         timeout_ms: float | None = None,
         connection_kwargs: Mapping[str, Any] | None = None,
         token: TokenProvider | None = None,
+        spool_dir: str | PathLike[str] | None = None,
     ):
         if propagate_traces:
             warnings.warn(
@@ -214,6 +229,7 @@ class Client:
         self._metrics_backend = metrics_backend or NoOpMetricsBackend()
         self._propagate_traces = propagate_traces
         self._token = token
+        self._spool_dir = spool_dir
 
     def session(self, usecase: Usecase, **scopes: str | int | bool) -> Session:
         """
@@ -249,6 +265,7 @@ class Client:
             usecase,
             Scope(**scopes),
             self._token,
+            self._spool_dir,
         )
 
 
@@ -268,6 +285,7 @@ class Session:
         usecase: Usecase,
         scope: Scope,
         token: TokenProvider | None = None,
+        spool_dir: str | PathLike[str] | None = None,
     ):
         self._pool = pool
         self._base_path = base_path
@@ -276,6 +294,7 @@ class Session:
         self._usecase = usecase
         self._scope = scope
         self._token = token
+        self._spool_dir = spool_dir
 
     def mint_token(
         self,
@@ -412,6 +431,7 @@ class Session:
         expiration_policy: ExpirationPolicy | None = None,
         origin: str | None = None,
         filename: str | None = None,
+        resumable_threshold_bytes: int | Literal["none"] | None = None,
     ) -> str:
         """
         Uploads the given `contents` to blob storage.
@@ -419,7 +439,7 @@ class Session:
         If no `key` is provided, one will be automatically generated and returned
         from this function.
 
-        The client will select the configured `default_compression` if none is given
+        The client will select the Usecase's configured compression if none is given
         explicitly. This can be overridden by explicitly giving a `compress` argument.
         Providing `"none"` as the argument will instruct the client to not apply
         any compression to this upload, which is useful for uncompressible formats.
@@ -432,6 +452,28 @@ class Session:
         to attempt to guess a `content_type` based on magic bytes.
 
         `compression` is deprecated in favor of `compress`.
+
+        .. rubric:: Resumable Uploads
+
+        This method uses Objectstore's Resumable Uploads API when the size of
+        ``contents`` is at least ``resumable_threshold_bytes``.
+        Pass ``resumable_threshold_bytes="none"`` to disable Resumable Uploads.
+        When not overridden, this threshold defaults to the one set on the Usecase.
+
+        Transient failures and writes that make no progress are retried up to
+        twice. The retry count resets whenever the server reports a higher offset.
+
+        For seekable binary streams, the remaining size is measured by seeking to
+        the end and restoring the original position. Prefer streams with efficient
+        seeking: transforming streams may read their entire input to find the end.
+        Non-seekable streams and streams whose size cannot be determined use a
+        regular upload without spooling.
+
+        Resumable uploads reuse the input unless compression is needed, in which
+        case the compressed payload is spooled in a temporary file
+        (``tempfile.TemporaryFile``) on disk before sending.
+        Set ``Client(spool_dir=<path>)`` if you wish to customize the directory where
+        the temporary files are created in.
         """
         if compression is not None:
             warnings.warn(
@@ -450,16 +492,22 @@ class Session:
         if precompressed and precompressed != "zstd":
             raise ValueError(f"Invalid compression: {precompressed}")
 
-        body = BytesIO(contents) if isinstance(contents, bytes) else contents
-        original_body: IO[bytes] = body
+        if resumable_threshold_bytes is None:
+            resumable_threshold_bytes = self._usecase._resumable_threshold_bytes
+        if resumable_threshold_bytes != "none" and (
+            type(resumable_threshold_bytes) is not int or resumable_threshold_bytes < 0
+        ):
+            raise ValueError(
+                'resumable_threshold_bytes must be a non-negative integer or "none"'
+            )
+
+        source_size = None
+        if resumable_threshold_bytes != "none":
+            source_size = _resumable.get_size(contents)
 
         encoding = precompressed or compress or self._usecase._compression
 
         compress_with = encoding if precompressed is None else "none"
-        if compress_with == "zstd":
-            cctx = zstandard.ZstdCompressor()
-            body = cctx.stream_reader(original_body)
-            body = cast(IO[bytes], utils._ZstdCompressionReaderWrapper(body))
 
         headers = self._metadata_headers(
             compression=encoding,
@@ -479,37 +527,56 @@ class Session:
                 self._metrics_backend, "put", self._usecase.name
             ) as metrics,
         ):
-            retries = None  # by default use the pool's value, set by the Client
-            if compress_with != "none":
-                # For on-the-fly compression, don't attempt read retries,
-                # as the stream cannot be rewound after data has been consumed.
-                pool_retries = self._pool.retries
-                if isinstance(pool_retries, urllib3.Retry):
-                    retries = pool_retries.new(read=0)
-                elif isinstance(pool_retries, int):
-                    retries = urllib3.Retry(pool_retries, read=0)
+            result_key: str | None
+            if (
+                resumable_threshold_bytes != "none"
+                and source_size is not None
+                and source_size >= resumable_threshold_bytes
+            ):
+                with _resumable.prepare_body(
+                    contents,
+                    source_size,
+                    compress_with != "none",
+                    self._spool_dir,
+                ) as prepared:
+                    if prepared is None:
+                        # Temporary-file creation failed before consuming the input.
+                        result_key, source_size, compressed_size = self._put_direct(
+                            contents, key, headers, compress=compress_with != "none"
+                        )
+                    else:
+                        body, source_size, compressed_size = prepared
+                        result_key = _resumable.upload(
+                            self,
+                            body,
+                            compressed_size,
+                            key=key,
+                            compression=encoding,
+                            content_type=content_type,
+                            metadata=metadata,
+                            expiration_policy=expiration_policy,
+                            origin=origin,
+                            filename=filename,
+                        )
+                        if result_key is None:
+                            # Session creation failed or resumables are unsupported.
+                            # Send the prepared body without compressing it again.
+                            headers["Content-Length"] = str(compressed_size)
+                            result_key, _, _ = self._put_direct(
+                                body, key, headers, compress=False
+                            )
+            else:
+                result_key, source_size, compressed_size = self._put_direct(
+                    contents, key, headers, compress=compress_with != "none"
+                )
 
-            response = self._pool.request(
-                "POST" if not key else "PUT",
-                self._make_url(key),
-                body=body,
-                headers=headers,
-                preload_content=True,
-                decode_content=True,
-                retries=retries,
-            )
-            raise_for_status(response)
-            res = response.json()
-
-            # Must do this after streaming `body` as that's what is responsible
-            # for advancing the seek position in both streams
-            if precompressed is None:
-                metrics.record_uncompressed_size(original_body.tell())
-            if encoding != "none":
-                metrics.record_compressed_size(body.tell(), encoding)
+            if precompressed is None and source_size is not None:
+                metrics.record_uncompressed_size(source_size)
+            if encoding != "none" and compressed_size is not None:
+                metrics.record_compressed_size(compressed_size, encoding)
 
             # Set after the response, since the key may be server-generated.
-            span.set_attribute("objectstore.key", res["key"])
+            span.set_attribute("objectstore.key", result_key)
             span.set_attribute("objectstore.compression", encoding)
             if metrics.uncompressed_size is not None:
                 span.set_attribute(
@@ -519,7 +586,62 @@ class Session:
                 span.set_attribute(
                     "objectstore.compressed_size", metrics.compressed_size
                 )
-            return res["key"]
+            return result_key
+
+    def _put_direct(
+        self,
+        contents: bytes | IO[bytes],
+        key: str | None,
+        headers: dict[str, str],
+        compress: bool,
+    ) -> tuple[str, int | None, int | None]:
+        """Return the key and final source/body positions when available."""
+        with (
+            BytesIO(contents) if isinstance(contents, bytes) else nullcontext(contents)
+        ) as original_body:
+            body = original_body
+            retries = None  # by default use the pool's value, set by the Client
+            try:
+                if compress:
+                    cctx = zstandard.ZstdCompressor()
+                    body = cctx.stream_reader(original_body, closefd=False)
+                    body = cast(IO[bytes], utils._ZstdCompressionReaderWrapper(body))
+
+                if compress:
+                    # For on-the-fly compression, don't attempt read retries,
+                    # as the stream cannot be rewound after data has been consumed.
+                    pool_retries = self._pool.retries
+                    if isinstance(pool_retries, urllib3.Retry):
+                        retries = pool_retries.new(read=0)
+                    elif isinstance(pool_retries, int):
+                        retries = urllib3.Retry(pool_retries, read=0)
+
+                response = self._pool.request(
+                    "POST" if not key else "PUT",
+                    self._make_url(key),
+                    body=body,
+                    headers=headers,
+                    preload_content=True,
+                    decode_content=True,
+                    retries=retries,
+                )
+                raise_for_status(response)
+                res = response.json()
+
+                # Read positions after streaming, without failing an upload if
+                # the source does not support tell().
+                try:
+                    source_size = original_body.tell()
+                except (AttributeError, OSError, ValueError):
+                    source_size = None
+                try:
+                    compressed_size = body.tell()
+                except (AttributeError, OSError, ValueError):
+                    compressed_size = None
+                return res["key"], source_size, compressed_size
+            finally:
+                if body is not original_body:
+                    body.close()
 
     def get(
         self,

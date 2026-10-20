@@ -102,6 +102,12 @@ session.put(video_data, compress="none")
 session.put(zstd_data, precompressed="zstd")
 ```
 
+### Resumable Uploads
+
+The client automatically uses resumable uploads when eligible and may create
+temporary files for spooling. See [`Session.put()`](src/objectstore_client/client.py)
+for eligibility, configuration, and upload behavior.
+
 ### Custom Metadata
 
 Arbitrary key-value pairs can be attached to objects and retrieved on download.

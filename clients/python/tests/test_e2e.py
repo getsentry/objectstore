@@ -12,6 +12,7 @@ from collections.abc import Generator
 from datetime import timedelta
 from io import BytesIO
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 import pytest
 import urllib3
@@ -24,6 +25,7 @@ from objectstore_client import (
     Usecase,
 )
 from objectstore_client._resumable import (
+    ResumableUpload,
     ResumableUploadUnavailable,
     UploadComplete,
     UploadIncomplete,
@@ -46,6 +48,9 @@ TEST_EDDSA_PUBKEY_PATH: str = (
 
 class UnrewindableStream(BytesIO):
     """Read-only stream that cannot report or restore position."""
+
+    def seekable(self) -> bool:
+        return False
 
     def seek(self, offset: int, whence: int = 0) -> int:
         raise OSError("stream is not seekable")
@@ -1153,3 +1158,94 @@ def test_put_stores_under_literal_key(server_url: str) -> None:
     status, body = _fetch(url)
     assert status == 200
     assert body == payload
+
+
+@pytest.mark.parametrize("source_kind", ["bytes", "buffer", "stream"])
+@pytest.mark.parametrize("compression", ["none", "zstd", "precompressed"])
+@pytest.mark.parametrize("threshold", [1, 2048])
+def test_automatic_resumable_upload(
+    server_url: str, source_kind: str, compression: str, threshold: int
+) -> None:
+    session = Client(server_url, token=TestSecretKey.get()).session(
+        Usecase(
+            "test-usecase",
+            compression="zstd" if compression == "zstd" else "none",
+            expiration_policy=TimeToLive(timedelta(days=1)),
+            resumable_threshold_bytes=threshold,
+        ),
+        org=42,
+    )
+    contents = b"file contents\n" * 100
+    precompressed = compression == "precompressed"
+    encoded = (
+        zstandard.ZstdCompressor().compress(contents) if precompressed else contents
+    )
+    with (
+        BytesIO()
+        if source_kind == "buffer"
+        else tempfile.NamedTemporaryFile() as source,
+        patch.object(
+            ResumableUpload, "put", autospec=True, side_effect=ResumableUpload.put
+        ) as put,
+    ):
+        source.write(b"skip this prefix" + encoded)
+        source.seek(len(b"skip this prefix"))
+        key = session.put(
+            source if source_kind in ("buffer", "stream") else encoded,
+            precompressed="zstd" if precompressed else None,
+            content_type="text/plain",
+            metadata={"source": "file"},
+            origin="203.0.113.42",
+            filename="example.txt",
+        )
+        assert put.call_count == int(threshold == 1)
+        assert not source.closed
+        stored = session.head(key)
+        assert stored is not None
+        assert stored.compression == ("zstd" if compression != "none" else None)
+        assert stored.content_type == "text/plain"
+        assert stored.filename == "example.txt"
+        assert stored.origin == "203.0.113.42"
+        assert stored.custom == {"source": "file"}
+        retrieved = session.get(key)
+        assert retrieved is not None
+        assert retrieved.payload.read() == contents
+        if precompressed:
+            raw = session.get(key, decompress=False)
+            assert raw is not None
+            assert raw.payload.read() == encoded
+
+
+@pytest.mark.parametrize(
+    "error", [None, RequestError("creation rejected", 403, "forbidden")]
+)
+def test_resumable_creation_fallback(
+    server_url: str, monkeypatch: pytest.MonkeyPatch, error: RequestError | None
+) -> None:
+    session = Client(server_url, token=TestSecretKey.get()).session(
+        Usecase("test-usecase", resumable_threshold_bytes=1)
+    )
+    create = Mock(return_value=None, side_effect=error)
+    monkeypatch.setattr(session, "_create_upload", create)
+    source = BytesIO(b"prefixpayload")
+    source.seek(len(b"prefix"))
+    key = session.put(source, compress="none")
+    create.assert_called_once()
+    assert not source.closed
+    retrieved = session.get(key)
+    assert retrieved is not None
+    assert retrieved.payload.read() == b"payload"
+
+
+@pytest.mark.parametrize("compress", [False, True])
+def test_nonseekable_upload(server_url: str, compress: bool) -> None:
+    session = Client(server_url, token=TestSecretKey.get()).session(
+        Usecase("test-usecase", resumable_threshold_bytes=1)
+    )
+    with UnrewindableStream(b"payload") as source:
+        key = session.put(source, compress="zstd" if compress else "none")
+        assert not source.closed
+
+    retrieved = session.get(key)
+    assert retrieved is not None
+    assert retrieved.payload.read() == b"payload"
