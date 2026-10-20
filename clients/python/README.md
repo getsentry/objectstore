@@ -92,14 +92,18 @@ session.put(b"payload", origin="203.0.113.42")
 ### Compression
 
 Uploads are compressed with Zstd by default, and downloads are transparently decompressed.
-Compression can be overridden per-upload:
+The supported algorithms are `"zstd"` and `"gzip"`. Compression can be set per-usecase
+or overridden per-upload:
 
 ```python
+# compress all uploads of this usecase with gzip:
+usecase = Usecase("my-usecase", compression="gzip")
+
 # upload as-is and record no encoding:
 session.put(video_data, compress="none")
 
 # upload as-is, but record the encoding so that downloads still decompress:
-session.put(zstd_data, precompressed="zstd")
+session.put(gzip_data, precompressed="gzip")
 ```
 
 ### Resumable Uploads

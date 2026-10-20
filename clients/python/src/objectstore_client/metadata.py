@@ -9,7 +9,7 @@ from typing import Literal, TypeVar, cast
 
 from objectstore_client.utils import decode_header_value
 
-Compression = Literal["zstd"] | Literal["none"]
+Compression = Literal["zstd", "gzip"] | Literal["none"]
 
 HEADER_EXPIRATION = "x-sn-expiration"
 HEADER_TIME_CREATED = "x-sn-time-created"

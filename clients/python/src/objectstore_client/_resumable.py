@@ -12,8 +12,8 @@ from typing import IO, TYPE_CHECKING
 from urllib.parse import urlencode
 
 import urllib3
-import zstandard
 
+from objectstore_client import _compression
 from objectstore_client.errors import RequestError, raise_for_status
 from objectstore_client.metadata import Compression, ExpirationPolicy
 from objectstore_client.metrics import measure_storage_operation
@@ -236,7 +236,7 @@ class ResumableUpload:
 def prepare_body(
     contents: bytes | IO[bytes],
     source_size: int,
-    compress: bool,
+    compression: Compression | None,
     spool_dir: str | PathLike[str] | None,
 ) -> Iterator[tuple[IO[bytes], int, int] | None]:
     """Yield the body, source size, and compressed size (equal if uncompressed).
@@ -248,7 +248,7 @@ def prepare_body(
     with (
         BytesIO(contents) if isinstance(contents, bytes) else nullcontext(contents)
     ) as source:
-        if not compress:
+        if compression is None or compression == "none":
             yield source, source_size, source_size
             return
 
@@ -259,8 +259,8 @@ def prepare_body(
             return
 
         with temporary as body:
-            source_size, compressed_size = zstandard.ZstdCompressor().copy_stream(
-                source, body
+            source_size, compressed_size = _compression.compress_into(
+                source, body, compression
             )
             body.seek(0)
             yield body, source_size, compressed_size

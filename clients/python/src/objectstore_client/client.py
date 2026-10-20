@@ -12,10 +12,9 @@ from typing import IO, Any, Literal, NamedTuple, cast
 from urllib.parse import urlparse
 
 import urllib3
-import zstandard
 from urllib3.connectionpool import HTTPConnectionPool
 
-from objectstore_client import _resumable, presign, utils
+from objectstore_client import _compression, _resumable, presign, utils
 from objectstore_client.auth import Permission, SecretKey, TokenProvider
 from objectstore_client.errors import (
     ExpiryExtensionRejected,
@@ -91,7 +90,7 @@ class Usecase:
         """Create a usecase.
 
         Raises ``ValueError`` if the name violates the naming rules on ``Usecase``,
-        or if the ``resumable_threshold_bytes`` is invalid.
+        or if the ``compression`` or ``resumable_threshold_bytes`` is invalid.
         """
         if not 3 <= len(name) <= 64:
             raise ValueError("usecase name must be 3–64 ASCII characters long")
@@ -108,6 +107,7 @@ class Usecase:
                 'resumable_threshold_bytes must be a non-negative integer or "none"'
             )
         self._resumable_threshold_bytes = resumable_threshold_bytes
+        _compression.validate(compression)
         self._compression = compression
         self._expiration_policy = expiration_policy
 
@@ -437,10 +437,8 @@ class Session:
         """
         if compress is not None and precompressed is not None:
             raise ValueError("Cannot pass both `compress` and `precompressed`")
-        if compress and compress not in ("none", "zstd"):
-            raise ValueError(f"Invalid compression: {compress}")
-        if precompressed and precompressed != "zstd":
-            raise ValueError(f"Invalid compression: {precompressed}")
+        _compression.validate(compress)
+        _compression.validate(precompressed, allow_none=False)
 
         if resumable_threshold_bytes is None:
             resumable_threshold_bytes = self._usecase._resumable_threshold_bytes
@@ -486,13 +484,13 @@ class Session:
                 with _resumable.prepare_body(
                     contents,
                     source_size,
-                    compress_with != "none",
+                    compress_with,
                     self._spool_dir,
                 ) as prepared:
                     if prepared is None:
                         # Temporary-file creation failed before consuming the input.
                         result_key, source_size, compressed_size = self._put_direct(
-                            contents, key, headers, compress=compress_with != "none"
+                            contents, key, headers, compression=compress_with
                         )
                     else:
                         body, source_size, compressed_size = prepared
@@ -513,11 +511,11 @@ class Session:
                             # Send the prepared body without compressing it again.
                             headers["Content-Length"] = str(compressed_size)
                             result_key, _, _ = self._put_direct(
-                                body, key, headers, compress=False
+                                body, key, headers, compression="none"
                             )
             else:
                 result_key, source_size, compressed_size = self._put_direct(
-                    contents, key, headers, compress=compress_with != "none"
+                    contents, key, headers, compression=compress_with
                 )
 
             if precompressed is None and source_size is not None:
@@ -543,7 +541,7 @@ class Session:
         contents: bytes | IO[bytes],
         key: str | None,
         headers: dict[str, str],
-        compress: bool,
+        compression: Compression,
     ) -> tuple[str, int | None, int | None]:
         """Return the key and final source/body positions when available."""
         with (
@@ -552,12 +550,8 @@ class Session:
             body = original_body
             retries = None  # by default use the pool's value, set by the Client
             try:
-                if compress:
-                    cctx = zstandard.ZstdCompressor()
-                    body = cctx.stream_reader(original_body, closefd=False)
-                    body = cast(IO[bytes], utils._ZstdCompressionReaderWrapper(body))
-
-                if compress:
+                if compression != "none":
+                    body = _compression.compressing_reader(original_body, compression)
                     # For on-the-fly compression, don't attempt read retries,
                     # as the stream cannot be rewound after data has been consumed.
                     pool_retries = self._pool.retries
@@ -645,15 +639,8 @@ class Session:
             )
             decompressed = False
             if metadata.compression and decompress and not encoding_accepted:
-                if metadata.compression != "zstd":
-                    raise NotImplementedError(
-                        "Transparent decoding of anything but `zstd` is not "
-                        "implemented yet"
-                    )
-
+                stream = _compression.decompressing_reader(stream, metadata.compression)
                 metadata.compression = None
-                dctx = zstandard.ZstdDecompressor()
-                stream = dctx.stream_reader(stream, read_across_frames=True)
                 decompressed = True
 
             span.set_attribute("objectstore.decompressed", decompressed)
@@ -933,8 +920,7 @@ class Session:
         """
         if object_length < 0:
             raise ValueError("Object length must not be negative")
-        if compression is not None and compression not in ("none", "zstd"):
-            raise ValueError(f"Invalid compression: {compression}")
+        _compression.validate(compression)
 
         headers = self._metadata_headers(
             compression=compression,
