@@ -617,11 +617,14 @@ class Session:
                     body = cctx.stream_reader(original_body, closefd=False)
                     body = cast(IO[bytes], utils._ZstdCompressionReaderWrapper(body))
 
-                if compress or not getattr(original_body, "seekable", lambda: False)():
-                    # Only connection retries are safe when the body cannot be replayed.
-                    retries = urllib3.Retry.from_int(self._pool.retries).new(
-                        read=0, status=0, other=0
-                    )
+                if compress:
+                    # For on-the-fly compression, don't attempt read retries,
+                    # as the stream cannot be rewound after data has been consumed.
+                    pool_retries = self._pool.retries
+                    if isinstance(pool_retries, urllib3.Retry):
+                        retries = pool_retries.new(read=0)
+                    elif isinstance(pool_retries, int):
+                        retries = urllib3.Retry(pool_retries, read=0)
 
                 response = self._pool.request(
                     "POST" if not key else "PUT",

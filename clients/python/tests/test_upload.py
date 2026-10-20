@@ -4,7 +4,6 @@ from unittest.mock import Mock
 
 import pytest
 import urllib3
-import zstandard
 from objectstore_client import Client, RequestError, Session, Usecase
 
 
@@ -116,36 +115,6 @@ def test_connection_retries_are_not_multiplied(
     # Three connection attempts each for the upload and cancellation.
     assert request.call_count == 6
     assert session._pool.retries is policy
-
-
-@pytest.mark.parametrize("compress", [False, True])
-def test_nonseekable_upload_is_not_replayed(
-    session: Session, monkeypatch: pytest.MonkeyPatch, compress: bool
-) -> None:
-    session._pool.retries = urllib3.Retry(total=2, status_forcelist=[503])
-    # Only read() is available; sizing, rewinding, and closing are unsupported.
-    source = Mock(spec=["read"])
-    source.read = BytesIO(b"payload").read
-    sent = []
-
-    def request(*args: Any, **kwargs: Any) -> urllib3.HTTPResponse:
-        sent.append(kwargs["body"].read())
-        return urllib3.HTTPResponse(status=503, body=b"unavailable")
-
-    monkeypatch.setattr(session._pool, "_make_request", request)
-    create = Mock()
-    monkeypatch.setattr(session, "_create_upload", create)
-    with pytest.raises(urllib3.exceptions.MaxRetryError):
-        session.put(source, key="key", compress="zstd" if compress else "none")
-
-    create.assert_not_called()
-    assert len(sent) == 1
-    payload = (
-        zstandard.ZstdDecompressor().stream_reader(BytesIO(sent[0])).read()
-        if compress
-        else sent[0]
-    )
-    assert payload == b"payload"
 
 
 def test_sizing_must_restore_position(

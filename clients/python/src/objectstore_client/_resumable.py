@@ -273,13 +273,13 @@ def get_size(source: bytes | IO[bytes]) -> int | None:
         if not source.seekable():
             return None
         start = source.tell()
-    except (AttributeError, OSError, ValueError):
+    except (AttributeError, OSError):
         return None
 
     try:
         source.seek(0, SEEK_END)
         return max(0, source.tell() - start)
-    except (OSError, ValueError):
+    except OSError:
         return None
     finally:
         source.seek(start)
