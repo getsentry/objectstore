@@ -43,6 +43,13 @@ class ChunkTooSmall(ValueError):
     """A non-final chunk is shorter than the upload granularity."""
 
 
+class NoUploadProgress(Exception):
+    """A write completed without advancing the server's upload offset."""
+
+    def __init__(self) -> None:
+        super().__init__("Upload made no progress")
+
+
 @dataclass(frozen=True)
 class UploadIncomplete:
     """The upload expects more bytes, starting at the given offset."""
@@ -296,6 +303,7 @@ def is_transient(error: Exception) -> bool:
     return isinstance(
         error,
         (
+            NoUploadProgress,
             urllib3.exceptions.ReadTimeoutError,
             urllib3.exceptions.ProtocolError,
         ),
@@ -350,7 +358,7 @@ def upload(
                     and result.offset == offset
                     and not probe
                 ):
-                    raise urllib3.exceptions.ProtocolError("Upload made no progress")
+                    raise NoUploadProgress()
             except Exception as error:
                 if not is_transient(error) or retries >= 2:
                     raise

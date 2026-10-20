@@ -5,6 +5,7 @@ from unittest.mock import Mock
 import pytest
 import urllib3
 from objectstore_client import Client, RequestError, Session, Usecase
+from objectstore_client._resumable import NoUploadProgress
 
 
 @pytest.fixture
@@ -100,7 +101,7 @@ def test_retry_exhaustion(
         assert raised.value.__cause__.reason is failure
         assert raised.value.response is None
     else:
-        assert isinstance(raised.value.__cause__, urllib3.exceptions.ProtocolError)
+        assert isinstance(raised.value.__cause__, NoUploadProgress)
         assert str(raised.value.__cause__) == "Upload made no progress"
     # Creation, two progress queries, three writes, and cancellation.
     assert make_request.call_count == 1 + 2 + 3 + 1

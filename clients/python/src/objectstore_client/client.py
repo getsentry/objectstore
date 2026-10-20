@@ -65,9 +65,6 @@ class Usecase:
     Usecases need to be statically defined in Objectstore's configuration server-side.
     Objectstore can make decisions based on the Usecase. For example, choosing the most
     suitable storage backend.
-
-    ``resumable_threshold_bytes`` defaults to 256 MiB of remaining source bytes,
-    before any compression. ``"none"`` disables resumable uploads.
     """
 
     name: str
