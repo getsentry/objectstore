@@ -1,4 +1,4 @@
-use crate::change_stream::{ChangeStream, ChangeStreamError};
+use crate::change_stream::{ChangeStream, ChangeStreamError, ExpiryIndex};
 use crate::id::ObjectId;
 use async_trait::async_trait;
 use objectstore_types::time::Timestamp;
@@ -119,6 +119,36 @@ impl ChangeStream for SqliteGarbageCollectorStream {
     async fn join(&self, timeout: std::time::Duration) {
         self.task_tracker.close();
         let _ = tokio::time::timeout(timeout, self.task_tracker.wait()).await;
+    }
+}
+
+#[async_trait]
+impl ExpiryIndex for SqliteGarbageCollectorStream {
+    async fn list_expired(
+        &self,
+        now: Timestamp,
+        limit: u64,
+    ) -> Result<Vec<ObjectId>, Box<dyn std::error::Error + Send + Sync>> {
+        let pool = self.pool.clone();
+        let query_result: Result<Vec<String>, sqlx::Error> = sqlx::query_scalar::<_, String>(
+            "SELECT object_id FROM garbage_collector WHERE expires_at IS NOT NULL AND expires_at <= ? ORDER BY expires_at LIMIT ?",
+        )
+        .bind(i64::try_from(now.as_secs()).ok())
+        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+        .fetch_all(&pool)
+        .await;
+
+        match query_result {
+            Ok(rows) => {
+                let mut ids = Vec::new();
+                for row in rows {
+                    let id = row.clone();
+                    ids.push(ObjectId::from_storage_path(&id).unwrap());
+                }
+                Ok(ids)
+            }
+            Err(error) => Err(Box::new(error)),
+        }
     }
 }
 
@@ -506,5 +536,151 @@ mod tests {
         assert_eq!(row_count(&stream).await, 2);
         assert_eq!(stored_expiry(&stream, &first).await, Some(None));
         assert_eq!(stored_expiry(&stream, &second).await, Some(None));
+    }
+
+    #[tokio::test]
+    async fn list_expired_returns_only_past_deadlines() {
+        let (_tempdir, stream) = create_test_stream().await;
+        let past = create_test_id("past");
+        let future = create_test_id("future");
+        let no_expiry = create_test_id("no-expiry");
+
+        stream
+            .begin_write(&past, Some(Timestamp::from_unix_secs(1_000).unwrap()))
+            .await
+            .unwrap();
+        stream
+            .begin_write(&future, Some(Timestamp::from_unix_secs(9_000).unwrap()))
+            .await
+            .unwrap();
+        stream.begin_write(&no_expiry, None).await.unwrap();
+
+        // Only the past deadline is listed: the future deadline and the NULL expiry
+        // are both excluded, and the returned id round-trips through the storage path.
+        assert_eq!(
+            stream
+                .list_expired(Timestamp::from_unix_secs(5_000).unwrap(), 10)
+                .await
+                .unwrap(),
+            vec![past.clone()]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_expired_includes_deadline_equal_to_now() {
+        let (_tempdir, stream) = create_test_stream().await;
+        let due = create_test_id("due");
+        let later = create_test_id("later");
+
+        stream
+            .begin_write(&due, Some(Timestamp::from_unix_secs(2_000).unwrap()))
+            .await
+            .unwrap();
+        stream
+            .begin_write(&later, Some(Timestamp::from_unix_secs(2_001).unwrap()))
+            .await
+            .unwrap();
+
+        // The contract is inclusive: a deadline exactly equal to `now` is listed.
+        assert_eq!(
+            stream
+                .list_expired(Timestamp::from_unix_secs(2_000).unwrap(), 10)
+                .await
+                .unwrap(),
+            vec![due.clone()]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_expired_orders_by_oldest_deadline_and_respects_limit() {
+        let (_tempdir, stream) = create_test_stream().await;
+        let newest = create_test_id("newest");
+        let oldest = create_test_id("oldest");
+        let middle = create_test_id("middle");
+
+        // Seeded scrambled relative to deadline order on purpose.
+        stream
+            .begin_write(&newest, Some(Timestamp::from_unix_secs(3_000).unwrap()))
+            .await
+            .unwrap();
+        stream
+            .begin_write(&oldest, Some(Timestamp::from_unix_secs(1_000).unwrap()))
+            .await
+            .unwrap();
+        stream
+            .begin_write(&middle, Some(Timestamp::from_unix_secs(2_000).unwrap()))
+            .await
+            .unwrap();
+
+        // Oldest deadline first, capped at `limit`...
+        assert_eq!(
+            stream
+                .list_expired(Timestamp::from_unix_secs(5_000).unwrap(), 2)
+                .await
+                .unwrap(),
+            vec![oldest.clone(), middle.clone()]
+        );
+        // ...and the full set once the limit allows it.
+        assert_eq!(
+            stream
+                .list_expired(Timestamp::from_unix_secs(5_000).unwrap(), 10)
+                .await
+                .unwrap(),
+            vec![oldest.clone(), middle.clone(), newest.clone()]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_expired_tracks_begin_update() {
+        let (_tempdir, stream) = create_test_stream().await;
+        let moved = create_test_id("moved");
+
+        stream
+            .begin_write(&moved, Some(Timestamp::from_unix_secs(1_000).unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(
+            stream
+                .list_expired(Timestamp::from_unix_secs(5_000).unwrap(), 10)
+                .await
+                .unwrap(),
+            vec![moved.clone()]
+        );
+
+        // Extending the deadline past `now` drops the row out of the listing.
+        stream
+            .begin_update(&moved, Some(Timestamp::from_unix_secs(9_000).unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(
+            stream
+                .list_expired(Timestamp::from_unix_secs(5_000).unwrap(), 10)
+                .await
+                .unwrap(),
+            Vec::<ObjectId>::new()
+        );
+
+        // Shortening it back below `now` makes the row listed again.
+        stream
+            .begin_update(&moved, Some(Timestamp::from_unix_secs(2_000).unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(
+            stream
+                .list_expired(Timestamp::from_unix_secs(5_000).unwrap(), 10)
+                .await
+                .unwrap(),
+            vec![moved.clone()]
+        );
+
+        // Clearing the expiry leaves a NULL row, which is never listed.
+        stream.begin_update(&moved, None).await.unwrap();
+        assert_eq!(
+            stream
+                .list_expired(Timestamp::from_unix_secs(5_000).unwrap(), 10)
+                .await
+                .unwrap(),
+            Vec::<ObjectId>::new()
+        );
     }
 }
