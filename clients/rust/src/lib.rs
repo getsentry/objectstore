@@ -20,6 +20,7 @@ mod resumable;
 pub mod utils;
 
 pub use objectstore_types::metadata::{Compression, ExpirationPolicy};
+pub use objectstore_types::usecase::InvalidUsecaseName;
 
 pub use auth::*;
 pub use client::*;

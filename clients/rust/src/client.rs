@@ -6,6 +6,7 @@ use bytes::Bytes;
 use futures_util::stream::BoxStream;
 use objectstore_types::metadata::{Compression, ExpirationPolicy};
 use objectstore_types::scope;
+use objectstore_types::usecase::{self, InvalidUsecaseName};
 use reqwest::RequestBuilder;
 use url::Url;
 
@@ -151,6 +152,10 @@ impl ClientBuilder {
 /// Usecases need to be statically defined in Objectstore's configuration server-side.
 /// Objectstore can make decisions based on the Usecase. For example, choosing the most
 /// suitable storage backend.
+///
+/// Names must be 3–64 ASCII characters from `[A-Za-z0-9_-]`. Any permitted
+/// character may appear in any position. Names are case-sensitive and are never
+/// normalized.
 #[derive(Debug, Clone)]
 pub struct Usecase {
     name: Arc<str>,
@@ -159,13 +164,32 @@ pub struct Usecase {
 }
 
 impl Usecase {
-    /// Creates a new Usecase.
+    /// Creates a Usecase for a statically defined name.
+    ///
+    /// Use [`Self::try_new`] for dynamic names that may fail validation.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the name violates the naming rules on [`Usecase`].
     pub fn new(name: &str) -> Self {
-        Self {
+        Self::try_new(name).expect("invalid usecase name")
+    }
+
+    /// Creates a Usecase for a dynamic name, returning any validation error.
+    ///
+    /// Use [`Self::new`] for statically defined names.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidUsecaseName`] if the name violates the naming rules on
+    /// [`Usecase`].
+    pub fn try_new(name: &str) -> Result<Self, InvalidUsecaseName> {
+        usecase::validate_usecase_name(name)?;
+        Ok(Self {
             name: name.into(),
             compression: Some(Compression::Zstd),
             expiration_policy: ExpirationPolicy::default(),
-        }
+        })
     }
 
     /// Returns the name of this usecase.
@@ -606,6 +630,27 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_usecase_construction() {
+        let name = "Debug_Files-123";
+        assert_eq!(Usecase::new(name).name(), name);
+        assert_eq!(Usecase::try_new(name).unwrap().name(), name);
+        assert!(matches!(
+            Usecase::try_new("_"),
+            Err(InvalidUsecaseName::InvalidLength)
+        ));
+        assert!(matches!(
+            Usecase::try_new("testing/org=999/injected"),
+            Err(InvalidUsecaseName::InvalidChar('/'))
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid usecase name")]
+    fn test_invalid_usecase_panics() {
+        Usecase::new("testing/org=999/injected");
+    }
 
     #[test]
     fn test_object_url() {

@@ -34,6 +34,8 @@ async fn example() -> Result<()> {
 ### Usecases and Scopes
 
 A [`Usecase`] represents a server-side namespace with its own configuration defaults.
+Its name must follow the naming rules documented on [`Usecase`]. Use
+[`Usecase::new`] for statically defined names and [`Usecase::try_new`] for dynamic names.
 Within a Usecase, [`Scope`]s provide further isolation — typically keyed by organization
 and project IDs. A [`Session`] ties a Client to a specific Usecase + Scope for operations.
 
