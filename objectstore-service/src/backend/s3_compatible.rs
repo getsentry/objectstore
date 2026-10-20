@@ -245,14 +245,7 @@ where
     ) -> Result<Option<(Metadata, Option<ContentRange>, Response)>> {
         let object_url = self.object_url(id);
 
-        // Some S3-compatible services, such as GCS, transparently decompress objects stored with
-        // `Content-Encoding: gzip` unless the request accepts gzip. We always return payloads
-        // exactly as stored, so opt out of it. See:
-        // https://cloud.google.com/storage/docs/transcoding#decompressive_transcoding
-        let mut builder = self
-            .request(method, &object_url)
-            .await?
-            .header(reqwest::header::ACCEPT_ENCODING, "gzip");
+        let mut builder = self.request(method, &object_url).await?;
         if let Some(r) = range {
             builder = builder.header(reqwest::header::RANGE, r.to_header_value());
         }
