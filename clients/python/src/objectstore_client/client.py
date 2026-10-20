@@ -513,11 +513,7 @@ class Session:
             resumable_threshold_bytes != "none"
             and self._usecase._resumable_retries.retries > 0
         ):
-            source_size = (
-                len(contents)
-                if isinstance(contents, bytes)
-                else _resumable.get_size(contents)
-            )
+            source_size = _resumable.get_size(contents)
 
         encoding = precompressed or compress or self._usecase._compression
 
@@ -554,6 +550,7 @@ class Session:
                     self._spool_dir,
                 ) as prepared:
                     if prepared is None:
+                        # Temporary-file creation failed before consuming the input.
                         result_key, source_size, compressed_size = self._put_direct(
                             contents, key, headers, compress=compress_with != "none"
                         )
@@ -572,6 +569,8 @@ class Session:
                             filename=filename,
                         )
                         if result_key is None:
+                            # Session creation failed or resumables are unsupported.
+                            # Send the prepared body without compressing it again.
                             headers["Content-Length"] = str(compressed_size)
                             result_key, _, _ = self._put_direct(
                                 body, key, headers, compress=False

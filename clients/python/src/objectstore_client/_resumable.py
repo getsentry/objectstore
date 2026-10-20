@@ -259,12 +259,16 @@ def prepare_body(
             yield body, source_size, compressed_size
 
 
-def get_size(source: IO[bytes]) -> int | None:
-    """Measure remaining bytes by seeking to the end, or return None if unsupported.
+def get_size(source: bytes | IO[bytes]) -> int | None:
+    """Return the buffer length or remaining stream size, or None if unsupported.
 
-    Seeking may read data in transforming streams. Failure to restore the original
-    position propagates so callers cannot upload from an unexpected position.
+    Streams are measured by seeking to the end, which may read data in transforming
+    streams. Failure to restore the original position propagates so callers cannot
+    upload from an unexpected position.
     """
+    if isinstance(source, bytes):
+        return len(source)
+
     try:
         if not source.seekable():
             return None
