@@ -65,7 +65,7 @@ async fn test_web_concurrency_limit() -> Result<()> {
 async fn test_killswitches() -> Result<()> {
     let server = TestServer::with_config(Config {
         killswitches: Killswitches::new(vec![Killswitch {
-            usecase: Some("blocked".to_string()),
+            usecase: Some("blocked".parse().unwrap()),
             scopes: BTreeMap::from_iter([("org".to_string(), "42".to_string())]),
             service: Some("test-*".to_string()),
         }]),
@@ -285,7 +285,7 @@ async fn test_throughput_rule() -> Result<()> {
                 global_rps: None,
                 burst: 0,
                 rules: vec![ThroughputRule {
-                    usecase: Some("restricted".to_string()),
+                    usecase: Some("restricted".parse().unwrap()),
                     scopes: vec![("org".to_string(), "42".to_string())],
                     rps: Some(1),
                     pct: None,
@@ -684,7 +684,7 @@ async fn test_usecase_expiration_policy() -> Result<()> {
         },
         usecases: UseCases(HashMap::from([
             (
-                "attachments".to_owned(),
+                "attachments".parse().unwrap(),
                 UseCaseConfig {
                     expiration: ExpirationConfig {
                         manual: PolicyConfig { allowed: false },
@@ -695,7 +695,7 @@ async fn test_usecase_expiration_policy() -> Result<()> {
                 },
             ),
             (
-                "debug-files".to_owned(),
+                "debug-files".parse().unwrap(),
                 UseCaseConfig {
                     expiration: ExpirationConfig {
                         manual: PolicyConfig { allowed: false },
@@ -706,7 +706,7 @@ async fn test_usecase_expiration_policy() -> Result<()> {
                 },
             ),
             (
-                "avatars".to_owned(),
+                "avatars".parse().unwrap(),
                 UseCaseConfig {
                     expiration: ExpirationConfig {
                         manual: PolicyConfig { allowed: true },

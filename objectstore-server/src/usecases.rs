@@ -1,6 +1,6 @@
 //! Configuration and validation for use case properties.
 //!
-//! Use cases are user-defined strings that namespace objects (e.g. `attachments`,
+//! Use cases are user-defined identifiers that namespace objects (e.g. `attachments`,
 //! `debug-files`). This module provides a central place to configure properties
 //! of use cases, such as which expiration policies are permitted and any duration
 //! caps.
@@ -29,22 +29,24 @@ use std::time::Duration;
 
 use objectstore_types::duration::format_duration;
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
+use objectstore_types::usecase::UsecaseName;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Configuration for all use case properties.
 ///
-/// Maps use case names to their configuration. Use cases not present in the map
+/// Maps validated use case names to their configuration. Invalid names are
+/// rejected when deserializing configuration. Use cases not present in the map
 /// receive the default configuration (all expiration policies allowed, no caps).
 #[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq)]
-pub struct UseCases(pub HashMap<String, UseCaseConfig>);
+pub struct UseCases(pub HashMap<UsecaseName, UseCaseConfig>);
 
 impl UseCases {
     /// Validates metadata against the configuration for the given use case.
     ///
     /// Returns an error if any metadata field violates the use case's policy.
     /// Use cases not present in the configuration are always valid.
-    pub fn validate(&self, usecase: &str, metadata: &Metadata) -> Result<(), UseCaseError> {
+    pub fn validate(&self, usecase: &UsecaseName, metadata: &Metadata) -> Result<(), UseCaseError> {
         if let Some(config) = self.0.get(usecase) {
             config.validate(usecase, metadata)?
         }
@@ -54,7 +56,7 @@ impl UseCases {
     /// Returns the maximum allowed expiration duration for the given use case, if configured.
     ///
     /// Applies to both TTL and TTI expiration policies. `None` means no limit.
-    pub fn get_max_expiry(&self, usecase: &str) -> Option<Duration> {
+    pub fn get_max_expiry(&self, usecase: &UsecaseName) -> Option<Duration> {
         self.0.get(usecase).and_then(|config| config.expiration.max)
     }
 }
@@ -68,7 +70,7 @@ pub struct UseCaseConfig {
 }
 
 impl UseCaseConfig {
-    fn validate(&self, usecase: &str, metadata: &Metadata) -> Result<(), UseCaseError> {
+    fn validate(&self, usecase: &UsecaseName, metadata: &Metadata) -> Result<(), UseCaseError> {
         let policy = metadata.expiration_policy;
         let allowed = match policy {
             ExpirationPolicy::Manual => self.expiration.manual.allowed,
@@ -135,7 +137,7 @@ pub enum UseCaseError {
     #[error("expiration policy '{policy}' is not allowed for use case '{usecase}'")]
     PolicyNotAllowed {
         /// The use case name.
-        usecase: String,
+        usecase: UsecaseName,
         /// The disallowed policy, in wire format.
         policy: ExpirationPolicy,
     },
@@ -144,7 +146,7 @@ pub enum UseCaseError {
     #[error("expiration duration {duration} exceeds maximum of {max} for use case '{usecase}'")]
     DurationExceeded {
         /// The use case name.
-        usecase: String,
+        usecase: UsecaseName,
         /// The requested duration, in wire format.
         duration: String,
         /// The configured maximum, in wire format.
@@ -169,8 +171,23 @@ mod tests {
 
     fn usecases_from(config: UseCaseConfig) -> UseCases {
         let mut map = HashMap::new();
-        map.insert("test".to_owned(), config);
+        map.insert("test".parse().unwrap(), config);
         UseCases(map)
+    }
+
+    #[test]
+    fn configuration_validates_usecase_keys() {
+        let config: UseCases = serde_json::from_str(r#"{"Debug_Files":{}}"#).unwrap();
+        assert!(config.0.contains_key("Debug_Files"));
+        assert!(!config.0.contains_key("debug_files"));
+        let roundtrip: UseCases =
+            serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+        assert_eq!(roundtrip, config);
+
+        for name in ["_", "testing/org=999/injected"] {
+            let config = serde_json::json!({name: {}});
+            assert!(serde_json::from_value::<UseCases>(config).is_err());
+        }
     }
 
     // --- unconfigured use case ---
@@ -179,21 +196,27 @@ mod tests {
     fn unconfigured_usecase_allows_manual() {
         let usecases = UseCases::default();
         let metadata = make_metadata(ExpirationPolicy::Manual);
-        usecases.validate("anything", &metadata).unwrap();
+        usecases
+            .validate(&"anything".parse().unwrap(), &metadata)
+            .unwrap();
     }
 
     #[test]
     fn unconfigured_usecase_allows_ttl() {
         let usecases = UseCases::default();
         let metadata = make_metadata(ExpirationPolicy::TimeToLive(Duration::from_hours(1)));
-        usecases.validate("anything", &metadata).unwrap();
+        usecases
+            .validate(&"anything".parse().unwrap(), &metadata)
+            .unwrap();
     }
 
     #[test]
     fn unconfigured_usecase_allows_tti() {
         let usecases = UseCases::default();
         let metadata = make_metadata(ExpirationPolicy::TimeToIdle(Duration::from_hours(1)));
-        usecases.validate("anything", &metadata).unwrap();
+        usecases
+            .validate(&"anything".parse().unwrap(), &metadata)
+            .unwrap();
     }
 
     // --- manual policy ---
@@ -208,7 +231,9 @@ mod tests {
         });
 
         let metadata = make_metadata(ExpirationPolicy::Manual);
-        let err = usecases.validate("test", &metadata).unwrap_err();
+        let err = usecases
+            .validate(&"test".parse().unwrap(), &metadata)
+            .unwrap_err();
         assert!(matches!(err, UseCaseError::PolicyNotAllowed { .. }));
     }
 
@@ -223,7 +248,9 @@ mod tests {
         });
 
         let metadata = make_metadata(ExpirationPolicy::Manual);
-        usecases.validate("test", &metadata).unwrap();
+        usecases
+            .validate(&"test".parse().unwrap(), &metadata)
+            .unwrap();
     }
 
     // --- ttl policy ---
@@ -238,7 +265,9 @@ mod tests {
         });
 
         let metadata = make_metadata(ExpirationPolicy::TimeToLive(Duration::from_hours(1)));
-        let err = usecases.validate("test", &metadata).unwrap_err();
+        let err = usecases
+            .validate(&"test".parse().unwrap(), &metadata)
+            .unwrap_err();
         assert!(matches!(err, UseCaseError::PolicyNotAllowed { .. }));
     }
 
@@ -252,7 +281,9 @@ mod tests {
         });
 
         let metadata = make_metadata(ExpirationPolicy::TimeToLive(Duration::from_hours(1)));
-        usecases.validate("test", &metadata).unwrap();
+        usecases
+            .validate(&"test".parse().unwrap(), &metadata)
+            .unwrap();
     }
 
     #[test]
@@ -265,7 +296,9 @@ mod tests {
         });
 
         let metadata = make_metadata(ExpirationPolicy::TimeToLive(Duration::from_hours(1)));
-        usecases.validate("test", &metadata).unwrap();
+        usecases
+            .validate(&"test".parse().unwrap(), &metadata)
+            .unwrap();
     }
 
     #[test]
@@ -278,7 +311,9 @@ mod tests {
         });
 
         let metadata = make_metadata(ExpirationPolicy::TimeToLive(Duration::from_hours(2)));
-        let err = usecases.validate("test", &metadata).unwrap_err();
+        let err = usecases
+            .validate(&"test".parse().unwrap(), &metadata)
+            .unwrap_err();
         assert!(matches!(err, UseCaseError::DurationExceeded { .. }));
     }
 
@@ -294,7 +329,9 @@ mod tests {
         });
 
         let metadata = make_metadata(ExpirationPolicy::TimeToIdle(Duration::from_hours(1)));
-        let err = usecases.validate("test", &metadata).unwrap_err();
+        let err = usecases
+            .validate(&"test".parse().unwrap(), &metadata)
+            .unwrap_err();
         assert!(matches!(err, UseCaseError::PolicyNotAllowed { .. }));
     }
 
@@ -308,7 +345,9 @@ mod tests {
         });
 
         let metadata = make_metadata(ExpirationPolicy::TimeToIdle(Duration::from_hours(1)));
-        usecases.validate("test", &metadata).unwrap();
+        usecases
+            .validate(&"test".parse().unwrap(), &metadata)
+            .unwrap();
     }
 
     #[test]
@@ -321,7 +360,9 @@ mod tests {
         });
 
         let metadata = make_metadata(ExpirationPolicy::TimeToIdle(Duration::from_hours(2)));
-        let err = usecases.validate("test", &metadata).unwrap_err();
+        let err = usecases
+            .validate(&"test".parse().unwrap(), &metadata)
+            .unwrap_err();
         assert!(matches!(err, UseCaseError::DurationExceeded { .. }));
     }
 
@@ -337,9 +378,13 @@ mod tests {
         });
 
         let metadata = make_metadata(ExpirationPolicy::Manual);
-        usecases.validate("test", &metadata).unwrap();
+        usecases
+            .validate(&"test".parse().unwrap(), &metadata)
+            .unwrap();
 
         let metadata = make_metadata(ExpirationPolicy::TimeToLive(Duration::from_hours(1)));
-        usecases.validate("test", &metadata).unwrap();
+        usecases
+            .validate(&"test".parse().unwrap(), &metadata)
+            .unwrap();
     }
 }

@@ -6,7 +6,7 @@ use bytes::Bytes;
 use futures_util::stream::BoxStream;
 use objectstore_types::metadata::{Compression, ExpirationPolicy};
 use objectstore_types::scope;
-use objectstore_types::usecase::{self, InvalidUsecaseName};
+use objectstore_types::usecase::{InvalidUsecaseName, UsecaseName};
 use reqwest::RequestBuilder;
 use url::Url;
 
@@ -158,7 +158,7 @@ impl ClientBuilder {
 /// normalized.
 #[derive(Debug, Clone)]
 pub struct Usecase {
-    name: Arc<str>,
+    name: Arc<UsecaseName>,
     compression: Option<Compression>,
     expiration_policy: ExpirationPolicy,
 }
@@ -184,9 +184,8 @@ impl Usecase {
     /// Returns [`InvalidUsecaseName`] if the name violates the naming rules on
     /// [`Usecase`].
     pub fn try_new(name: &str) -> Result<Self, InvalidUsecaseName> {
-        usecase::validate_usecase_name(name)?;
         Ok(Self {
-            name: name.into(),
+            name: Arc::new(UsecaseName::new(name)?),
             compression: Some(Compression::Zstd),
             expiration_policy: ExpirationPolicy::default(),
         })
@@ -195,7 +194,7 @@ impl Usecase {
     /// Returns the name of this usecase.
     #[inline]
     pub fn name(&self) -> &str {
-        &self.name
+        self.name.as_str()
     }
 
     /// Returns the compression algorithm to use for operations within this usecase.
@@ -472,7 +471,7 @@ impl Session {
         segments
             .push("v1")
             .push("objects")
-            .push(&self.scope.usecase.name)
+            .push(self.scope.usecase.name())
             .push(&self.scope.scopes.as_api_path().to_string())
             .extend(object_key.split('/'));
         drop(segments);
@@ -567,7 +566,7 @@ impl Session {
                 Some("complete") => "objects:multipart:complete",
                 _ => "objects:multipart",
             })
-            .push(&self.scope.usecase.name)
+            .push(self.scope.usecase.name())
             .push(&self.scope.scopes.as_api_path().to_string());
         if let Some(object_key) = object_key.filter(|key| !key.is_empty()) {
             segments.extend(object_key.split('/'));

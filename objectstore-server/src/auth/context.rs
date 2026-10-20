@@ -6,6 +6,7 @@ use jsonwebtoken::{Algorithm, Header, TokenData, Validation, decode, decode_head
 use objectstore_service::id::ObjectContext;
 use objectstore_types::auth::Permission;
 use objectstore_types::presign::CanonicalRequest;
+use objectstore_types::usecase::UsecaseName;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::KeyId;
@@ -16,7 +17,7 @@ use crate::auth::util::StringOrWildcard;
 #[derive(Deserialize, Serialize, Debug, Clone)]
 struct JwtRes {
     #[serde(rename = "os:usecase")]
-    usecase: String,
+    usecase: UsecaseName,
 
     #[serde(flatten)]
     scope: BTreeMap<String, StringOrWildcard>,
@@ -43,7 +44,7 @@ pub struct ScopedContext {
     /// The objectstore usecase that this request may act on.
     ///
     /// See also: [`ObjectContext::usecase`].
-    pub usecase: String,
+    pub usecase: UsecaseName,
 
     /// The scope elements that this request may act on.
     ///
@@ -351,7 +352,7 @@ mod tests {
 
     fn sample_auth_context(org: &str, proj: &str, permissions: HashSet<Permission>) -> AuthContext {
         AuthContext::Scoped(ScopedContext {
-            usecase: "attachments".into(),
+            usecase: "attachments".parse().unwrap(),
             permissions,
             scopes: serde_json::from_value(json!({"org": org, "project": proj})).unwrap(),
         })
@@ -457,7 +458,7 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
 
     fn sample_object_context(org: &str, project: &str) -> ObjectContext {
         ObjectContext {
-            usecase: "attachments".into(),
+            usecase: "attachments".parse().unwrap(),
             scopes: Scopes::from_iter([
                 Scope::create("org", org).unwrap(),
                 Scope::create("project", project).unwrap(),
@@ -498,7 +499,7 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
     fn test_assert_authorized_org_only_path_allowed() -> Result<(), AuthError> {
         let auth_context = sample_auth_context("123", "456", max_permission());
         let object = ObjectContext {
-            usecase: "attachments".into(),
+            usecase: "attachments".parse().unwrap(),
             scopes: Scopes::from_iter([Scope::create("org", "123").unwrap()]),
         };
 
@@ -536,7 +537,7 @@ MC4CAQAwBQYDK2VwBCIEIKwVoE4TmTfWoqH3HgLVsEcHs9PHNe+ar/Hp6e4To8pK
         else {
             panic!("expected a scoped auth context");
         };
-        scoped.usecase = "debug-files".into();
+        scoped.usecase = "debug-files".parse().unwrap();
         let auth_context = AuthContext::Scoped(scoped);
         let object = sample_object_context("123", "456");
 

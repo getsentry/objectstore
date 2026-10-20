@@ -1361,7 +1361,7 @@ mod tests {
         );
 
         let id = ObjectId::random(ObjectContext {
-            usecase: "testing".into(),
+            usecase: "testing".parse().unwrap(),
             scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
         });
 
@@ -1411,7 +1411,11 @@ mod tests {
         let mut slots = HashMap::new();
         let (first_id, colliding_id) = (0..=65_536)
             .find_map(|key| {
-                let id = ObjectId::from_parts("testing".into(), Scopes::empty(), key.to_string());
+                let id = ObjectId::from_parts(
+                    "testing".parse().unwrap(),
+                    Scopes::empty(),
+                    key.to_string(),
+                );
                 let path = first_locks.path(&id);
                 slots.insert(path, id.clone()).map(|first| (first, id))
             })
@@ -1450,7 +1454,7 @@ mod tests {
     #[tokio::test]
     async fn missing_object_expiry_does_not_block_descendant() {
         let (_tempdir, backend) = make_backend();
-        let id = ObjectId::from_parts("testing".into(), Scopes::empty(), "foo".into());
+        let id = ObjectId::from_parts("testing".parse().unwrap(), Scopes::empty(), "foo".into());
         assert_eq!(
             backend
                 .set_expiry(
@@ -1679,7 +1683,7 @@ mod tests {
         );
 
         let id = ObjectId::random(ObjectContext {
-            usecase: "testing".into(),
+            usecase: "testing".parse().unwrap(),
             scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
         });
 
@@ -1721,7 +1725,7 @@ mod tests {
         );
 
         let id = ObjectId::random(ObjectContext {
-            usecase: "testing".into(),
+            usecase: "testing".parse().unwrap(),
             scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
         });
 
@@ -1731,7 +1735,7 @@ mod tests {
 
     fn make_id() -> ObjectId {
         ObjectId::random(ObjectContext {
-            usecase: "testing".into(),
+            usecase: "testing".parse().unwrap(),
             scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
         })
     }

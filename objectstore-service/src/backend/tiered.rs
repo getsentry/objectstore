@@ -660,15 +660,15 @@ impl Backend for TieredStorage {
         access_time: Timestamp,
     ) -> Result<PutResponse> {
         let mut timer =
-            objectstore_metrics::timer!("put.latency", usecase = id.usecase().to_owned(),);
+            objectstore_metrics::timer!("put.latency", usecase = id.usecase().to_string(),);
         if metadata.origin.is_none() {
-            objectstore_metrics::count!("put.origin_missing", usecase = id.usecase().to_owned());
+            objectstore_metrics::count!("put.origin_missing", usecase = id.usecase().to_string());
         }
 
         let peeked = SizedPeek::new(stream, BACKEND_SIZE_THRESHOLD).await?;
         objectstore_metrics::record!(
             "put.first_chunk.latency" = timer.elapsed(),
-            usecase = id.usecase().to_owned(),
+            usecase = id.usecase().to_string(),
             complete = if peeked.is_exhausted() { "yes" } else { "no" },
         );
 
@@ -691,7 +691,7 @@ impl Backend for TieredStorage {
         timer.record();
         objectstore_metrics::record!(
             "put.size" = stored_size,
-            usecase = id.usecase().to_owned(),
+            usecase = id.usecase().to_string(),
             backend_choice = backend_choice.as_str(),
             backend_type = backend_ty,
             upload_type = "direct",
@@ -709,7 +709,7 @@ impl Backend for TieredStorage {
     ) -> Result<GetResponse> {
         let mut timer = objectstore_metrics::timer!(
             "get.latency.pre-response",
-            usecase = id.usecase().to_owned(),
+            usecase = id.usecase().to_string(),
         );
         self.tag_backend(&mut timer, &BackendChoice::HighVolume);
 
@@ -744,7 +744,7 @@ impl Backend for TieredStorage {
             if let Some(size) = size {
                 objectstore_metrics::record!(
                     "get.size" = size,
-                    usecase = id.usecase().to_owned(),
+                    usecase = id.usecase().to_string(),
                     backend_choice = backend_choice.as_str(),
                     backend_type = backend_type,
                 );
@@ -761,7 +761,7 @@ impl Backend for TieredStorage {
         access_time: Timestamp,
     ) -> Result<MetadataResponse> {
         let mut timer =
-            objectstore_metrics::timer!("head.latency", usecase = id.usecase().to_owned());
+            objectstore_metrics::timer!("head.latency", usecase = id.usecase().to_string());
         self.tag_backend(&mut timer, &BackendChoice::HighVolume);
 
         let hv_result = self
@@ -840,7 +840,7 @@ impl Backend for TieredStorage {
     #[tracing::instrument(level = "debug", skip(self))]
     async fn delete_object(&self, id: &ObjectId, access_time: Timestamp) -> Result<DeleteResponse> {
         let mut timer =
-            objectstore_metrics::timer!("delete.latency", usecase = id.usecase().to_owned());
+            objectstore_metrics::timer!("delete.latency", usecase = id.usecase().to_string());
         self.tag_backend(&mut timer, &BackendChoice::HighVolume);
 
         if let Some(tombstone) = self
@@ -976,7 +976,7 @@ impl MultipartUploadBackend for TieredStorage {
     ) -> Result<InitiateMultipartResponse> {
         let timer = objectstore_metrics::timer!(
             "multipart.initiate.latency",
-            usecase = id.usecase().to_owned(),
+            usecase = id.usecase().to_string(),
             backend_choice = BackendChoice::LongTerm.as_str(),
             backend_type = self.backend_type(&BackendChoice::LongTerm),
         );
@@ -1010,7 +1010,7 @@ impl MultipartUploadBackend for TieredStorage {
     ) -> Result<UploadPartResponse> {
         let timer = objectstore_metrics::timer!(
             "multipart.upload_part.latency",
-            usecase = id.usecase().to_owned(),
+            usecase = id.usecase().to_string(),
             backend_choice = BackendChoice::LongTerm.as_str(),
             backend_type = self.backend_type(&BackendChoice::LongTerm),
         );
@@ -1037,7 +1037,7 @@ impl MultipartUploadBackend for TieredStorage {
         timer.record();
         objectstore_metrics::record!(
             "multipart.upload_part.size" = content_length,
-            usecase = id.usecase().to_owned(),
+            usecase = id.usecase().to_string(),
         );
 
         Ok(etag)
@@ -1053,7 +1053,7 @@ impl MultipartUploadBackend for TieredStorage {
     ) -> Result<ListPartsResponse> {
         let timer = objectstore_metrics::timer!(
             "multipart.list_parts.latency",
-            usecase = id.usecase().to_owned(),
+            usecase = id.usecase().to_string(),
             backend_choice = BackendChoice::LongTerm.as_str(),
             backend_type = self.backend_type(&BackendChoice::LongTerm),
         );
@@ -1082,7 +1082,7 @@ impl MultipartUploadBackend for TieredStorage {
     ) -> Result<AbortMultipartResponse> {
         let timer = objectstore_metrics::timer!(
             "multipart.abort.latency",
-            usecase = id.usecase().to_owned(),
+            usecase = id.usecase().to_string(),
             backend_choice = BackendChoice::LongTerm.as_str(),
             backend_type = self.backend_type(&BackendChoice::LongTerm),
         );
@@ -1113,7 +1113,7 @@ impl MultipartUploadBackend for TieredStorage {
     ) -> Result<CompleteMultipartResponse> {
         let timer = objectstore_metrics::timer!(
             "multipart.complete.latency",
-            usecase = id.usecase().to_owned(),
+            usecase = id.usecase().to_string(),
             backend_choice = BackendChoice::LongTerm.as_str(),
             backend_type = self.backend_type(&BackendChoice::LongTerm),
         );
@@ -1237,12 +1237,12 @@ impl MultipartUploadBackend for TieredStorage {
         timer.record();
         objectstore_metrics::record!(
             "multipart.complete.part_count" = part_count as u64,
-            usecase = id.usecase().to_owned(),
+            usecase = id.usecase().to_string(),
         );
         if let Some(size) = metadata.size {
             objectstore_metrics::record!(
                 "put.size" = size as u64,
-                usecase = id.usecase().to_owned(),
+                usecase = id.usecase().to_string(),
                 backend_choice = BackendChoice::LongTerm.as_str(),
                 backend_type = self.backend_type(&BackendChoice::LongTerm),
                 upload_type = "multipart",
@@ -1275,7 +1275,7 @@ mod tests {
 
     fn make_context() -> ObjectContext {
         ObjectContext {
-            usecase: "testing".into(),
+            usecase: "testing".parse().unwrap(),
             scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
         }
     }

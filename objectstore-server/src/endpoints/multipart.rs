@@ -102,10 +102,7 @@ async fn initiate_inner(
     // TODO: Update time_created in `complete`, when we have a Service API to mutate metadata.
     let metadata = Metadata::from_insert_headers(&headers, "", access_time)?;
 
-    state
-        .config
-        .usecases
-        .validate(&id.context().usecase, &metadata)?;
+    state.config.usecases.validate(id.usecase(), &metadata)?;
 
     let upload_id = service.initiate_multipart(id.clone(), metadata).await?;
 

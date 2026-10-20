@@ -105,10 +105,7 @@ async fn create_session_for_id(
     require_empty_body(content_length, body, "resumable session creation").await?;
     let metadata = Metadata::from_insert_headers(&headers, "", access_time)?;
 
-    state
-        .config
-        .usecases
-        .validate(&id.context().usecase, &metadata)?;
+    state.config.usecases.validate(id.usecase(), &metadata)?;
 
     let created = service
         .create_upload_session(id.clone(), metadata, total_length)

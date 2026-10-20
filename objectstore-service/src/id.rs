@@ -12,6 +12,7 @@
 //! A usecase (sometimes called a "product") is a top-level namespace like
 //! `"attachments"` or `"debug-files"`. It groups related objects and can have
 //! usecase-specific server configuration (rate limits, killswitches, etc.).
+//! [`UsecaseName`] validates the name when it is constructed or deserialized.
 //!
 //! ## Scopes
 //!
@@ -36,6 +37,7 @@
 use std::fmt;
 
 use objectstore_types::scope::{Scope, Scopes};
+use objectstore_types::usecase::UsecaseName;
 
 /// The fixed path segment that separates scopes from the object key in storage paths.
 const KEY_DELIMITER: &str = "objects";
@@ -49,7 +51,7 @@ pub struct ObjectContext {
     ///
     /// This can be defined on-the-fly by the client, but special server logic
     /// (such as the concrete backend/bucket) can be tied to this as well.
-    pub usecase: String,
+    pub usecase: UsecaseName,
 
     /// The scopes of the object, used for compartmentalization and authorization.
     ///
@@ -77,7 +79,7 @@ pub struct ObjectContext {
     /// use objectstore_types::scope::{Scope, Scopes};
     ///
     /// let object_id = ObjectContext {
-    ///     usecase: "my_usecase".to_string(),
+    ///     usecase: "my_usecase".parse().unwrap(),
     ///     scopes: Scopes::from_iter([
     ///         Scope::create("organization", "17").unwrap(),
     ///         Scope::create("project", "42").unwrap(),
@@ -115,7 +117,7 @@ impl ObjectId {
     }
 
     /// Creates a new `ObjectId` from all of its parts.
-    pub fn from_parts(usecase: String, scopes: Scopes, key: String) -> Self {
+    pub fn from_parts(usecase: UsecaseName, scopes: Scopes, key: String) -> Self {
         Self::new(ObjectContext { usecase, scopes }, key)
     }
 
@@ -145,9 +147,7 @@ impl ObjectId {
     pub fn from_storage_path(path: &str) -> Option<Self> {
         // Split off the usecase (everything before the first `/`).
         let (usecase, mut rest) = path.split_once('/')?;
-        if usecase.is_empty() {
-            return None;
-        }
+        let usecase = UsecaseName::new(usecase).ok()?;
 
         let mut scopes_vec = Vec::new();
         loop {
@@ -166,7 +166,7 @@ impl ObjectId {
             "" => None,
             key => Some(ObjectId {
                 context: ObjectContext {
-                    usecase: usecase.to_owned(),
+                    usecase,
                     scopes: Scopes::from_iter(scopes_vec),
                 },
                 key: key.to_owned(),
@@ -191,7 +191,7 @@ impl ObjectId {
     /// Returns the usecase of the object.
     ///
     /// See [`ObjectContext::usecase`] for more information.
-    pub fn usecase(&self) -> &str {
+    pub fn usecase(&self) -> &UsecaseName {
         &self.context.usecase
     }
 
@@ -255,7 +255,7 @@ mod tests {
     fn test_storage_path() {
         let object_id = ObjectId {
             context: ObjectContext {
-                usecase: "testing".to_string(),
+                usecase: "testing".parse().unwrap(),
                 scopes: Scopes::from_iter([
                     Scope::create("org", "12345").unwrap(),
                     Scope::create("project", "1337").unwrap(),
@@ -272,7 +272,7 @@ mod tests {
     fn test_storage_path_empty_scopes() {
         let object_id = ObjectId {
             context: ObjectContext {
-                usecase: "testing".to_string(),
+                usecase: "testing".parse().unwrap(),
                 scopes: Scopes::empty(),
             },
             key: "foo/bar".to_string(),
@@ -288,7 +288,7 @@ mod tests {
             // Multiple scopes
             ObjectId {
                 context: ObjectContext {
-                    usecase: "attachments".to_string(),
+                    usecase: "attachments".parse().unwrap(),
                     scopes: Scopes::from_iter([
                         Scope::create("org", "17").unwrap(),
                         Scope::create("project", "42").unwrap(),
@@ -299,7 +299,7 @@ mod tests {
             // No scopes
             ObjectId {
                 context: ObjectContext {
-                    usecase: "debug-files".to_string(),
+                    usecase: "debug-files".parse().unwrap(),
                     scopes: Scopes::empty(),
                 },
                 key: "simple-key".to_string(),
@@ -307,7 +307,7 @@ mod tests {
             // Key containing slashes
             ObjectId {
                 context: ObjectContext {
-                    usecase: "testing".to_string(),
+                    usecase: "testing".parse().unwrap(),
                     scopes: Scopes::from_iter([Scope::create("org", "12345").unwrap()]),
                 },
                 key: "foo/bar/baz".to_string(),
@@ -315,7 +315,7 @@ mod tests {
             // Single scope
             ObjectId {
                 context: ObjectContext {
-                    usecase: "replays".to_string(),
+                    usecase: "replays".parse().unwrap(),
                     scopes: Scopes::from_iter([Scope::create("org", "99").unwrap()]),
                 },
                 key: "some-uuid-key".to_string(),
@@ -332,6 +332,10 @@ mod tests {
 
     #[test]
     fn test_from_storage_path_invalid() {
+        // Invalid usecase names must not bypass validation through storage paths.
+        for name in ["", "_", "ab", "test.name", "café", &"a".repeat(65)] {
+            assert!(ObjectId::from_storage_path(&format!("{name}/objects/key")).is_none());
+        }
         // Missing "objects" segment
         assert!(ObjectId::from_storage_path("usecase/org.17/mykey").is_none());
         // Empty path
