@@ -190,7 +190,7 @@ async fn main() -> anyhow::Result<()> {
     let worker_bytes = Arc::clone(&total_bytes);
     let worker_handle = tokio::spawn(async move {
         let context = ObjectContext {
-            usecase: "bench".into(),
+            usecase: "bench".parse().unwrap(),
             scopes: Scopes::from_iter([
                 Scope::create("org", "bench").unwrap(), // INVARIANT: valid scope name
             ]),

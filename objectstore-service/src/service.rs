@@ -641,7 +641,7 @@ mod tests {
 
     fn make_context() -> ObjectContext {
         ObjectContext {
-            usecase: "testing".into(),
+            usecase: "testing".parse().unwrap(),
             scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
         }
     }

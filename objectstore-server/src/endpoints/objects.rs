@@ -397,7 +397,7 @@ mod tests {
     fn object_id(key: &str) -> ObjectId {
         ObjectId::new(
             ObjectContext {
-                usecase: "testing".into(),
+                usecase: "testing".parse().unwrap(),
                 scopes: Scopes::from_iter([Scope::create("org", "1").unwrap()]),
             },
             key.into(),

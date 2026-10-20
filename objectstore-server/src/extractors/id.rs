@@ -6,7 +6,7 @@ use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_types::scope::{EMPTY_SCOPES, Scope, Scopes};
-use objectstore_types::usecase;
+use objectstore_types::usecase::Usecase;
 use serde::{Deserialize, de};
 
 use crate::extractors::Xt;
@@ -82,21 +82,10 @@ impl FromRequestParts<ServiceState> for Xt<ObjectId> {
 /// This is meant to be used with the axum `Path` extractor.
 #[derive(Clone, Debug, Deserialize)]
 struct ObjectParams {
-    #[serde(deserialize_with = "deserialize_usecase")]
-    usecase: String,
+    usecase: Usecase,
     #[serde(deserialize_with = "deserialize_scopes")]
     scopes: Scopes,
     key: String,
-}
-
-/// Deserializes and validates a usecase name.
-fn deserialize_usecase<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: de::Deserializer<'de>,
-{
-    let name = String::deserialize(deserializer)?;
-    usecase::validate_usecase_name(&name).map_err(de::Error::custom)?;
-    Ok(name)
 }
 
 /// Deserializes a `Scopes` instance from a string representation.
@@ -167,15 +156,14 @@ impl FromRequestParts<ServiceState> for Xt<ObjectContext> {
 /// (`/objects/{usecase}/{scopes}/{*key}`) routes — the extra `key` parameter is ignored.
 #[derive(Clone, Debug, Deserialize)]
 pub(super) struct ContextParams {
-    #[serde(deserialize_with = "deserialize_usecase")]
-    pub usecase: String,
+    pub usecase: Usecase,
     #[serde(deserialize_with = "deserialize_scopes")]
     pub scopes: Scopes,
 }
 
 fn populate_sentry_context(context: &ObjectContext) {
     sentry::configure_scope(|s| {
-        s.set_tag("usecase", &context.usecase);
+        s.set_tag("usecase", context.usecase.as_str());
         for scope in &context.scopes {
             s.set_tag(&format!("scope.{}", scope.name()), scope.value());
         }
@@ -196,31 +184,29 @@ mod tests {
 
     #[test]
     fn parse_usecase() {
-        for name in [
-            "Debug_Files-123".to_owned(),
-            "a".repeat(64),
-            "___".to_owned(),
+        for (name, valid) in [
+            ("Debug_Files-123", true),
+            ("___", true),
+            ("_", false),
+            ("test/name", false),
+            ("test%2Fname", false),
         ] {
-            let deserializer: CowStrDeserializer<DeError> =
-                Cow::Borrowed(name.as_str()).into_deserializer();
-            assert_eq!(deserialize_usecase(deserializer).unwrap(), name);
+            let params = serde_json::json!({
+                "usecase": name,
+                "scopes": "org=123",
+                "key": "my-key",
+            });
+            assert_eq!(
+                serde_json::from_value::<ObjectParams>(params.clone()).is_ok(),
+                valid,
+                "object usecase {name:?}",
+            );
+            assert_eq!(
+                serde_json::from_value::<ContextParams>(params).is_ok(),
+                valid,
+                "context usecase {name:?}",
+            );
         }
-        for name in [
-            "",
-            "_",
-            "ab",
-            "testing/org=999/injected",
-            "test.name",
-            "test%2Fname",
-            "café",
-        ] {
-            let deserializer: CowStrDeserializer<DeError> = Cow::Borrowed(name).into_deserializer();
-            assert!(deserialize_usecase(deserializer).is_err(), "{name:?}");
-        }
-        let name = "a".repeat(65);
-        let deserializer: CowStrDeserializer<DeError> =
-            Cow::Borrowed(name.as_str()).into_deserializer();
-        assert!(deserialize_usecase(deserializer).is_err());
     }
 
     #[test]
@@ -443,7 +429,7 @@ mod tests {
     async fn extract_object_id_killswitched() {
         let config = Config {
             killswitches: Killswitches::new(vec![Killswitch {
-                usecase: Some("blocked".into()),
+                usecase: Some("blocked".parse().unwrap()),
                 scopes: BTreeMap::new(),
                 service: None,
             }]),
@@ -471,7 +457,7 @@ mod tests {
     async fn extract_object_context_killswitched() {
         let config = Config {
             killswitches: Killswitches::new(vec![Killswitch {
-                usecase: Some("blocked".into()),
+                usecase: Some("blocked".parse().unwrap()),
                 scopes: BTreeMap::new(),
                 service: None,
             }]),

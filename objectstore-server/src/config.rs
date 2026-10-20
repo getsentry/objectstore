@@ -1485,7 +1485,7 @@ mod tests {
         figment::Jail::expect_with(|_jail| {
             let expected = [
                 Killswitch {
-                    usecase: Some("broken_usecase".into()),
+                    usecase: Some("broken_usecase".parse().unwrap()),
                     scopes: BTreeMap::new(),
                     service: None,
                 },
@@ -1508,7 +1508,7 @@ mod tests {
                     service: None,
                 },
                 Killswitch {
-                    usecase: Some("attachments".into()),
+                    usecase: Some("attachments".parse().unwrap()),
                     scopes: BTreeMap::from([("org".into(), "42".into())]),
                     service: Some("test-*".into()),
                 },
@@ -1561,7 +1561,7 @@ mod tests {
                     scope_pct: Some(25),
                     rules: vec![
                         ThroughputRule {
-                            usecase: Some("high_priority".to_string()),
+                            usecase: Some("high_priority".parse().unwrap()),
                             scopes: vec![("org".to_string(), "123".to_string())],
                             rps: Some(500),
                             pct: None,

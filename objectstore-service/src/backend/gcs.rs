@@ -1923,7 +1923,7 @@ mod tests {
 
     fn make_id() -> ObjectId {
         ObjectId::random(ObjectContext {
-            usecase: "testing".into(),
+            usecase: "testing".parse().unwrap(),
             scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
         })
     }
@@ -1931,7 +1931,7 @@ mod tests {
     fn make_id_with_key(key: &str) -> ObjectId {
         ObjectId::new(
             ObjectContext {
-                usecase: "testing".into(),
+                usecase: "testing".parse().unwrap(),
                 scopes: Scopes::from_iter([
                     Scope::create("organization", "42").unwrap(),
                     Scope::create("project", "7").unwrap(),

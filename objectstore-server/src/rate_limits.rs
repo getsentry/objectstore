@@ -20,6 +20,7 @@ use bytes::Bytes;
 use futures_util::Stream;
 use objectstore_service::id::ObjectContext;
 use objectstore_types::scope::Scopes;
+use objectstore_types::usecase::Usecase;
 use serde::{Deserialize, Serialize};
 
 /// Identifies which rate limit triggered a rejection.
@@ -113,10 +114,10 @@ pub struct ThroughputLimits {
 /// bucket — all matching rules must admit the request.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ThroughputRule {
-    /// Optional usecase to match.
+    /// Optional validated usecase name to match exactly.
     ///
     /// If `None`, matches any usecase.
-    pub usecase: Option<String>,
+    pub usecase: Option<Usecase>,
 
     /// Scopes to match.
     ///
@@ -262,11 +263,11 @@ impl RateLimiter {
         objectstore_metrics::count!(
             "server.request.rate_limited",
             reason = rejection.as_str(),
-            usecase = context.usecase.clone()
+            usecase = context.usecase.to_string()
         );
         objectstore_log::warn!(
             reason = rejection.as_str(),
-            usecase = &context.usecase,
+            usecase = %context.usecase,
             scopes = %context.scopes.as_api_path(),
             key,
             "Request rejected: rate limit exceeded"
@@ -381,7 +382,7 @@ struct BandwidthRateLimiter {
     total_bytes: Arc<AtomicU64>,
     // NB: These maps grow unbounded but we accept this as we expect an overall limited
     // number of usecases and scopes. We emit gauge metrics to monitor their size.
-    usecases: Arc<papaya::HashMap<String, Arc<BandwidthBucket>>>,
+    usecases: Arc<papaya::HashMap<Usecase, Arc<BandwidthBucket>>>,
     scopes: Arc<papaya::HashMap<Scopes, Arc<BandwidthBucket>>>,
 }
 
@@ -531,7 +532,7 @@ struct ThroughputRateLimiter {
     total_admitted: Arc<AtomicU64>,
     // NB: These maps grow unbounded but we accept this as we expect an overall limited
     // number of usecases and scopes. We emit gauge metrics to monitor their size.
-    usecases: Arc<papaya::HashMap<String, Mutex<TokenBucket>>>,
+    usecases: Arc<papaya::HashMap<Usecase, Mutex<TokenBucket>>>,
     scopes: Arc<papaya::HashMap<Scopes, Mutex<TokenBucket>>>,
     rules: papaya::HashMap<usize, Mutex<TokenBucket>>,
 }
@@ -765,9 +766,36 @@ mod tests {
 
     fn make_context() -> ObjectContext {
         ObjectContext {
-            usecase: "testing".into(),
+            usecase: "testing".parse().unwrap(),
             scopes: Scopes::from_iter([Scope::create("org", "1").unwrap()]),
         }
+    }
+
+    #[test]
+    fn throughput_rule_deserialization_validates_usecase() {
+        let rule: ThroughputRule = serde_json::from_value(serde_json::json!({
+            "usecase": "testing",
+            "scopes": [],
+            "rps": 10,
+        }))
+        .unwrap();
+        assert!(rule.matches(&make_context()));
+        assert_eq!(serde_json::to_value(&rule).unwrap()["usecase"], "testing");
+
+        let wildcard: ThroughputRule = serde_json::from_value(serde_json::json!({
+            "scopes": [],
+            "rps": 10,
+        }))
+        .unwrap();
+        assert!(wildcard.matches(&make_context()));
+        assert!(
+            serde_json::from_value::<ThroughputRule>(serde_json::json!({
+                "usecase": "test/name",
+                "scopes": [],
+                "rps": 10,
+            }))
+            .is_err()
+        );
     }
 
     // --- BandwidthBucket unit tests (explicit `now`, no sleeps) ---

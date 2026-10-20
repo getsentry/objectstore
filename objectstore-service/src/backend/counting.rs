@@ -21,6 +21,7 @@ use objectstore_types::metadata::Metadata;
 use objectstore_types::range::ByteRange;
 use objectstore_types::resumable::UploadProgress;
 use objectstore_types::time::Timestamp;
+use objectstore_types::usecase::Usecase;
 
 use crate::backend::common::{
     Backend, DeleteResponse, ExpiryUpdate, GetResponse, MetadataResponse, MultipartUploadBackend,
@@ -39,8 +40,8 @@ use crate::stream::ClientStream;
 ///
 /// Under the hood, the `usecase` is used as the `app_feature`. This allows to identify distinct
 /// products and map them in the for the COGs pipeline.
-fn count(usecase: &str) {
-    objectstore_metrics::count!("cogs.usage" += 1, app_feature = usecase.to_owned());
+fn count(usecase: &Usecase) {
+    objectstore_metrics::count!("cogs.usage" += 1, app_feature = usecase.to_string());
 }
 
 /// A [`Backend`] decorator that counts each operation performed for COGS. Also implements
@@ -82,7 +83,7 @@ impl Backend for CountingBackend {
         stream: ClientStream,
         access_time: Timestamp,
     ) -> Result<PutResponse> {
-        count(&id.context.usecase);
+        count(id.usecase());
         self.inner
             .put_object(id, metadata, stream, access_time)
             .await
@@ -94,7 +95,7 @@ impl Backend for CountingBackend {
         access_time: Timestamp,
         range: Option<ByteRange>,
     ) -> Result<GetResponse> {
-        count(&id.context.usecase);
+        count(id.usecase());
         self.inner.get_object(id, access_time, range).await
     }
 
@@ -103,7 +104,7 @@ impl Backend for CountingBackend {
         id: &ObjectId,
         access_time: Timestamp,
     ) -> Result<MetadataResponse> {
-        count(&id.context.usecase);
+        count(id.usecase());
         self.inner.get_metadata(id, access_time).await
     }
 
@@ -113,12 +114,12 @@ impl Backend for CountingBackend {
         target: ExpiryUpdate,
         access_time: Timestamp,
     ) -> Result<SetExpiryResponse> {
-        count(&id.context.usecase);
+        count(id.usecase());
         self.inner.set_expiry(id, target, access_time).await
     }
 
     async fn delete_object(&self, id: &ObjectId, access_time: Timestamp) -> Result<DeleteResponse> {
-        count(&id.context.usecase);
+        count(id.usecase());
         self.inner.delete_object(id, access_time).await
     }
 
@@ -137,7 +138,7 @@ impl Backend for CountingBackend {
         metadata: &Metadata,
         upload_length: NonZeroU64,
     ) -> Result<Option<BackendToken>> {
-        count(&id.context.usecase);
+        count(id.usecase());
         self.inner
             .create_upload_session(id, metadata, upload_length)
             .await
@@ -150,19 +151,19 @@ impl Backend for CountingBackend {
         content_length: u64,
         stream: ClientStream,
     ) -> Result<UploadProgress> {
-        count(&session.object_id.context.usecase);
+        count(session.object_id.usecase());
         self.inner
             .put_chunk(session, offset, content_length, stream)
             .await
     }
 
     async fn upload_offset(&self, session: &Session) -> Result<UploadProgress> {
-        count(&session.object_id.context.usecase);
+        count(session.object_id.usecase());
         self.inner.upload_offset(session).await
     }
 
     async fn cancel_upload(&self, session: &Session) -> Result<()> {
-        count(&session.object_id.context.usecase);
+        count(session.object_id.usecase());
         self.inner.cancel_upload(session).await
     }
 }
@@ -174,7 +175,7 @@ impl MultipartUploadBackend for CountingBackend {
         id: &ObjectId,
         metadata: &Metadata,
     ) -> Result<InitiateMultipartResponse> {
-        count(&id.context.usecase);
+        count(id.usecase());
         self.inner
             .as_multipart_upload_backend()?
             .initiate_multipart(id, metadata)
@@ -190,7 +191,7 @@ impl MultipartUploadBackend for CountingBackend {
         content_md5: Option<&str>,
         body: ClientStream,
     ) -> Result<UploadPartResponse> {
-        count(&id.context.usecase);
+        count(id.usecase());
         self.inner
             .as_multipart_upload_backend()?
             .upload_part(
@@ -211,7 +212,7 @@ impl MultipartUploadBackend for CountingBackend {
         max_parts: Option<u32>,
         part_number_marker: Option<PartNumber>,
     ) -> Result<ListPartsResponse> {
-        count(&id.context.usecase);
+        count(id.usecase());
         self.inner
             .as_multipart_upload_backend()?
             .list_parts(id, upload_id, max_parts, part_number_marker)
@@ -223,7 +224,7 @@ impl MultipartUploadBackend for CountingBackend {
         id: &ObjectId,
         upload_id: &UploadId,
     ) -> Result<AbortMultipartResponse> {
-        count(&id.context.usecase);
+        count(id.usecase());
         self.inner
             .as_multipart_upload_backend()?
             .abort_multipart(id, upload_id)
@@ -237,7 +238,7 @@ impl MultipartUploadBackend for CountingBackend {
         parts: Vec<CompletedPart>,
         access_time: Timestamp,
     ) -> Result<CompleteMultipartResponse> {
-        count(&id.context.usecase);
+        count(id.usecase());
         self.inner
             .as_multipart_upload_backend()?
             .complete_multipart(id, upload_id, parts, access_time)
@@ -257,7 +258,7 @@ mod tests {
     fn object_id(usecase: &str) -> ObjectId {
         ObjectId::new(
             ObjectContext {
-                usecase: usecase.into(),
+                usecase: usecase.parse().unwrap(),
                 scopes: Scopes::from_iter([Scope::create("org", "1").unwrap()]),
             },
             "key".into(),
