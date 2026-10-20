@@ -462,9 +462,10 @@ class Session:
 
         `compression` is deprecated in favor of `compress`.
 
-        ### Resumable Uploads
+        .. rubric:: Resumable Uploads
 
         This method uses Objectstore's Resumable Uploads API when:
+
         - The size of ``contents`` is at least ``resumable_threshold_bytes``.
           Pass ``resumable_threshold_bytes="none"`` to disable Resumable Uploads.
           When not overridden, this threshold defaults to the one set on the Usecase.
