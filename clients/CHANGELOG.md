@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.10
+
+### New Features ✨
+
+#### Py Client
+
+- Add automatic resumable uploads by @lcian in [#667](https://github.com/getsentry/objectstore/pull/667)
+- Add private resumable upload API by @lcian in [#665](https://github.com/getsentry/objectstore/pull/665)
+
+### Bug Fixes 🐛
+
+- (py-client) Honor zero retries by @lcian in [#679](https://github.com/getsentry/objectstore/pull/679)
+- Validate usecase names by @jan-auer in [#694](https://github.com/getsentry/objectstore/pull/694)
+
+### Internal Changes 🔧
+
+- (rust) Enable resumable uploads on docs.rs by @jan-auer in [#684](https://github.com/getsentry/objectstore/pull/684)
+- Introduce a validated usecase name type by @jan-auer in [#695](https://github.com/getsentry/objectstore/pull/695)
+
 ## 0.2.9
 
 ### New Features ✨
