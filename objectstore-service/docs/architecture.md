@@ -202,9 +202,6 @@ The stream describes physical storage per backend. When using
 [`TieredStorage`](backend::tiered::TieredStorage), objects that are stored in
 long-term storage will emit a change record for the actual object in long-term
 storage as well as for the tombstone record in high-volume storage.
-Resumable uploads also emit write and delete records for their temporary
-high-volume upload markers, identified by the upload's unique revision and
-expiring at the marker's fixed deadline.
 
 `size` is a count of bytes that the backend actually stores for an object. This
 includes object payloads, metadata, and sometimes backend-specific overhead.
