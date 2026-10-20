@@ -20,7 +20,7 @@ use bytes::Bytes;
 use futures_util::Stream;
 use objectstore_service::id::ObjectContext;
 use objectstore_types::scope::Scopes;
-use objectstore_types::usecase::UsecaseName;
+use objectstore_types::usecase::Usecase;
 use serde::{Deserialize, Serialize};
 
 /// Identifies which rate limit triggered a rejection.
@@ -117,7 +117,7 @@ pub struct ThroughputRule {
     /// Optional validated usecase name to match exactly.
     ///
     /// If `None`, matches any usecase.
-    pub usecase: Option<UsecaseName>,
+    pub usecase: Option<Usecase>,
 
     /// Scopes to match.
     ///
@@ -382,7 +382,7 @@ struct BandwidthRateLimiter {
     total_bytes: Arc<AtomicU64>,
     // NB: These maps grow unbounded but we accept this as we expect an overall limited
     // number of usecases and scopes. We emit gauge metrics to monitor their size.
-    usecases: Arc<papaya::HashMap<UsecaseName, Arc<BandwidthBucket>>>,
+    usecases: Arc<papaya::HashMap<Usecase, Arc<BandwidthBucket>>>,
     scopes: Arc<papaya::HashMap<Scopes, Arc<BandwidthBucket>>>,
 }
 
@@ -532,7 +532,7 @@ struct ThroughputRateLimiter {
     total_admitted: Arc<AtomicU64>,
     // NB: These maps grow unbounded but we accept this as we expect an overall limited
     // number of usecases and scopes. We emit gauge metrics to monitor their size.
-    usecases: Arc<papaya::HashMap<UsecaseName, Mutex<TokenBucket>>>,
+    usecases: Arc<papaya::HashMap<Usecase, Mutex<TokenBucket>>>,
     scopes: Arc<papaya::HashMap<Scopes, Mutex<TokenBucket>>>,
     rules: papaya::HashMap<usize, Mutex<TokenBucket>>,
 }

@@ -6,7 +6,7 @@ use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_types::scope::{EMPTY_SCOPES, Scope, Scopes};
-use objectstore_types::usecase::UsecaseName;
+use objectstore_types::usecase::Usecase;
 use serde::{Deserialize, de};
 
 use crate::extractors::Xt;
@@ -82,7 +82,7 @@ impl FromRequestParts<ServiceState> for Xt<ObjectId> {
 /// This is meant to be used with the axum `Path` extractor.
 #[derive(Clone, Debug, Deserialize)]
 struct ObjectParams {
-    usecase: UsecaseName,
+    usecase: Usecase,
     #[serde(deserialize_with = "deserialize_scopes")]
     scopes: Scopes,
     key: String,
@@ -156,7 +156,7 @@ impl FromRequestParts<ServiceState> for Xt<ObjectContext> {
 /// (`/objects/{usecase}/{scopes}/{*key}`) routes — the extra `key` parameter is ignored.
 #[derive(Clone, Debug, Deserialize)]
 pub(super) struct ContextParams {
-    pub usecase: UsecaseName,
+    pub usecase: Usecase,
     #[serde(deserialize_with = "deserialize_scopes")]
     pub scopes: Scopes,
 }

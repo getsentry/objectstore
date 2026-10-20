@@ -21,7 +21,7 @@ use objectstore_types::metadata::Metadata;
 use objectstore_types::range::ByteRange;
 use objectstore_types::resumable::UploadProgress;
 use objectstore_types::time::Timestamp;
-use objectstore_types::usecase::UsecaseName;
+use objectstore_types::usecase::Usecase;
 
 use crate::backend::common::{
     Backend, DeleteResponse, ExpiryUpdate, GetResponse, MetadataResponse, MultipartUploadBackend,
@@ -40,7 +40,7 @@ use crate::stream::ClientStream;
 ///
 /// Under the hood, the `usecase` is used as the `app_feature`. This allows to identify distinct
 /// products and map them in the for the COGs pipeline.
-fn count(usecase: &UsecaseName) {
+fn count(usecase: &Usecase) {
     objectstore_metrics::count!("cogs.usage" += 1, app_feature = usecase.to_string());
 }
 

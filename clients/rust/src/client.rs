@@ -6,7 +6,7 @@ use bytes::Bytes;
 use futures_util::stream::BoxStream;
 use objectstore_types::metadata::{Compression, ExpirationPolicy};
 use objectstore_types::scope;
-use objectstore_types::usecase::{InvalidUsecaseName, UsecaseName};
+use objectstore_types::usecase::{InvalidUsecaseName, Usecase as UsecaseName};
 use reqwest::RequestBuilder;
 use url::Url;
 

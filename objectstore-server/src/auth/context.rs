@@ -6,7 +6,7 @@ use jsonwebtoken::{Algorithm, Header, TokenData, Validation, decode, decode_head
 use objectstore_service::id::ObjectContext;
 use objectstore_types::auth::Permission;
 use objectstore_types::presign::CanonicalRequest;
-use objectstore_types::usecase::UsecaseName;
+use objectstore_types::usecase::Usecase;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::KeyId;
@@ -17,7 +17,7 @@ use crate::auth::util::StringOrWildcard;
 #[derive(Deserialize, Serialize, Debug, Clone)]
 struct JwtRes {
     #[serde(rename = "os:usecase")]
-    usecase: UsecaseName,
+    usecase: Usecase,
 
     #[serde(flatten)]
     scope: BTreeMap<String, StringOrWildcard>,
@@ -44,7 +44,7 @@ pub struct ScopedContext {
     /// The objectstore usecase that this request may act on.
     ///
     /// See also: [`ObjectContext::usecase`].
-    pub usecase: UsecaseName,
+    pub usecase: Usecase,
 
     /// The scope elements that this request may act on.
     ///

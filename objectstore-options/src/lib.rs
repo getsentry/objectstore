@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 
 use objectstore_typed_options::SentryOptions;
-use objectstore_types::usecase::UsecaseName;
+use objectstore_types::usecase::Usecase;
 use serde::{Deserialize, Serialize};
 
 pub use objectstore_typed_options::Error;
@@ -64,7 +64,7 @@ pub struct Killswitch {
     ///
     /// If `None`, matches any usecase.
     #[serde(default)]
-    pub usecase: Option<UsecaseName>,
+    pub usecase: Option<Usecase>,
 
     /// Scopes to match.
     ///

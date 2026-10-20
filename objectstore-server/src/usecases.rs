@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use objectstore_types::duration::format_duration;
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
-use objectstore_types::usecase::UsecaseName;
+use objectstore_types::usecase::Usecase;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -39,14 +39,14 @@ use thiserror::Error;
 /// rejected when deserializing configuration. Use cases not present in the map
 /// receive the default configuration (all expiration policies allowed, no caps).
 #[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq)]
-pub struct UseCases(pub HashMap<UsecaseName, UseCaseConfig>);
+pub struct UseCases(pub HashMap<Usecase, UseCaseConfig>);
 
 impl UseCases {
     /// Validates metadata against the configuration for the given use case.
     ///
     /// Returns an error if any metadata field violates the use case's policy.
     /// Use cases not present in the configuration are always valid.
-    pub fn validate(&self, usecase: &UsecaseName, metadata: &Metadata) -> Result<(), UseCaseError> {
+    pub fn validate(&self, usecase: &Usecase, metadata: &Metadata) -> Result<(), UseCaseError> {
         if let Some(config) = self.0.get(usecase) {
             config.validate(usecase, metadata)?
         }
@@ -56,7 +56,7 @@ impl UseCases {
     /// Returns the maximum allowed expiration duration for the given use case, if configured.
     ///
     /// Applies to both TTL and TTI expiration policies. `None` means no limit.
-    pub fn get_max_expiry(&self, usecase: &UsecaseName) -> Option<Duration> {
+    pub fn get_max_expiry(&self, usecase: &Usecase) -> Option<Duration> {
         self.0.get(usecase).and_then(|config| config.expiration.max)
     }
 }
@@ -70,7 +70,7 @@ pub struct UseCaseConfig {
 }
 
 impl UseCaseConfig {
-    fn validate(&self, usecase: &UsecaseName, metadata: &Metadata) -> Result<(), UseCaseError> {
+    fn validate(&self, usecase: &Usecase, metadata: &Metadata) -> Result<(), UseCaseError> {
         let policy = metadata.expiration_policy;
         let allowed = match policy {
             ExpirationPolicy::Manual => self.expiration.manual.allowed,
@@ -137,7 +137,7 @@ pub enum UseCaseError {
     #[error("expiration policy '{policy}' is not allowed for use case '{usecase}'")]
     PolicyNotAllowed {
         /// The use case name.
-        usecase: UsecaseName,
+        usecase: Usecase,
         /// The disallowed policy, in wire format.
         policy: ExpirationPolicy,
     },
@@ -146,7 +146,7 @@ pub enum UseCaseError {
     #[error("expiration duration {duration} exceeds maximum of {max} for use case '{usecase}'")]
     DurationExceeded {
         /// The use case name.
-        usecase: UsecaseName,
+        usecase: Usecase,
         /// The requested duration, in wire format.
         duration: String,
         /// The configured maximum, in wire format.

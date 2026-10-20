@@ -12,7 +12,7 @@
 //! A usecase (sometimes called a "product") is a top-level namespace like
 //! `"attachments"` or `"debug-files"`. It groups related objects and can have
 //! usecase-specific server configuration (rate limits, killswitches, etc.).
-//! [`UsecaseName`] validates the name when it is constructed or deserialized.
+//! [`Usecase`] validates the name when it is constructed or deserialized.
 //!
 //! ## Scopes
 //!
@@ -37,7 +37,7 @@
 use std::fmt;
 
 use objectstore_types::scope::{Scope, Scopes};
-use objectstore_types::usecase::UsecaseName;
+use objectstore_types::usecase::Usecase;
 
 /// The fixed path segment that separates scopes from the object key in storage paths.
 const KEY_DELIMITER: &str = "objects";
@@ -51,7 +51,7 @@ pub struct ObjectContext {
     ///
     /// This can be defined on-the-fly by the client, but special server logic
     /// (such as the concrete backend/bucket) can be tied to this as well.
-    pub usecase: UsecaseName,
+    pub usecase: Usecase,
 
     /// The scopes of the object, used for compartmentalization and authorization.
     ///
@@ -117,7 +117,7 @@ impl ObjectId {
     }
 
     /// Creates a new `ObjectId` from all of its parts.
-    pub fn from_parts(usecase: UsecaseName, scopes: Scopes, key: String) -> Self {
+    pub fn from_parts(usecase: Usecase, scopes: Scopes, key: String) -> Self {
         Self::new(ObjectContext { usecase, scopes }, key)
     }
 
@@ -147,7 +147,7 @@ impl ObjectId {
     pub fn from_storage_path(path: &str) -> Option<Self> {
         // Split off the usecase (everything before the first `/`).
         let (usecase, mut rest) = path.split_once('/')?;
-        let usecase = UsecaseName::new(usecase).ok()?;
+        let usecase = Usecase::new(usecase).ok()?;
 
         let mut scopes_vec = Vec::new();
         loop {
@@ -191,7 +191,7 @@ impl ObjectId {
     /// Returns the usecase of the object.
     ///
     /// See [`ObjectContext::usecase`] for more information.
-    pub fn usecase(&self) -> &UsecaseName {
+    pub fn usecase(&self) -> &Usecase {
         &self.context.usecase
     }
 

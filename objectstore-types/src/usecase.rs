@@ -22,24 +22,24 @@ pub const MAX_USECASE_NAME_LENGTH: usize = 64;
 /// be mutated after construction.
 ///
 /// ```
-/// use objectstore_types::usecase::UsecaseName;
+/// use objectstore_types::usecase::Usecase;
 ///
-/// let name = UsecaseName::new("debug-files")?;
+/// let name = Usecase::new("debug-files")?;
 /// assert_eq!(name.as_str(), "debug-files");
-/// assert!(UsecaseName::new("testing/org=999/injected").is_err());
+/// assert!(Usecase::new("testing/org=999/injected").is_err());
 /// # Ok::<(), objectstore_types::usecase::InvalidUsecaseName>(())
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
-pub struct UsecaseName(String);
+pub struct Usecase(String);
 
-impl UsecaseName {
+impl Usecase {
     /// Creates a validated usecase name from a borrowed or owned string.
     ///
     /// # Errors
     ///
     /// Returns [`InvalidUsecaseName`] if the name violates the rules on
-    /// [`UsecaseName`].
+    /// [`Usecase`].
     pub fn new(name: impl Into<String>) -> Result<Self, InvalidUsecaseName> {
         let name = name.into();
         if !(MIN_USECASE_NAME_LENGTH..=MAX_USECASE_NAME_LENGTH).contains(&name.len()) {
@@ -59,25 +59,25 @@ impl UsecaseName {
     }
 }
 
-impl AsRef<str> for UsecaseName {
+impl AsRef<str> for Usecase {
     fn as_ref(&self) -> &str {
         self.as_str()
     }
 }
 
-impl Borrow<str> for UsecaseName {
+impl Borrow<str> for Usecase {
     fn borrow(&self) -> &str {
         self.as_str()
     }
 }
 
-impl fmt::Display for UsecaseName {
+impl fmt::Display for Usecase {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
 }
 
-impl FromStr for UsecaseName {
+impl FromStr for Usecase {
     type Err = InvalidUsecaseName;
 
     fn from_str(name: &str) -> Result<Self, Self::Err> {
@@ -85,7 +85,7 @@ impl FromStr for UsecaseName {
     }
 }
 
-impl TryFrom<&str> for UsecaseName {
+impl TryFrom<&str> for Usecase {
     type Error = InvalidUsecaseName;
 
     fn try_from(name: &str) -> Result<Self, Self::Error> {
@@ -93,7 +93,7 @@ impl TryFrom<&str> for UsecaseName {
     }
 }
 
-impl TryFrom<String> for UsecaseName {
+impl TryFrom<String> for Usecase {
     type Error = InvalidUsecaseName;
 
     fn try_from(name: String) -> Result<Self, Self::Error> {
@@ -101,13 +101,13 @@ impl TryFrom<String> for UsecaseName {
     }
 }
 
-impl From<UsecaseName> for String {
-    fn from(name: UsecaseName) -> Self {
+impl From<Usecase> for String {
+    fn from(name: Usecase) -> Self {
         name.0
     }
 }
 
-impl<'de> Deserialize<'de> for UsecaseName {
+impl<'de> Deserialize<'de> for Usecase {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -137,13 +137,10 @@ mod tests {
             "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-",
             "___",
         ] {
-            assert_eq!(UsecaseName::new(name).unwrap().as_str(), name);
+            assert_eq!(Usecase::new(name).unwrap().as_str(), name);
         }
         for name in ["", "_", "ab", &"a".repeat(65)] {
-            assert_eq!(
-                UsecaseName::new(name),
-                Err(InvalidUsecaseName::InvalidLength)
-            );
+            assert_eq!(Usecase::new(name), Err(InvalidUsecaseName::InvalidLength));
         }
         for (name, character) in [
             ("testing/org=999/injected", '/'),
@@ -152,7 +149,7 @@ mod tests {
             ("café", 'é'),
         ] {
             assert_eq!(
-                UsecaseName::new(name),
+                Usecase::new(name),
                 Err(InvalidUsecaseName::InvalidChar(character))
             );
         }
@@ -160,23 +157,20 @@ mod tests {
 
     #[test]
     fn serde_validates_and_uses_strings() {
-        let name = UsecaseName::new("Debug_Files-123").unwrap();
+        let name = Usecase::new("Debug_Files-123").unwrap();
         let serialized = serde_json::to_string(&name).unwrap();
         assert_eq!(serialized, r#""Debug_Files-123""#);
-        assert_eq!(
-            serde_json::from_str::<UsecaseName>(&serialized).unwrap(),
-            name
-        );
-        assert!(serde_json::from_str::<UsecaseName>(r#""_""#).is_err());
+        assert_eq!(serde_json::from_str::<Usecase>(&serialized).unwrap(), name);
+        assert!(serde_json::from_str::<Usecase>(r#""_""#).is_err());
     }
 
     #[test]
     fn string_conversions_preserve_names() {
         let input = "Debug_Files-123";
-        let name: UsecaseName = input.parse().unwrap();
+        let name: Usecase = input.parse().unwrap();
         assert_eq!(name.as_ref(), input);
         assert_eq!(name.to_string(), input);
         let owned = String::from(name);
-        assert_eq!(UsecaseName::try_from(owned).unwrap().as_str(), input);
+        assert_eq!(Usecase::try_from(owned).unwrap().as_str(), input);
     }
 }
