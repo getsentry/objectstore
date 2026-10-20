@@ -7,7 +7,7 @@ from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from importlib.metadata import version
-from io import SEEK_CUR, SEEK_SET, BytesIO
+from io import BytesIO
 from os import PathLike
 from typing import IO, Any, Literal, NamedTuple, cast
 from urllib.parse import urlparse
@@ -519,12 +519,12 @@ class Session:
                 else _resumable.get_size(contents)
             )
 
-        payload_compression = precompressed or compress or self._usecase._compression
+        encoding = precompressed or compress or self._usecase._compression
 
-        should_compress = precompressed is None and payload_compression != "none"
+        compress_with = encoding if precompressed is None else "none"
 
         headers = self._metadata_headers(
-            compression=payload_compression,
+            compression=encoding,
             content_type=content_type,
             metadata=metadata,
             expiration_policy=expiration_policy,
@@ -550,12 +550,12 @@ class Session:
                 with _resumable.prepare_body(
                     contents,
                     source_size,
-                    should_compress,
+                    compress_with != "none",
                     self._spool_dir,
                 ) as prepared:
                     if prepared is None:
                         result_key, source_size, compressed_size = self._put_direct(
-                            contents, key, headers, compress=should_compress
+                            contents, key, headers, compress=compress_with != "none"
                         )
                     else:
                         body, source_size, compressed_size = prepared
@@ -564,7 +564,7 @@ class Session:
                             body,
                             compressed_size,
                             key=key,
-                            compression=payload_compression,
+                            compression=encoding,
                             content_type=content_type,
                             metadata=metadata,
                             expiration_policy=expiration_policy,
@@ -578,17 +578,17 @@ class Session:
                             )
             else:
                 result_key, source_size, compressed_size = self._put_direct(
-                    contents, key, headers, compress=should_compress
+                    contents, key, headers, compress=compress_with != "none"
                 )
 
-            if precompressed is None:
+            if precompressed is None and source_size is not None:
                 metrics.record_uncompressed_size(source_size)
-            if payload_compression != "none":
-                metrics.record_compressed_size(compressed_size, payload_compression)
+            if encoding != "none" and compressed_size is not None:
+                metrics.record_compressed_size(compressed_size, encoding)
 
             # Set after the response, since the key may be server-generated.
             span.set_attribute("objectstore.key", result_key)
-            span.set_attribute("objectstore.compression", payload_compression)
+            span.set_attribute("objectstore.compression", encoding)
             if metrics.uncompressed_size is not None:
                 span.set_attribute(
                     "objectstore.uncompressed_size", metrics.uncompressed_size
@@ -605,21 +605,20 @@ class Session:
         key: str | None,
         headers: dict[str, str],
         compress: bool,
-    ) -> tuple[str, int, int]:
-        """Return the key, source size, and compressed size (equal if uncompressed)."""
+    ) -> tuple[str, int | None, int | None]:
+        """Return the key and final source/body positions when available."""
         with (
             BytesIO(contents) if isinstance(contents, bytes) else nullcontext(contents)
-        ) as source:
-            counter = cast(IO[bytes], _CountingReader(source))
-            body = counter
+        ) as original_body:
+            body = original_body
             retries = None  # by default use the pool's value, set by the Client
             try:
                 if compress:
                     cctx = zstandard.ZstdCompressor()
-                    body = cctx.stream_reader(counter, closefd=False)
+                    body = cctx.stream_reader(original_body, closefd=False)
                     body = cast(IO[bytes], utils._ZstdCompressionReaderWrapper(body))
 
-                if compress or not getattr(source, "seekable", lambda: False)():
+                if compress or not getattr(original_body, "seekable", lambda: False)():
                     # Only connection retries are safe when the body cannot be replayed.
                     retries = urllib3.Retry.from_int(self._pool.retries).new(
                         read=0, status=0, other=0
@@ -637,9 +636,19 @@ class Session:
                 raise_for_status(response)
                 res = response.json()
 
-                return res["key"], counter.tell(), body.tell()
+                # Read positions after streaming, without failing an upload if
+                # the source does not support tell().
+                try:
+                    source_size = original_body.tell()
+                except (AttributeError, OSError, ValueError):
+                    source_size = None
+                try:
+                    compressed_size = body.tell()
+                except (AttributeError, OSError, ValueError):
+                    compressed_size = None
+                return res["key"], source_size, compressed_size
             finally:
-                if body is not counter:
+                if body is not original_body:
                     body.close()
 
     def get(
@@ -1072,32 +1081,3 @@ class Session:
         continue an upload started elsewhere.
         """
         return MultipartUpload(self, key, upload_id)
-
-
-class _CountingReader:
-    """Count bytes for direct uploads, which do not spool their input.
-
-    The source need not support tell(). Positions are relative to the start of
-    this upload. Rewinds requested by urllib3 are translated to relative seeks
-    on the underlying stream.
-    """
-
-    def __init__(self, source: IO[bytes]) -> None:
-        self._source = source
-        self._position = 0
-
-    def read(self, size: int = -1) -> bytes:
-        data = self._source.read(size)
-        self._position += len(data)
-        return data
-
-    def tell(self) -> int:
-        return self._position
-
-    def seek(self, offset: int, whence: int = SEEK_SET) -> int:
-        if whence != SEEK_SET:
-            raise OSError("Only absolute upload positions are supported")
-        if offset != self._position:
-            self._source.seek(offset - self._position, SEEK_CUR)
-            self._position = offset
-        return self._position
