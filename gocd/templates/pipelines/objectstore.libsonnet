@@ -58,6 +58,9 @@ local deploy_canary(region) =
               timeout: 300,
               elastic_profile_id: 'objectstore',
               environment_variables: {
+                // k8s-deploy dispatches deployment workflows using GitHub App credentials.
+                GITHUB_APP_ID: '{{SECRET:[devinfra-github][app_id]}}',
+                GITHUB_APP_PRIVATE_KEY: '{{SECRET:[devinfra-github][private_key]}}',
                 K8S_ENVIRONMENT: 'canary',
               },
               tasks: [
@@ -107,6 +110,11 @@ local deploy_primary(region) = [
         deploy: {
           timeout: 300,
           elastic_profile_id: 'objectstore',
+          environment_variables: {
+            // k8s-deploy dispatches deployment workflows using GitHub App credentials.
+            GITHUB_APP_ID: '{{SECRET:[devinfra-github][app_id]}}',
+            GITHUB_APP_PRIVATE_KEY: '{{SECRET:[devinfra-github][private_key]}}',
+          },
           tasks: [
             gocdtasks.script(importstr '../bash/deploy.sh'),
           ],

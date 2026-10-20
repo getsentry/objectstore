@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::num::NonZeroU64;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use std::{fmt, io};
 
 use futures_util::{StreamExt, TryStreamExt};
@@ -20,11 +20,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::backend::common::{
     self, Backend, DeleteResponse, ExpiryUpdate, GetResponse, MetadataResponse,
-    MultipartUploadBackend, PutResponse, SetExpiryResponse, UPLOAD_SESSION_TTL,
+    MultipartUploadBackend, PutResponse, SetExpiryResponse,
 };
 use crate::backend::extensions::{ReqwestResultExt, ResponseExt, SendTraced};
 use crate::change_stream::{
-    ChangeStream, ChangeStreamFactory, ChangeTarget, CostTrackerStreamConfig, flush_change_stream,
+    ChangeStream, ChangeStreamFactory, CostTrackerStreamConfig, flush_change_stream,
 };
 use crate::error::{Error, ErrorKind, Result, ResultExt as _};
 use crate::gcp_auth::PrefetchingTokenProvider;
@@ -79,6 +79,22 @@ pub struct GcsConfig {
     ///
     /// - `OS__STORAGE__BUCKET=my-gcs-bucket`
     pub bucket: String,
+
+    /// Maximum time TCP data may remain unacknowledged or blocked before failing the request.
+    ///
+    /// This detects stalled transports. It does not limit the total upload duration or the time
+    /// waiting for a response after the upload is acknowledged. Applied on Linux and ignored on
+    /// other platforms. `0s` uses the operating system's default.
+    ///
+    /// # Default
+    ///
+    /// `30s`
+    ///
+    /// # Environment Variables
+    ///
+    /// - `OS__STORAGE__TCP_USER_TIMEOUT=30s`
+    #[serde(default = "common::default_tcp_user_timeout", with = "humantime_serde")]
+    pub tcp_user_timeout: Duration,
 
     /// Reports what this backend stores, for per-usecase cost attribution.
     ///
@@ -515,6 +531,7 @@ impl GcsBackend {
         let GcsConfig {
             endpoint,
             bucket,
+            tcp_user_timeout,
             cogs,
         } = config;
         let change_stream = streams.build(cogs.as_ref());
@@ -528,7 +545,7 @@ impl GcsBackend {
         let endpoint_str = endpoint.as_deref().unwrap_or(DEFAULT_ENDPOINT);
 
         Ok(Self {
-            client: common::reqwest_client(),
+            client: common::reqwest_client(tcp_user_timeout),
             endpoint: endpoint_str
                 .parse()
                 .map_err(|e| anyhow::Error::new(e).context("invalid GCS endpoint URL"))?,
@@ -741,8 +758,8 @@ impl GcsBackend {
         .await
     }
 
-    /// Reports an object write to the [`ChangeStream`].
-    fn report_object_write(
+    /// Reports a committed object write to the [`ChangeStream`].
+    async fn report_object_write(
         &self,
         id: &ObjectId,
         stored_size: Option<u64>,
@@ -752,7 +769,8 @@ impl GcsBackend {
         match stored_size {
             Some(stored_size) => {
                 self.change_stream
-                    .write(id.into(), stored_size + metadata_size, expires_at)
+                    .commit_write(id, stored_size + metadata_size, expires_at)
+                    .await
             }
             None => {
                 objectstore_metrics::count!("change_stream.unreported", reason = "no_stored_size")
@@ -884,6 +902,9 @@ impl Backend for GcsBackend {
         _access_time: Timestamp,
     ) -> Result<PutResponse> {
         objectstore_log::debug!("Writing to GCS backend");
+        self.change_stream
+            .begin_write(id, metadata.time_expires)
+            .await?;
         let gcs_metadata = GcsObject::from_metadata(metadata);
 
         // NB: Ensure the order of these fields and that a content-type is attached to them. Both
@@ -932,7 +953,8 @@ impl Backend for GcsBackend {
             stored_size,
             gcs_metadata.metadata_size(),
             metadata.time_expires,
-        );
+        )
+        .await;
 
         Ok(())
     }
@@ -1096,11 +1118,12 @@ impl Backend for GcsBackend {
             None
         };
 
+        self.change_stream.begin_update(id, Some(expire_at)).await?;
         let outcome = self
             .update_custom_time(object_url, expire_at, object.generations(), metadata)
             .await?;
         if matches!(outcome, SetExpiryResponse::Satisfied(_)) {
-            self.change_stream.update(id.into(), Some(expire_at));
+            self.change_stream.commit_update(id, Some(expire_at)).await;
         }
 
         Ok(outcome)
@@ -1140,7 +1163,7 @@ impl Backend for GcsBackend {
             .await?;
 
         if deleted {
-            self.change_stream.delete(id.into());
+            self.change_stream.commit_delete(id).await;
         }
 
         Ok(())
@@ -1154,10 +1177,11 @@ impl Backend for GcsBackend {
         upload_length: NonZeroU64,
     ) -> Result<Option<BackendToken>> {
         objectstore_log::debug!("Creating resumable upload session on GCS backend");
+        self.change_stream
+            .begin_write(id, metadata.time_expires)
+            .await?;
         let url = self.upload_url(id, "resumable")?;
-        let gcs_metadata = GcsObject::from_metadata(metadata);
-        let metadata_size = gcs_metadata.metadata_size();
-        let metadata_json = serde_json::to_vec(&gcs_metadata).context(
+        let metadata_json = serde_json::to_vec(&GcsObject::from_metadata(metadata)).context(
             ErrorKind::Internal,
             "serializing GCS resumable upload metadata",
         )?;
@@ -1213,16 +1237,7 @@ impl Backend for GcsBackend {
                 "invalid Location URL in GCS resumable upload creation response",
             )
         })?;
-        let token = String::from(session_uri);
-        self.change_stream.write(
-            ChangeTarget::Session {
-                object_id: id,
-                session_id: &token,
-            },
-            upload_length.get().saturating_add(metadata_size),
-            Some(Timestamp::now() + UPLOAD_SESSION_TTL),
-        );
-        Ok(Some(token))
+        Ok(Some(session_uri.into()))
     }
 
     #[tracing::instrument(level = "debug", fields(?session, offset, content_length), skip_all)]
@@ -1280,8 +1295,8 @@ impl Backend for GcsBackend {
                 stored_size,
                 object.metadata_size(),
                 expires_at,
-            );
-            self.change_stream.delete(session.into());
+            )
+            .await;
         }
         Ok(progress.into())
     }
@@ -1296,6 +1311,7 @@ impl Backend for GcsBackend {
             let response = self
                 .request(Method::PUT, session_uri.as_str())
                 .await?
+                .header(header::CONTENT_LENGTH, 0)
                 .header(
                     header::CONTENT_RANGE,
                     format!("bytes */{}", session.upload_length),
@@ -1316,8 +1332,8 @@ impl Backend for GcsBackend {
                     stored_size,
                     object.metadata_size(),
                     expires_at,
-                );
-                self.change_stream.delete(session.into());
+                )
+                .await;
             }
             Ok(progress.into())
         })
@@ -1335,6 +1351,7 @@ impl Backend for GcsBackend {
                 let response = self
                     .request(Method::DELETE, session_uri)
                     .await?
+                    .header(header::CONTENT_LENGTH, 0)
                     .send_traced()
                     .await
                     .reqwest_context("canceling a GCS resumable upload")?;
@@ -1363,9 +1380,7 @@ impl Backend for GcsBackend {
                 }
             }
         })
-        .await?;
-        self.change_stream.delete(session.into());
-        Ok(())
+        .await
     }
 
     async fn join(&self) {
@@ -1489,6 +1504,9 @@ impl MultipartUploadBackend for GcsBackend {
         metadata: &Metadata,
     ) -> Result<InitiateMultipartResponse> {
         objectstore_log::debug!("Initiating multipart upload on GCS backend");
+        self.change_stream
+            .begin_write(id, metadata.time_expires)
+            .await?;
         let mut url = self.xml_object_url(id)?;
         url.set_query(Some("uploads"));
 
@@ -1671,7 +1689,7 @@ impl MultipartUploadBackend for GcsBackend {
         id: &ObjectId,
         upload_id: &UploadId,
         parts: Vec<CompletedPart>,
-        _access_time: Timestamp,
+        access_time: Timestamp,
     ) -> Result<CompleteMultipartResponse> {
         objectstore_log::debug!("Completing multipart upload on GCS backend");
         let mut url = self.xml_object_url(id)?;
@@ -1709,6 +1727,27 @@ impl MultipartUploadBackend for GcsBackend {
                 let error = quick_xml::de::from_reader::<_, XmlError>(body.as_ref())
                     .ok()
                     .map(Into::into);
+
+                if error.is_none() {
+                    // The XML API does not return the stored object, so read it back.
+                    let object = self
+                        .get_gcs_metadata(&self.object_url(id)?, access_time)
+                        .await
+                        .ok()
+                        .flatten();
+                    let stored_size = object
+                        .as_ref()
+                        .and_then(|object| object.size.as_deref()?.parse().ok());
+                    self.report_object_write(
+                        id,
+                        stored_size,
+                        object.as_ref().map_or(0, GcsObject::metadata_size),
+                        object.and_then(|object| {
+                            object.custom_time.map(Rfc3339Timestamp::into_inner)
+                        }),
+                    )
+                    .await;
+                }
 
                 Ok(error)
             }
@@ -1828,6 +1867,7 @@ mod tests {
         GcsConfig {
             endpoint: Some("http://localhost:8087".into()),
             bucket: "test-bucket".into(),
+            tcp_user_timeout: Duration::from_secs(30),
             cogs: None,
         }
     }
@@ -1912,6 +1952,7 @@ mod tests {
             GcsConfig {
                 endpoint: Some(endpoint),
                 bucket: "bucket".into(),
+                tcp_user_timeout: Duration::from_secs(30),
                 cogs: None,
             },
             &ChangeStreamFactory::default(),
@@ -3252,35 +3293,57 @@ mod tests {
 
     #[cfg(feature = "storage-cogs")]
     #[tokio::test]
+    async fn multipart_completion_reports_to_change_stream() -> Result<()> {
+        let (backend, producer) = create_test_backend_with_change_stream().await?;
+        let id = make_id();
+        let payload = b"multipart payload".to_vec();
+        let metadata = Metadata {
+            time_expires: Some(Timestamp::now() + Duration::from_secs(3600)),
+            ..Default::default()
+        };
+        let upload_id = backend.initiate_multipart(&id, &metadata).await?;
+        let etag = backend
+            .upload_part(
+                &id,
+                &upload_id,
+                NonZeroU32::new(1).unwrap(),
+                payload.len() as u64,
+                None,
+                stream::single(payload.clone()),
+            )
+            .await?;
+        let part = CompletedPart {
+            part_number: NonZeroU32::new(1).unwrap(),
+            etag,
+        };
+        backend
+            .complete_multipart(&id, &upload_id, vec![part], Timestamp::now())
+            .await?;
+
+        let records = producer.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].op_type, OpType::Write);
+        assert_eq!(
+            records[0].size,
+            Some(payload.len() as u64 + GcsObject::from_metadata(&metadata).metadata_size())
+        );
+        assert!(records[0].expiration_time.is_some());
+        Ok(())
+    }
+
+    #[cfg(feature = "storage-cogs")]
+    #[tokio::test]
     async fn resumable_completion_reports_to_change_stream() -> Result<()> {
         let (backend, producer) = create_test_backend_with_change_stream().await?;
         let id = make_id();
         let payload = b"resumable payload".to_vec();
         let metadata = Metadata {
             time_expires: Some(Timestamp::now() + Duration::from_secs(3600)),
-            filename: Some("upload.txt".into()),
-            custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
             ..Default::default()
         };
-        let before = Timestamp::now();
         let token = backend
             .create_upload_session(&id, &metadata, nonzero(payload.len() as u64))
             .await?;
-
-        let created = producer.records();
-        assert_eq!(created.len(), 1);
-        assert_eq!(
-            created[0].size,
-            Some(payload.len() as u64 + GcsObject::from_metadata(&metadata).metadata_size())
-        );
-        let expiration = created[0].expiration_time.unwrap() as u64;
-        assert!(
-            ((before + UPLOAD_SESSION_TTL).as_micros()
-                ..=(Timestamp::now() + UPLOAD_SESSION_TTL).as_micros())
-                .contains(&expiration)
-        );
-        backend.upload_offset(&token).await?;
-        assert_eq!(producer.records().len(), 1);
 
         assert_eq!(
             backend
@@ -3295,33 +3358,13 @@ mod tests {
         );
 
         let records = producer.records();
-        assert_eq!(records.len(), 3);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].op_type, OpType::Write);
         assert_eq!(
-            records.iter().map(|r| r.op_type).collect::<Vec<_>>(),
-            [OpType::WriteSession, OpType::Write, OpType::DeleteSession]
-        );
-        assert_eq!(records[0].record_id, records[2].record_id);
-        assert_ne!(records[0].record_id, records[1].record_id);
-        assert_eq!(records[0].size, records[1].size);
-        assert_eq!(
-            records[1].size,
+            records[0].size,
             Some(payload.len() as u64 + GcsObject::from_metadata(&metadata).metadata_size())
         );
-        assert_eq!(
-            records[1].expiration_time,
-            metadata.time_expires.map(|t| t.as_micros() as i64)
-        );
-        producer.clear();
-        let canceled = backend
-            .create_upload_session(&id, &metadata, nonzero(10))
-            .await?;
-        backend.cancel_upload(&canceled).await?;
-        backend.cancel_upload(&canceled).await?;
-        let records = producer.records();
-        assert_eq!(records.len(), 3);
-        assert_eq!(records[1].op_type, OpType::DeleteSession);
-        assert_eq!(records[2].op_type, OpType::DeleteSession);
-        assert!(records.iter().all(|r| r.record_id == records[0].record_id));
+        assert!(records[0].expiration_time.is_some());
         Ok(())
     }
 
@@ -3359,15 +3402,10 @@ mod tests {
         );
 
         let records = producer.records();
-        assert_eq!(records.len(), 3);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].op_type, OpType::Write);
         assert_eq!(
-            records.iter().map(|r| r.op_type).collect::<Vec<_>>(),
-            [OpType::WriteSession, OpType::Write, OpType::DeleteSession]
-        );
-        assert_eq!(records[0].record_id, records[2].record_id);
-        assert_ne!(records[0].record_id, records[1].record_id);
-        assert_eq!(
-            records[1].size,
+            records[0].size,
             Some(payload.len() as u64 + GcsObject::from_metadata(&metadata).metadata_size())
         );
         Ok(())

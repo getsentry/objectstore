@@ -168,7 +168,7 @@ class Client:
 
         connection_kwargs_to_use = asdict(_ConnectionDefaults())
 
-        if retries:
+        if retries is not None:
             connection_kwargs_to_use["retries"] = urllib3.Retry(
                 connect=retries,
                 # we only retry connection problems, as we cannot rewind our

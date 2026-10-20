@@ -165,10 +165,7 @@ mod tests {
                     assert!(String::from_utf8_lossy(&body).contains("404 Not Found"));
                 })
             },
-            sentry::ClientOptions {
-                traces_sample_rate: 1.0,
-                ..Default::default()
-            },
+            sentry::ClientOptions::new().traces_sample_rate(1.0),
         );
         let transactions: Vec<_> = envelopes
             .iter()

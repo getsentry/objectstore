@@ -25,9 +25,6 @@ use crate::stream::{ClientStream, PayloadStream};
 /// This intentionally has a "sentry" prefix so that it can easily be traced back to us.
 pub const USER_AGENT: &str = concat!("sentry-objectstore/", env!("CARGO_PKG_VERSION"));
 
-/// Lifetime for a resumable upload session.
-pub(crate) const UPLOAD_SESSION_TTL: Duration = Duration::from_hours(7 * 24);
-
 /// Backend response for put operations.
 pub type PutResponse = ();
 /// Backend response for get operations.
@@ -408,6 +405,8 @@ pub trait HighVolumeBackend: Backend {
     ///
     /// `revision` is the upload's unique LT revision. The fixed deadline is independent
     /// of object expiration and must not be refreshed by subsequent requests.
+    /// The high-volume backend reports the marker through its change stream using
+    /// `revision` as the identity, the marker's stored size, and `time_expires`.
     async fn create_upload_marker(
         &self,
         revision: &ObjectId,
@@ -421,6 +420,7 @@ pub trait HighVolumeBackend: Backend {
     ///
     /// Returns `true` only when this call deletes a live marker.
     /// Missing and expired markers return `false`, including on a repeated deletion.
+    /// A successful deletion is reported through the change stream using `revision`.
     async fn delete_upload_marker(
         &self,
         revision: &ObjectId,
@@ -607,19 +607,31 @@ pub enum TieredUpdate {
 ///
 /// Automatic decompression is disabled because backends store pre-compressed
 /// payloads and manage `Content-Encoding` themselves.
-pub(super) fn reqwest_client() -> reqwest::Client {
-    reqwest::Client::builder()
+pub(super) fn reqwest_client(tcp_user_timeout: Duration) -> reqwest::Client {
+    let builder = reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .hickory_dns(true)
         .http1_only()
         .no_zstd()
         .no_brotli()
         .no_gzip()
-        .no_deflate()
+        .no_deflate();
+
+    #[cfg(target_os = "linux")]
+    let builder = builder.tcp_user_timeout(tcp_user_timeout);
+    #[cfg(not(target_os = "linux"))]
+    let _ = tcp_user_timeout;
+
+    builder
         .build()
         // INVARIANT: Building fails only if the TLS backend cannot be initialized, which
         // is checked at startup when the rustls crypto provider is installed.
         .expect("failed to build backend HTTP client")
+}
+
+/// Matches reqwest's default TCP user timeout on supported platforms.
+pub(super) fn default_tcp_user_timeout() -> Duration {
+    Duration::from_secs(30)
 }
 
 #[cfg(test)]

@@ -10,6 +10,9 @@ use std::error::Error as StdError;
 use std::fmt;
 
 use objectstore_log::Level;
+
+use crate::change_stream::ChangeStreamError;
+
 /// A panic captured from a service task.
 #[derive(Debug)]
 pub struct Panic {
@@ -59,6 +62,8 @@ pub enum ErrorKind {
     },
     /// A resumable upload session expired or was canceled.
     UploadSessionGone,
+    /// A resumable upload session token could not be decrypted or authenticated.
+    InvalidUploadSessionToken,
     /// The backend does not recognize a resumable upload session.
     UnknownUploadSession,
     /// A resumable chunk would exceed the total upload length.
@@ -112,6 +117,9 @@ impl fmt::Display for ErrorKind {
                 write!(f, "upload offset mismatch (server holds {offset} bytes)")
             }
             Self::UploadSessionGone => f.write_str("upload session gone"),
+            Self::InvalidUploadSessionToken => {
+                f.write_str("invalid upload session token: could not decrypt or authenticate it")
+            }
             Self::UnknownUploadSession => f.write_str("unknown upload session"),
             Self::ChunkExceedsUploadLength {
                 offset,
@@ -204,6 +212,7 @@ impl Error {
             ErrorKind::RangeNotSatisfiable { .. } => Level::DEBUG,
             ErrorKind::UploadOffsetMismatch { .. } => Level::DEBUG,
             ErrorKind::UploadSessionGone => Level::DEBUG,
+            ErrorKind::InvalidUploadSessionToken => Level::DEBUG,
             ErrorKind::UnknownUploadSession => Level::DEBUG,
             ErrorKind::ChunkExceedsUploadLength { .. } => Level::DEBUG,
             ErrorKind::ChunkTooSmall { .. } => Level::DEBUG,
@@ -308,6 +317,17 @@ where
 
     fn kind(self, kind: ErrorKind) -> Result<T> {
         self.map_err(|source| Error::with_source(kind, source))
+    }
+}
+
+impl From<ChangeStreamError> for Error {
+    fn from(source: ChangeStreamError) -> Self {
+        let kind = match source {
+            ChangeStreamError::Unavailable(_) => ErrorKind::BackendUnavailable,
+            ChangeStreamError::Timeout(_) => ErrorKind::BackendTimeout,
+            ChangeStreamError::Failure(_) => ErrorKind::BackendFailure,
+        };
+        Self::with_context(kind, "writing to the change stream", source)
     }
 }
 

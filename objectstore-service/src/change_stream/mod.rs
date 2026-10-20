@@ -16,7 +16,6 @@ use serde::{Deserialize, Serialize};
 use objectstore_types::time::Timestamp;
 
 use crate::id::ObjectId;
-use crate::resumable::Session;
 
 #[cfg(feature = "storage-cogs")]
 mod cost_tracker;
@@ -33,38 +32,6 @@ pub(crate) use factory::dummy_factory;
 
 /// How long a backend waits for reported records to be handed off during shutdown.
 pub const FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// The object or upload session whose storage changed.
-///
-/// Session identities are separate from objects, including concurrent uploads to the same object.
-/// Upload backends use their opaque backend token as `session_id`.
-#[derive(Clone, Copy, Debug)]
-pub enum ChangeTarget<'a> {
-    /// An object stored by a backend.
-    Object(&'a ObjectId),
-    /// An in-progress upload, identified by its backend session token.
-    Session {
-        /// Object identity supplying the usecase and scopes.
-        object_id: &'a ObjectId,
-        /// Stable identity for this particular upload.
-        session_id: &'a str,
-    },
-}
-
-impl<'a> From<&'a ObjectId> for ChangeTarget<'a> {
-    fn from(id: &'a ObjectId) -> Self {
-        Self::Object(id)
-    }
-}
-
-impl<'a> From<&'a Session> for ChangeTarget<'a> {
-    fn from(session: &'a Session) -> Self {
-        Self::Session {
-            object_id: &session.object_id,
-            session_id: &session.backend_token,
-        }
-    }
-}
 
 /// Scope key holding the Sentry organization ID.
 #[cfg(feature = "storage-cogs")]
@@ -108,19 +75,57 @@ fn default_sample_rate() -> f64 {
     1.0
 }
 
-/// Publishes the changes a single backend makes to its objects and upload sessions.
+/// Publishes the changes a single backend makes to the objects it stores.
+///
+/// Backends call `begin_*` before a storage operation that creates data or extends its
+/// lifetime, and `commit_*` after a storage operation succeeds. A failed `begin_*` fails
+/// the request before storage is touched. A `begin_*` is not always followed by a
+/// `commit_*` (e.g. when the storage operation fails), so consumers that must never
+/// underestimate what is stored should treat `begin_*` as an upper bound.
+///
+/// All methods but [`join`](Self::join) default to doing nothing. Backends await them
+/// on the request path, so they add to request latency.
+///
+/// Consider spawning and independent task or using a queue in your implementation of the
+/// methods if you only need best-effort delivery.
 ///
 /// See [module docs](self).
 #[async_trait::async_trait]
 pub trait ChangeStream: fmt::Debug + Send + Sync + 'static {
-    /// Reports that `target` now occupies `size` bytes. Used for new writes and overwrites.
-    fn write(&self, target: ChangeTarget<'_>, size: u64, expires_at: Option<Timestamp>);
+    /// Announces that `id` is about to be written. Used for new writes and overwrites.
+    async fn begin_write(
+        &self,
+        id: &ObjectId,
+        expires_at: Option<Timestamp>,
+    ) -> Result<(), ChangeStreamError> {
+        let _ = (id, expires_at);
+        Ok(())
+    }
 
-    /// Reports that `target`'s expiration moved, with its stored size unchanged.
-    fn update(&self, target: ChangeTarget<'_>, expires_at: Option<Timestamp>);
+    /// Reports that `id` now occupies `size` bytes. Used for new writes and overwrites.
+    async fn commit_write(&self, id: &ObjectId, size: u64, expires_at: Option<Timestamp>) {
+        let _ = (id, size, expires_at);
+    }
 
-    /// Reports that `target` was deleted explicitly. Does not account for automatic GC.
-    fn delete(&self, target: ChangeTarget<'_>);
+    /// Announces that `id`'s expiration is about to move out to `expires_at`.
+    async fn begin_update(
+        &self,
+        id: &ObjectId,
+        expires_at: Option<Timestamp>,
+    ) -> Result<(), ChangeStreamError> {
+        let _ = (id, expires_at);
+        Ok(())
+    }
+
+    /// Reports that `id`'s expiration moved, with its stored size unchanged.
+    async fn commit_update(&self, id: &ObjectId, expires_at: Option<Timestamp>) {
+        let _ = (id, expires_at);
+    }
+
+    /// Reports that `id` was deleted explicitly. Does not account for automatic GC.
+    async fn commit_delete(&self, id: &ObjectId) {
+        let _ = id;
+    }
 
     /// Blocks until reported records have been delivered, or `timeout` elapses.
     ///
@@ -130,6 +135,30 @@ pub trait ChangeStream: fmt::Debug + Send + Sync + 'static {
     /// Awaited from [`Backend::join`](crate::backend::common::Backend::join) so records
     /// reported just before shutdown are not lost.
     async fn join(&self, timeout: Duration);
+}
+
+/// Why a [`ChangeStream`] could not begin a change.
+///
+/// The variant determines the [`ErrorKind`](crate::error::ErrorKind) of the failed
+/// request. The source carries the details and can be a plain message:
+///
+/// ```
+/// use objectstore_service::change_stream::ChangeStreamError;
+///
+/// let error = ChangeStreamError::Failure("constraint violated".into());
+/// assert_eq!(error.to_string(), "change stream failed");
+/// ```
+#[derive(Debug, thiserror::Error)]
+pub enum ChangeStreamError {
+    /// The sink is temporarily unavailable.
+    #[error("change stream unavailable")]
+    Unavailable(#[source] Box<dyn std::error::Error + Send + Sync>),
+    /// The sink did not respond in time.
+    #[error("change stream timed out")]
+    Timeout(#[source] Box<dyn std::error::Error + Send + Sync>),
+    /// Any other failure.
+    #[error("change stream failed")]
+    Failure(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// Drains `change_stream`, bounded by [`FLUSH_TIMEOUT`].
@@ -146,12 +175,6 @@ pub struct NoopStream;
 
 #[async_trait::async_trait]
 impl ChangeStream for NoopStream {
-    fn write(&self, _target: ChangeTarget<'_>, _size: u64, _expires_at: Option<Timestamp>) {}
-
-    fn update(&self, _target: ChangeTarget<'_>, _expires_at: Option<Timestamp>) {}
-
-    fn delete(&self, _target: ChangeTarget<'_>) {}
-
     async fn join(&self, _timeout: Duration) {}
 }
 

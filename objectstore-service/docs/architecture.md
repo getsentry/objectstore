@@ -5,7 +5,7 @@ the `objectstore-server`.
 
 # Cargo features
 
-- `storage-cogs`: support for publishing object and upload-session change streams to Kafka for
+- `storage-cogs`: support for publishing per-object change streams to Kafka for
   storage cost attribution. Off by default; it adds a build step to compile
   `librdkafka` and requires toolchain components we don't otherwise need. Local
   and sandbox builds don't have a Kafka topic/consumer anyway.
@@ -148,17 +148,17 @@ rate-limiting failures at a higher layer) are not counted.
 This is gated behind the `storage-cogs` Cargo feature.
 
 Each backend reports every write/overwrite, applied expiry extension, and delete
-it performs on stored objects and upload sessions to a [`ChangeStream`](change_stream::ChangeStream)
+it performs on stored objects to a [`ChangeStream`](change_stream::ChangeStream)
 (see [the change stream section](#change-streams)). To turn this change stream
 into COGS data, a stream consumer has to merge each change event into an
-external table to update a storage inventory. The inventory table can be
+external table to update an inventory of objects. The inventory table can be
 queried to break down each backend's storage utilization by `app_feature`. To
 enable storage COGS, enable the `storage-cogs` Cargo feature and provide a
 [`CostTrackerConfig`](change_stream::CostTrackerConfig) for service-wide sink
 connection details and a [`CostTrackerStreamConfig`](change_stream::CostTrackerStreamConfig)
 for per-backend information.
 
-Each row in the inventory table has an anonymized hash of its change target identity as well
+Each row in the inventory table has an anonymized hash of an `ObjectId` as well
 as the row's size, expiry, Sentry org/project, `app_feature`, and relevant
 backend. When using [`TieredStorage`](backend::tiered::TieredStorage)'s
 long-term backend the inventory table will contain _two rows_ for an object: a
@@ -166,17 +166,14 @@ row for the actual object and its size in long-term backend, and a separate row
 for the tombstone and the tombstone's size in the high-volume backend.
 
 Because the change stream does not observe automatic garbage collection, expired
-records must be filtered out when querying the inventory table.
+objects must be filtered out when querying the inventory table.
 
 Under the hood, [`CostTrackerStream`](change_stream::CostTrackerStream) uses
 [`InventoryTracker`](objectstore_inventory_tracker::InventoryTracker) to publish
 change events; it is generic over the transport rather than tied to Kafka. Each
 backend has its own sampling rate to lessen the load put on the stream
-processor. For an unchanged backend sample rate, sampling decisions are consistent for
-each target identity: sessions have
-separate identities from published objects and other sessions for the same object.
-See [`CostTrackerStream`](change_stream::CostTrackerStream) for identity details.
-Each change event includes the sampling rate that was in
+processor. Sampling decisions are made
+based on [`ObjectId`](id::ObjectId). Each change event includes the sampling rate that was in
 effect at the time so that consumers can smooth over the effects of changing the
 sampling rate. When aggregating, divide each row's value by its `sample_rate`.
 
@@ -184,27 +181,33 @@ See also: [`objectstore_inventory_tracker`] documentation.
 
 # Change Streams
 
-Every backend publishes the changes it makes to the objects and upload sessions it stores as a
-[`ChangeStream`](change_stream::ChangeStream). It is a fire-and-forget,
-per-backend feed of three operations:
+Every backend publishes the changes it makes to the objects it stores as a
+[`ChangeStream`](change_stream::ChangeStream). It is a per-backend feed of
+three operations:
 
-- `write(target, size, expires_at)`: `target` now occupies `size` bytes. Used for both
+- `write(id, size, expires_at)`: `id` now occupies `size` bytes. Used for both
   new objects and overwrites.
-- `update(target, expires_at)`: `target`'s expiration moved while its stored size is
+- `update(id, expires_at)`: `id`'s expiration moved while its stored size is
   unchanged. In practice this is a TTI bump.
-- `delete(target)`: `target` was deleted explicitly.
+- `delete(id)`: `id` was deleted explicitly.
 
-[`ChangeTarget`](change_stream::ChangeTarget) identifies an object or an upload session.
+Writes and updates are reported twice: `begin_*` before the storage operation
+and `commit_*` after it succeeds. Deletes are only committed. A failed
+`begin_*` fails the request before storage is touched, while `commit_*` cannot
+fail. Resumable and multipart uploads call `begin_write` when they are created.
+A `begin_*` is not always followed by a `commit_*`, so `begin_*` gives an upper
+bound on what is stored, e.g. for cleaning up expired data.
 
 The stream describes physical storage per backend. When using
 [`TieredStorage`](backend::tiered::TieredStorage), objects that are stored in
 long-term storage will emit a change record for the actual object in long-term
 storage as well as for the tombstone record in high-volume storage.
+Resumable uploads also emit write and delete records for their temporary
+high-volume upload markers, identified by the upload's unique revision and
+expiring at the marker's fixed deadline.
 
-For objects, `size` is a count of bytes that the backend actually stores.
-This includes object payloads, metadata, and sometimes backend-specific overhead.
-For upload sessions, `size` is the final `size` of the corresponding `object` that
-the upload will create when the upload is finalized.
+`size` is a count of bytes that the backend actually stores for an object. This
+includes object payloads, metadata, and sometimes backend-specific overhead.
 
 Decorators such as [`CountingBackend`](backend::counting::CountingBackend) and
 [`TieredStorage`](backend::tiered::TieredStorage) don't publish change streams
