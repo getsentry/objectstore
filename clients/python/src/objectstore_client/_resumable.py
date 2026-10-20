@@ -166,8 +166,8 @@ class ResumableUpload:
         headers["Upload-Offset"] = str(offset)
         headers["Content-Length"] = str(length)
         # Disable pool retries that replay the body. The resumable upload loop
-        # uses the Usecase's recovery policy and probes the persisted offset
-        # before resending data; connection retries retain the pool's policy.
+        # probes the persisted offset before resending data; connection retries
+        # retain the pool's policy.
         retries = urllib3.Retry.from_int(session._pool.retries).new(
             read=0, status=0, other=0, raise_on_status=False
         )
@@ -314,7 +314,6 @@ def upload(
     origin: str | None = None,
     filename: str | None = None,
 ) -> str | None:
-    policy = session._usecase._resumable_retries
     start = body.tell()
     try:
         handle = session._create_upload(
@@ -342,13 +341,20 @@ def upload(
                     result = handle.progress()
                 else:
                     body.seek(start + offset)
-                    result = handle.put(offset, (body, compressed_size - offset))
-            except UploadOffsetMismatch as error:
-                result = UploadIncomplete(error.offset)
+                    try:
+                        result = handle.put(offset, (body, compressed_size - offset))
+                    except UploadOffsetMismatch as error:
+                        result = UploadIncomplete(error.offset)
+                if (
+                    isinstance(result, UploadIncomplete)
+                    and result.offset == offset
+                    and not probe
+                ):
+                    raise urllib3.exceptions.ProtocolError("Upload made no progress")
             except Exception as error:
-                if not is_transient(error) or retries >= policy.retries:
+                if not is_transient(error) or retries >= 2:
                     raise
-                time.sleep(policy.delay * 2**retries + random.uniform(0, policy.jitter))
+                time.sleep(2 * 2**retries + random.uniform(0, 1))
                 retries += 1
                 probe = True
                 continue
@@ -357,8 +363,8 @@ def upload(
                 return handle.key
             if not offset <= result.offset <= compressed_size:
                 raise ValueError("Invalid upload offset")
-            if result.offset == offset and not probe:
-                raise ValueError("Upload made no progress")
+            if result.offset > offset:
+                retries = 0
             offset = result.offset
             probe = False
     except Exception as error:

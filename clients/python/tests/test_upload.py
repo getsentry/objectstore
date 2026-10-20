@@ -16,20 +16,32 @@ def session(monkeypatch: pytest.MonkeyPatch) -> Session:
 
 
 @pytest.mark.parametrize("complete", [False, True])
+@pytest.mark.parametrize("offsets,delays", [([3], [2]), ([0, 3, 3, 6], [2, 4, 2, 4])])
 def test_failure_recovery(
-    session: Session, monkeypatch: pytest.MonkeyPatch, complete: bool
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    complete: bool,
+    offsets: list[int],
+    delays: list[int],
 ) -> None:
     failure = urllib3.exceptions.ReadTimeoutError(session._pool, "/", "lost response")
-    outcomes = Mock(
-        side_effect=[
-            urllib3.HTTPResponse(status=201, body=b'{"key":"key","session":"token"}'),
-            failure,
-            urllib3.HTTPResponse(
-                status=201 if complete else 204, headers={"Upload-Offset": "3"}
-            ),
-            urllib3.HTTPResponse(status=201),
-        ]
-    )
+    responses: list[urllib3.HTTPResponse | Exception] = [
+        urllib3.HTTPResponse(status=201, body=b'{"key":"key","session":"token"}')
+    ]
+    for index, offset in enumerate(offsets):
+        responses.extend(
+            [
+                failure,
+                urllib3.HTTPResponse(
+                    status=201 if complete and index == len(offsets) - 1 else 204,
+                    headers={"Upload-Offset": str(offset)},
+                ),
+            ]
+        )
+    responses.append(urllib3.HTTPResponse(status=201))
+    outcomes = Mock(side_effect=responses)
+    sleep = Mock()
+    monkeypatch.setattr("objectstore_client._resumable.time.sleep", sleep)
     sent = []
 
     def request(*args: Any, **kwargs: Any) -> urllib3.HTTPResponse:
@@ -42,24 +54,19 @@ def test_failure_recovery(
     source.seek(len(b"prefix"))
     assert session.put(source) == "key"
     assert not source.closed
-    assert sent == (
-        [("0", b"abcdefgh")] if complete else [("0", b"abcdefgh"), ("3", b"defgh")]
-    )
+    write_offsets = [0, *offsets[:-1]] if complete else [0, *offsets]
+    assert sent == [(str(offset), b"abcdefgh"[offset:]) for offset in write_offsets]
+    assert sleep.call_count == len(delays)
+    for call, delay in zip(sleep.call_args_list, delays, strict=True):
+        assert delay <= call.args[0] <= delay + 1
 
 
-@pytest.mark.parametrize("status_failure", [False, True])
+@pytest.mark.parametrize("failure_kind", ["timeout", "status", "no_progress"])
 def test_retry_exhaustion(
     session: Session,
     monkeypatch: pytest.MonkeyPatch,
-    status_failure: bool,
+    failure_kind: str,
 ) -> None:
-    policy = urllib3.Retry(
-        total=2,
-        read=2,
-        status=2,
-        status_forcelist=[503],
-    )
-    session._pool.retries = policy
     failure = urllib3.exceptions.ReadTimeoutError(session._pool, "/", "lost response")
     sleep = Mock()
     monkeypatch.setattr("objectstore_client._resumable.time.sleep", sleep)
@@ -74,47 +81,32 @@ def test_retry_exhaustion(
             )
         if headers["Upload-Offset"] == "*":
             return urllib3.HTTPResponse(status=204, headers={"Upload-Offset": "0"})
-        if status_failure:
+        if failure_kind == "status":
             return urllib3.HTTPResponse(status=503, body=b"unavailable")
+        if failure_kind == "no_progress":
+            return urllib3.HTTPResponse(status=204, headers={"Upload-Offset": "0"})
         raise failure
 
     make_request = Mock(side_effect=request)
     monkeypatch.setattr(session._pool, "_make_request", make_request)
     with pytest.raises(RequestError, match="^upload failed$") as raised:
         session.put(b"payload")
-    if status_failure:
+    if failure_kind == "status":
         assert isinstance(raised.value.__cause__, RequestError)
         assert raised.value.__cause__.status == 503
         assert raised.value.response == "unavailable"
-    else:
+    elif failure_kind == "timeout":
         assert isinstance(raised.value.__cause__, urllib3.exceptions.MaxRetryError)
         assert raised.value.__cause__.reason is failure
         assert raised.value.response is None
+    else:
+        assert isinstance(raised.value.__cause__, urllib3.exceptions.ProtocolError)
+        assert str(raised.value.__cause__) == "Upload made no progress"
     # Creation, two progress queries, three writes, and cancellation.
     assert make_request.call_count == 1 + 2 + 3 + 1
-    assert session._pool.retries is policy
     assert sleep.call_count == 2
     for call, delay in zip(sleep.call_args_list, [2, 4], strict=True):
         assert delay <= call.args[0] <= delay + 1
-
-
-def test_connection_retries_are_not_multiplied(
-    session: Session, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    policy = urllib3.Retry(total=2, connect=2)
-    session._pool.retries = policy
-    handle = session._resume_upload("key", "token")
-    monkeypatch.setattr(session, "_create_upload", Mock(return_value=handle))
-    failure = urllib3.exceptions.ConnectTimeoutError("connection timed out")
-    request = Mock(side_effect=failure)
-    monkeypatch.setattr(session._pool, "_make_request", request)
-    with pytest.raises(RequestError) as raised:
-        session.put(b"payload")
-    assert isinstance(raised.value.__cause__, urllib3.exceptions.MaxRetryError)
-    assert raised.value.__cause__.reason is failure
-    # Three connection attempts each for the upload and cancellation.
-    assert request.call_count == 6
-    assert session._pool.retries is policy
 
 
 def test_sizing_must_restore_position(

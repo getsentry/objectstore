@@ -57,30 +57,6 @@ class GetResponse(NamedTuple):
     payload: IO[bytes]
 
 
-@dataclass(frozen=True)
-class ResumableRetryPolicy:
-    """Recovery limits for one resumable upload, including progress queries.
-
-    ``retries`` counts recovery retries across the upload; zero disables resumable
-    uploads.
-
-    ``delay`` is the initial backoff in seconds, doubling on each retry.
-
-    ``jitter`` is the maximum random delay added in seconds.
-
-    These limits are separate from the pool's per-request retries; retryable
-    failures are determined internally.
-    """
-
-    retries: int = 2
-    delay: float = 2.0
-    jitter: float = 1.0
-
-    def __post_init__(self) -> None:
-        if self.retries < 0 or self.delay < 0 or self.jitter < 0:
-            raise ValueError("Resumable upload retry settings must be non-negative")
-
-
 class Usecase:
     """
     An identifier for a workload in Objectstore, along with defaults to use for all
@@ -92,7 +68,6 @@ class Usecase:
 
     ``resumable_threshold_bytes`` defaults to 256 MiB of remaining source bytes,
     before any compression. ``"none"`` disables resumable uploads.
-    ``resumable_retries`` configures recovery via `ResumableRetryPolicy`.
     """
 
     name: str
@@ -105,7 +80,6 @@ class Usecase:
         compression: Compression = "zstd",
         expiration_policy: ExpirationPolicy | None = None,
         resumable_threshold_bytes: int | Literal["none"] = 256 * 1024 * 1024,
-        resumable_retries: ResumableRetryPolicy = ResumableRetryPolicy(),
     ):
         if resumable_threshold_bytes != "none" and (
             type(resumable_threshold_bytes) is not int or resumable_threshold_bytes < 0
@@ -117,7 +91,6 @@ class Usecase:
         self._compression = compression
         self._expiration_policy = expiration_policy
         self._resumable_threshold_bytes = resumable_threshold_bytes
-        self._resumable_retries = resumable_retries
 
 
 # Connect timeout used unless overridden in connection parameters.
@@ -464,12 +437,13 @@ class Session:
 
         .. rubric:: Resumable Uploads
 
-        This method uses Objectstore's Resumable Uploads API when:
+        This method uses Objectstore's Resumable Uploads API when the size of
+        ``contents`` is at least ``resumable_threshold_bytes``.
+        Pass ``resumable_threshold_bytes="none"`` to disable Resumable Uploads.
+        When not overridden, this threshold defaults to the one set on the Usecase.
 
-        - The size of ``contents`` is at least ``resumable_threshold_bytes``.
-          Pass ``resumable_threshold_bytes="none"`` to disable Resumable Uploads.
-          When not overridden, this threshold defaults to the one set on the Usecase.
-        - The ``resumable_retries`` policy configured on the Usecase permits retries.
+        Transient failures and writes that make no progress are retried up to
+        twice. The retry count resets whenever the server reports a higher offset.
 
         For seekable binary streams, the remaining size is measured by seeking to
         the end and restoring the original position. Prefer streams with efficient
@@ -510,10 +484,7 @@ class Session:
             )
 
         source_size = None
-        if (
-            resumable_threshold_bytes != "none"
-            and self._usecase._resumable_retries.retries > 0
-        ):
+        if resumable_threshold_bytes != "none":
             source_size = _resumable.get_size(contents)
 
         encoding = precompressed or compress or self._usecase._compression
