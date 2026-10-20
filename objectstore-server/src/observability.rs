@@ -18,42 +18,42 @@ const RELEASE: &str = std::env!("OBJECTSTORE_RELEASE");
 /// dropping it flushes the event queue and shuts down the Sentry client.
 pub fn init_sentry(config: &Config) -> Option<sentry::ClientInitGuard> {
     let config = &config.sentry;
-    let dsn = config.dsn.as_ref()?;
+    let dsn = config.dsn.as_ref()?.expose_secret().as_str();
 
-    let dsn = match dsn.expose_secret().parse() {
-        Ok(dsn) => Some(dsn),
+    let traces_sample_rate = config.traces_sample_rate;
+    let inherit_sampling_decision = config.inherit_sampling_decision;
+    let mut options = sentry::ClientOptions::new()
+        .release(RELEASE)
+        .sample_rate(config.sample_rate)
+        .traces_sampler(move |ctx| {
+            if let Some(sampled) = ctx.sampled()
+                && inherit_sampling_decision
+            {
+                f32::from(sampled)
+            } else {
+                traces_sample_rate
+            }
+        })
+        .attach_stacktrace(config.attach_stacktrace)
+        .debug(config.debug)
+        .transport_channel_capacity(config.transport_channel_capacity);
+
+    match dsn.parse::<sentry::types::Dsn>() {
+        Ok(_) => options = options.dsn(dsn),
         Err(error) => {
             // Sentry is initialized before the tracing subscriber, so a `warn!` here would be
             // dropped. Write to stderr instead to make the misconfiguration visible.
             eprintln!("WARN: invalid Sentry DSN, error reporting is disabled: {error}");
-            None
         }
-    };
+    }
+    if let Some(environment) = &config.environment {
+        options = options.environment(environment.clone());
+    }
+    if let Some(server_name) = &config.server_name {
+        options = options.server_name(server_name.clone());
+    }
 
-    let guard = sentry::init(sentry::ClientOptions {
-        dsn,
-        release: Some(RELEASE.into()),
-        environment: config.environment.clone(),
-        server_name: config.server_name.clone(),
-        sample_rate: config.sample_rate,
-        traces_sampler: {
-            let traces_sample_rate = config.traces_sample_rate;
-            let inherit_sampling_decision = config.inherit_sampling_decision;
-            Some(std::sync::Arc::new(move |ctx| {
-                if let Some(sampled) = ctx.sampled()
-                    && inherit_sampling_decision
-                {
-                    f32::from(sampled)
-                } else {
-                    traces_sample_rate
-                }
-            }))
-        },
-        enable_logs: true,
-        attach_stacktrace: config.attach_stacktrace,
-        debug: config.debug,
-        ..Default::default()
-    });
+    let guard = sentry::init(options);
 
     sentry::configure_scope(|scope| {
         for (k, v) in &config.tags {

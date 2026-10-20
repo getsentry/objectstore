@@ -28,6 +28,8 @@ session.delete(key)
 ### Usecases and Scopes
 
 A `Usecase` represents a server-side namespace with its own configuration defaults.
+Its name must follow the naming rules documented on [`Usecase`]; invalid names
+raise `ValueError` during construction.
 Within a Usecase, Scopes provide further isolation — typically keyed by organization
 and project IDs. A Session ties a Client to a specific Usecase + Scope for operations.
 

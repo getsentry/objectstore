@@ -65,9 +65,13 @@ class Usecase:
     Usecases need to be statically defined in Objectstore's configuration server-side.
     Objectstore can make decisions based on the Usecase. For example, choosing the most
     suitable storage backend.
+
+    Names must be 3–64 ASCII characters from ``[A-Za-z0-9_-]``. Any permitted
+    character may appear in any position. Names are case-sensitive and are never
+    normalized. The name is read-only after construction.
     """
 
-    name: str
+    _name: str
     _compression: Compression
     _expiration_policy: ExpirationPolicy | None
 
@@ -78,16 +82,33 @@ class Usecase:
         expiration_policy: ExpirationPolicy | None = None,
         resumable_threshold_bytes: int | Literal["none"] = 256 * 1024 * 1024,
     ):
+        """Create a usecase.
+
+        Raises ``ValueError`` if the name violates the naming rules on ``Usecase``,
+        or if the ``resumable_threshold_bytes`` is invalid.
+        """
+        if not 3 <= len(name) <= 64:
+            raise ValueError("usecase name must be 3–64 ASCII characters long")
+        if any(not (c.isascii() and c.isalnum()) and c not in "_-" for c in name):
+            raise ValueError(
+                "usecase name must contain only ASCII letters, digits, '_' or '-'"
+            )
+        self._name = name
+        
         if resumable_threshold_bytes != "none" and (
             type(resumable_threshold_bytes) is not int or resumable_threshold_bytes < 0
         ):
             raise ValueError(
                 'resumable_threshold_bytes must be a non-negative integer or "none"'
             )
-        self.name = name
+        self._resumable_threshold_bytes = resumable_threshold_bytes
         self._compression = compression
         self._expiration_policy = expiration_policy
-        self._resumable_threshold_bytes = resumable_threshold_bytes
+
+    @property
+    def name(self) -> str:
+        """The validated usecase name."""
+        return self._name
 
 
 # Connect timeout used unless overridden in connection parameters.
@@ -181,7 +202,7 @@ class Client:
 
         connection_kwargs_to_use = asdict(_ConnectionDefaults())
 
-        if retries:
+        if retries is not None:
             connection_kwargs_to_use["retries"] = urllib3.Retry(
                 connect=retries,
                 # we only retry connection problems, as we cannot rewind our

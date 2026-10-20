@@ -144,6 +144,36 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
 
     // --- HighVolumeBackend methods ---
 
+    /// Intercepts [`HighVolumeBackend::create_upload_marker`]. Default delegates to `inner`.
+    async fn create_upload_marker(
+        &self,
+        inner: &InMemoryBackend,
+        revision: &ObjectId,
+        time_expires: Timestamp,
+    ) -> Result<()> {
+        inner.create_upload_marker(revision, time_expires).await
+    }
+
+    /// Intercepts [`HighVolumeBackend::has_upload_marker`]. Default delegates to `inner`.
+    async fn has_upload_marker(
+        &self,
+        inner: &InMemoryBackend,
+        revision: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<bool> {
+        inner.has_upload_marker(revision, access_time).await
+    }
+
+    /// Intercepts [`HighVolumeBackend::delete_upload_marker`]. Default delegates to `inner`.
+    async fn delete_upload_marker(
+        &self,
+        inner: &InMemoryBackend,
+        revision: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<bool> {
+        inner.delete_upload_marker(revision, access_time).await
+    }
+
     /// Intercepts [`HighVolumeBackend::put_non_tombstone`]. Default delegates to `inner`.
     async fn put_non_tombstone(
         &self,
@@ -469,6 +499,32 @@ impl<H: Hooks> Backend for TestBackend<H> {
 
 #[async_trait::async_trait]
 impl<H: Hooks> HighVolumeBackend for TestBackend<H> {
+    async fn create_upload_marker(
+        &self,
+        revision: &ObjectId,
+        time_expires: Timestamp,
+    ) -> Result<()> {
+        self.hooks
+            .create_upload_marker(&self.inner, revision, time_expires)
+            .await
+    }
+
+    async fn has_upload_marker(&self, revision: &ObjectId, access_time: Timestamp) -> Result<bool> {
+        self.hooks
+            .has_upload_marker(&self.inner, revision, access_time)
+            .await
+    }
+
+    async fn delete_upload_marker(
+        &self,
+        revision: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<bool> {
+        self.hooks
+            .delete_upload_marker(&self.inner, revision, access_time)
+            .await
+    }
+
     async fn put_non_tombstone(
         &self,
         id: &ObjectId,

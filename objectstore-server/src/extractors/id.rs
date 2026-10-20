@@ -6,6 +6,7 @@ use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_types::scope::{EMPTY_SCOPES, Scope, Scopes};
+use objectstore_types::usecase;
 use serde::{Deserialize, de};
 
 use crate::extractors::Xt;
@@ -81,10 +82,21 @@ impl FromRequestParts<ServiceState> for Xt<ObjectId> {
 /// This is meant to be used with the axum `Path` extractor.
 #[derive(Clone, Debug, Deserialize)]
 struct ObjectParams {
+    #[serde(deserialize_with = "deserialize_usecase")]
     usecase: String,
     #[serde(deserialize_with = "deserialize_scopes")]
     scopes: Scopes,
     key: String,
+}
+
+/// Deserializes and validates a usecase name.
+fn deserialize_usecase<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: de::Deserializer<'de>,
+{
+    let name = String::deserialize(deserializer)?;
+    usecase::validate_usecase_name(&name).map_err(de::Error::custom)?;
+    Ok(name)
 }
 
 /// Deserializes a `Scopes` instance from a string representation.
@@ -155,6 +167,7 @@ impl FromRequestParts<ServiceState> for Xt<ObjectContext> {
 /// (`/objects/{usecase}/{scopes}/{*key}`) routes — the extra `key` parameter is ignored.
 #[derive(Clone, Debug, Deserialize)]
 pub(super) struct ContextParams {
+    #[serde(deserialize_with = "deserialize_usecase")]
     pub usecase: String,
     #[serde(deserialize_with = "deserialize_scopes")]
     pub scopes: Scopes,
@@ -179,6 +192,35 @@ mod tests {
     fn deser_scopes(input: &str) -> Result<Scopes, DeError> {
         let deserializer: CowStrDeserializer<DeError> = Cow::Borrowed(input).into_deserializer();
         deserialize_scopes(deserializer)
+    }
+
+    #[test]
+    fn parse_usecase() {
+        for name in [
+            "Debug_Files-123".to_owned(),
+            "a".repeat(64),
+            "___".to_owned(),
+        ] {
+            let deserializer: CowStrDeserializer<DeError> =
+                Cow::Borrowed(name.as_str()).into_deserializer();
+            assert_eq!(deserialize_usecase(deserializer).unwrap(), name);
+        }
+        for name in [
+            "",
+            "_",
+            "ab",
+            "testing/org=999/injected",
+            "test.name",
+            "test%2Fname",
+            "café",
+        ] {
+            let deserializer: CowStrDeserializer<DeError> = Cow::Borrowed(name).into_deserializer();
+            assert!(deserialize_usecase(deserializer).is_err(), "{name:?}");
+        }
+        let name = "a".repeat(65);
+        let deserializer: CowStrDeserializer<DeError> =
+            Cow::Borrowed(name.as_str()).into_deserializer();
+        assert!(deserialize_usecase(deserializer).is_err());
     }
 
     #[test]
@@ -288,6 +330,29 @@ mod tests {
     }
 
     // Extraction tests
+
+    #[tokio::test]
+    async fn invalid_decoded_usecase_rejects_body_without_panicking() {
+        use crate::extractors::body::MeteredBody;
+
+        // Extract only the body so this exercises its own path rejection.
+        let app = Router::new()
+            .route(
+                "/objects/{usecase}/{scopes}/",
+                post(|_: MeteredBody| async { StatusCode::OK }),
+            )
+            .with_state(test_state(Config::default()).await);
+        let response = app
+            .oneshot(
+                Request::post("/objects/test%2Fname/org=123/")
+                    .body(Body::from("test data"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(response_body(response).await.contains("usecase"));
+    }
 
     #[tokio::test]
     async fn extract_object_id_parses_path() {
