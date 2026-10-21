@@ -137,6 +137,7 @@ pub(crate) fn maybe_decompress(
         (Some(Compression::Zstd), true) => {
             metadata.compression = None;
             let mut decoder = ZstdDecoder::new(StreamReader::new(stream));
+            // Zstd streams may contain concatenated frames (RFC 8878 §3.1).
             decoder.multiple_members(true);
             ReaderStream::new(decoder).boxed()
         }
