@@ -10,13 +10,15 @@ use objectstore_types::metadata::Metadata;
 use reqwest::Body;
 use serde::Deserialize;
 use tokio::fs::File;
-use tokio::io::{AsyncRead, BufReader};
+use tokio::io::{AsyncRead, AsyncSeekExt, AsyncWriteExt, BufReader};
 use tokio_util::io::{ReaderStream, StreamReader};
 
 pub use objectstore_types::metadata::{Compression, ExpirationPolicy};
 
 use crate::response::ResponseExt as _;
 use crate::{ClientStream, ObjectKey, Session};
+
+mod automatic;
 
 /// The response returned from the service after uploading an object.
 #[derive(Debug, Deserialize)]
@@ -30,6 +32,30 @@ pub(crate) enum PutBody {
     Stream(ClientStream),
     File(File),
     Path(PathBuf),
+}
+
+impl PutBody {
+    /// Measures remaining bytes without opening queued paths or consuming a stream.
+    pub(crate) async fn remaining_size(&mut self) -> io::Result<Option<u64>> {
+        match self {
+            Self::Buffer(bytes) => Ok(Some(bytes.len() as u64)),
+            Self::File(file) => {
+                file.flush().await?;
+                let metadata = file.metadata().await?;
+                if !metadata.is_file() {
+                    return Ok(None);
+                }
+                Ok(Some(
+                    metadata.len().saturating_sub(file.stream_position().await?),
+                ))
+            }
+            Self::Path(path) => {
+                let metadata = tokio::fs::metadata(path).await?;
+                Ok(metadata.is_file().then_some(metadata.len()))
+            }
+            Self::Stream(_) => Ok(None),
+        }
+    }
 }
 
 impl fmt::Debug for PutBody {
@@ -75,6 +101,7 @@ impl Session {
                 .compression()
                 .map(CompressionMode::Compress),
             key: None,
+            resumable_threshold_bytes: self.scope.usecase().resumable_threshold_bytes(),
             body,
         }
     }
@@ -85,11 +112,15 @@ impl Session {
     }
 
     /// Creates or replaces an object using a streaming payload.
+    ///
+    /// Streams use direct uploads, regardless of the resumable threshold.
     pub fn put_stream(&self, body: ClientStream) -> PutBuilder {
         self.put_body(PutBody::Stream(body))
     }
 
     /// Creates or replaces an object using an [`AsyncRead`] payload.
+    ///
+    /// Readers use direct uploads. Use [`Self::put_file`] for automatic resumable file uploads.
     pub fn put_read<R>(&self, body: R) -> PutBuilder
     where
         R: AsyncRead + Send + Sync + 'static,
@@ -125,6 +156,30 @@ impl Session {
 }
 
 /// A [`put`](Session::put) request builder.
+///
+/// # Automatic resumable uploads
+///
+/// Buffers and regular files (including paths) use resumable uploads when their remaining
+/// input size meets the configured threshold, by default 256 MiB before client compression.
+/// Streams, generic readers, and files whose size cannot be determined use direct uploads.
+/// Files must remain unchanged until the upload finishes. File uploads start at the current
+/// position; path uploads open the file only when executed.
+///
+/// Eligible uploads reuse uncompressed or precompressed input. Client compression first spools
+/// the complete compressed payload to a temporary file, using [`crate::ClientBuilder::spool_dir`]
+/// when configured. If file creation fails, the client falls back to direct streaming. Later
+/// preparation errors propagate. Unsupported or failed session creation also falls back to a
+/// direct upload of the prepared bytes, without compressing them again.
+///
+/// Transient failures and writes making no progress are retried twice, with exponential delays
+/// of 2 and 4 seconds plus up to 1 second of jitter. Recovery queries the server's persisted
+/// offset before replaying data. The retry budget resets whenever that offset advances.
+/// Terminal failures after session creation attempt cancellation and return
+/// [`crate::Error::UploadFailed`] preserving the cause. Dropping the future releases local
+/// resources; the remote session is left to expire.
+///
+/// Automatic uploads require no feature flag. The `resumable-upload-api` feature exposes the
+/// manual protocol API. See [`Self::resumable_threshold_bytes`] to override eligibility.
 #[derive(Debug)]
 pub struct PutBuilder {
     pub(crate) session: Session,
@@ -132,9 +187,28 @@ pub struct PutBuilder {
     pub(crate) compression: Option<CompressionMode>,
     pub(crate) key: Option<ObjectKey>,
     pub(crate) body: PutBody,
+    pub(crate) resumable_threshold_bytes: Option<u64>,
 }
 
 impl PutBuilder {
+    /// Sets the minimum remaining input size for automatic resumable uploads.
+    ///
+    /// Inherits [`crate::Usecase::resumable_threshold_bytes`] unless overridden. Pass [`None`]
+    /// to disable or zero to include every supported payload. Eligible uploads queued through
+    /// [`Session::many`] are sent individually rather than batched. See [`PutBuilder`] for
+    /// preparation and recovery behavior.
+    ///
+    /// ```no_run
+    /// # async fn example(session: objectstore_client::Session) -> objectstore_client::Result<()> {
+    /// session.put("payload").resumable_threshold_bytes(None).send().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn resumable_threshold_bytes(mut self, threshold: impl Into<Option<u64>>) -> Self {
+        self.resumable_threshold_bytes = threshold.into();
+        self
+    }
+
     /// Sets an explicit object key.
     ///
     /// If a key is specified, the object will be stored under that key. Otherwise, the Objectstore
@@ -146,7 +220,7 @@ impl PutBuilder {
 
     /// Sets an explicit compression algorithm to be used for this payload.
     ///
-    /// The client compresses the payload while uploading it and records the algorithm in the
+    /// The client compresses the payload and records the algorithm in the
     /// object's metadata. [`None`] should be used if no compression should be performed by the
     /// client, either because the payload is uncompressible (such as a media format), or if the
     /// compression should not be recorded for this object.
@@ -329,15 +403,44 @@ impl PutBuilder {
             None => reqwest::Method::POST,
         };
 
+        self.metadata.compression = self.compression.map(CompressionMode::compression);
+        let headers = self.metadata.to_headers("")?;
+        let prepared = automatic::prepare(
+            self.body,
+            self.compression,
+            self.resumable_threshold_bytes,
+            self.session.client.spool_dir.clone(),
+        )
+        .await?;
+        let mut content_length = None;
+        // Keep the file reader alive until a direct fallback request finishes.
+        let mut replay = None;
+        let body = match prepared {
+            automatic::PreparedBody::Direct(body) => body,
+            automatic::PreparedBody::Replay(body) => {
+                let create = crate::resumable::CreateResumableUploadBuilder {
+                    session: self.session.clone(),
+                    total_length: body.len(),
+                    key: self.key.clone(),
+                    metadata: self.metadata,
+                };
+                if let Ok(Some(upload)) = create.send().await {
+                    return automatic::upload(body, upload).await;
+                }
+                content_length = Some(body.len());
+                Body::wrap_stream(replay.insert(body).stream(0).await?)
+            }
+        };
+
+        // Prepare authentication only when ready to send: spooling can take long enough for
+        // a token minted before preparation to expire.
         let mut builder = self
             .session
-            .request(method, self.key.as_deref().unwrap_or_default())?;
-
-        self.metadata.compression = self.compression.map(CompressionMode::compression);
-        let body = encode_body(self.body, self.compression).await?;
-
-        builder = builder.headers(self.metadata.to_headers("")?);
-
+            .request(method, self.key.as_deref().unwrap_or_default())?
+            .headers(headers);
+        if let Some(length) = content_length {
+            builder = builder.header(reqwest::header::CONTENT_LENGTH, length);
+        }
         let response = builder.body(body).send().await?;
         Ok(response.error_for_status_and_drain().await?.json().await?)
     }

@@ -84,6 +84,7 @@ enum BatchOperation {
         metadata: Metadata,
         compression: Option<CompressionMode>,
         body: PutBody,
+        resumable_threshold_bytes: Option<u64>,
     },
     Delete {
         key: ObjectKey,
@@ -116,6 +117,7 @@ impl From<PutBuilder> for BatchOperation {
             metadata,
             compression,
             body,
+            resumable_threshold_bytes,
             session: _session,
         } = value;
         BatchOperation::Insert {
@@ -123,6 +125,7 @@ impl From<PutBuilder> for BatchOperation {
             metadata,
             compression,
             body,
+            resumable_threshold_bytes,
         }
     }
 }
@@ -159,6 +162,7 @@ impl BatchOperation {
                 mut metadata,
                 compression,
                 body,
+                resumable_threshold_bytes: _,
             } => {
                 let mut headers = operation_headers("insert", key.as_deref());
                 metadata.compression = compression.map(CompressionMode::compression);
@@ -531,17 +535,9 @@ async fn send_batch(
     Ok(results)
 }
 
-fn classify_fail(key: Option<ObjectKey>, error: Error) -> Classified {
-    Classified::Failed(OperationResult::Put(
-        key.unwrap_or_else(|| "<unknown>".to_owned()),
-        Err(error),
-    ))
-}
-
 /// Classifies a single operation for batch processing.
 ///
-/// Insert operations whose body exceeds [`MAX_BATCH_PART_SIZE`] are marked as
-/// [`Classified::Individual`]. Everything else is [`Classified::Batchable`].
+/// Oversized, unknown-size, and resumable-eligible uploads are sent individually.
 async fn classify(op: BatchOperation) -> Classified {
     match op {
         BatchOperation::Insert {
@@ -549,20 +545,22 @@ async fn classify(op: BatchOperation) -> Classified {
             metadata,
             compression,
             body,
+            resumable_threshold_bytes,
         } => {
-            let size = match &body {
-                PutBody::Buffer(bytes) => Some(bytes.len() as u64),
-                PutBody::File(file) => match file.metadata().await {
-                    Ok(meta) => Some(meta.len()),
-                    Err(err) => return classify_fail(key, err.into()),
-                },
-                PutBody::Path(path) => match tokio::fs::metadata(path).await {
-                    Ok(meta) => Some(meta.len()),
-                    Err(err) => return classify_fail(key, err.into()),
-                },
-                // Streams have unknown size and must not go through the batch endpoint.
-                PutBody::Stream(_) => None,
+            let mut body = body;
+            let size = match body.remaining_size().await {
+                Ok(size) => size,
+                Err(error) if matches!(body, PutBody::Path(_)) => {
+                    return Classified::Failed(error_result(
+                        OperationContext::Insert { key },
+                        error.into(),
+                    ));
+                }
+                Err(_) => None,
             };
+            let resumable = size
+                .zip(resumable_threshold_bytes)
+                .is_some_and(|(size, threshold)| size >= threshold);
 
             // Client-side compression happens while streaming the body, so the on-wire size is
             // only known up to its worst case. Precompressed bodies are sent as-is.
@@ -581,8 +579,12 @@ async fn classify(op: BatchOperation) -> Classified {
                 metadata,
                 compression,
                 body,
+                resumable_threshold_bytes,
             };
 
+            if resumable {
+                return Classified::Individual(op);
+            }
             match size {
                 Some(s) if s <= MAX_BATCH_PART_SIZE as usize => Classified::Batchable(op, s as u64),
                 _ => Classified::Individual(op),
@@ -637,6 +639,7 @@ async fn execute_individual(op: BatchOperation, session: &Session) -> OperationR
             metadata,
             compression,
             body,
+            resumable_threshold_bytes,
         } => {
             let error_key = key.clone().unwrap_or_else(|| "<unknown>".to_owned());
             let put = PutBuilder {
@@ -645,6 +648,7 @@ async fn execute_individual(op: BatchOperation, session: &Session) -> OperationR
                 compression,
                 key,
                 body,
+                resumable_threshold_bytes,
             };
             match put.send().await {
                 Ok(response) => OperationResult::Put(response.key.clone(), Ok(response)),
@@ -760,7 +764,8 @@ impl ManyBuilder {
 
     /// Sets the maximum number of concurrent individual (non-batch) requests.
     ///
-    /// Operations that exceed the per-part size limit are sent as individual requests.
+    /// Operations that exceed the per-part size limit or qualify for resumable uploads
+    /// are sent as individual requests.
     /// This controls how many such requests can be in-flight simultaneously.
     /// Defaults to 5 if not set.
     pub fn max_individual_concurrency(mut self, concurrency: usize) -> Self {
@@ -822,6 +827,7 @@ mod tests {
             metadata: Metadata::default(),
             compression: Some(compression),
             body: PutBody::Buffer(vec![0; size].into()),
+            resumable_threshold_bytes: None,
         }
     }
 
@@ -864,6 +870,50 @@ mod tests {
         core::assert_matches!(
             classify(op).await,
             Classified::Batchable(_, s) if s == size as u64
+        );
+    }
+
+    #[tokio::test]
+    async fn threshold_overrides_control_batch_classification() {
+        let session = crate::Client::builder("http://localhost")
+            .build()
+            .unwrap()
+            .session(
+                crate::Usecase::new("testing")
+                    .with_resumable_threshold_bytes(4)
+                    .for_organization(123),
+            )
+            .unwrap();
+        assert!(matches!(
+            classify(session.put("data").into()).await,
+            Classified::Individual(_)
+        ));
+        assert!(matches!(
+            classify(session.put("data").resumable_threshold_bytes(None).into()).await,
+            Classified::Batchable(_, _)
+        ));
+        assert!(matches!(
+            classify(session.put("data").resumable_threshold_bytes(5).into()).await,
+            Classified::Batchable(_, _)
+        ));
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"prefix-data").unwrap();
+        let mut input = tokio::fs::File::open(file.path()).await.unwrap();
+        tokio::io::AsyncSeekExt::seek(&mut input, std::io::SeekFrom::Start(8))
+            .await
+            .unwrap();
+        assert!(matches!(
+            classify(session.put_file(input).into()).await,
+            Classified::Batchable(_, _)
+        ));
+        let Classified::Individual(BatchOperation::Insert { body, .. }) =
+            classify(session.put_path(file.path()).into()).await
+        else {
+            panic!("eligible path should be sent individually");
+        };
+        assert!(
+            matches!(body, PutBody::Path(_)),
+            "classification must not open paths"
         );
     }
 

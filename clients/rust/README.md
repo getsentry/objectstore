@@ -151,6 +151,17 @@ session.put("payload")
     .send().await?;
 ```
 
+### Automatic Resumable Uploads
+
+Large buffer and regular-file uploads automatically use resumable uploads, including uploads
+queued through `many()`. The default threshold is 256 MiB before client compression. Compressed
+payloads are prepared in temporary files; uncompressed and precompressed inputs are reused.
+Streams and generic readers use direct uploads. No feature flag is required.
+
+See [`PutBuilder`] for eligibility, fallback, and recovery behavior,
+[`Usecase::with_resumable_threshold_bytes`] and [`PutBuilder::resumable_threshold_bytes`] to
+configure or disable it, and [`ClientBuilder::spool_dir`] to choose the temporary-file directory.
+
 ### Resumable Upload API
 
 > **Feature flag required:** Enable `resumable-upload-api` to use this API.
@@ -176,7 +187,8 @@ If a non-final chunk is larger than the granularity but its size is not a multip
 server may persist only its aligned prefix.
 
 ```rust,no_run
-#![cfg(feature = "resumable-upload-api")]
+# #[cfg(feature = "resumable-upload-api")]
+# mod example {
 
 use bytes::Bytes;
 use anyhow::{Context as _, Result};
@@ -189,7 +201,7 @@ async fn upload_large_object(session: &Session, object: Bytes) -> Result<()> {
         .content_type("application/octet-stream")
         .send()
         .await?
-        // Fall back to a regular [`Session:;put`].
+        // Fall back to a regular Session::put.
         .context("resumable upload declined for this object")?;
 
     let mut offset = 0;
@@ -208,6 +220,8 @@ async fn upload_large_object(session: &Session, object: Bytes) -> Result<()> {
         };
     }
 }
+# }
+# fn main() {}
 ```
 
 ### Multipart Upload API
