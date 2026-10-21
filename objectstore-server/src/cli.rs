@@ -62,7 +62,7 @@ struct SleepCommand {
     seconds: u64,
 }
 
-/// mark the server as not ready
+/// mark the server as draining for the serving health check
 #[derive(Debug, FromArgs)]
 #[argh(subcommand, name = "down")]
 struct DownCommand {

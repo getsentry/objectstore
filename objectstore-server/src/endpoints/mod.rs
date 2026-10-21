@@ -112,9 +112,12 @@
 //!
 //! | Method | Path | Description |
 //! |--------|------|-------------|
-//! | `GET` | `/health` | Liveness probe (always returns 200) |
-//! | `GET` | `/ready` | Readiness probe (returns 503 when `/tmp/objectstore.down` exists, enabling graceful drain) |
+//! | `GET` | `/health/live` | Liveness probe (always returns 200) |
+//! | `GET` | `/health/ready` | Readiness probe (always returns 200, including during draining) |
+//! | `GET` | `/health/serving` | Traffic-serving probe (returns 503 during shutdown) |
 //! | `GET` | `/keda` | Prometheus text-format gauges for KEDA autoscaling (see [KEDA Metrics](crate#keda-metrics)) |
+//!
+//! See [`health`] for health check behavior and graceful draining.
 //!
 //! # Code Usage
 //!
@@ -136,7 +139,9 @@ mod resumable;
 
 /// Returns `true` for internal endpoints that are exempt from metrics and concurrency limits.
 pub fn is_internal_route(route: &str) -> bool {
-    matches!(route, "/health" | "/ready" | "/keda") || route.starts_with("/debug/")
+    matches!(route, "/health" | "/ready" | "/keda")
+        || route.starts_with("/health/")
+        || route.starts_with("/debug/")
 }
 
 /// Returns a router with all objectstore HTTP endpoints mounted.
