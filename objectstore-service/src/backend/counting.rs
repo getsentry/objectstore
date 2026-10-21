@@ -24,15 +24,11 @@ use objectstore_types::time::Timestamp;
 use objectstore_types::usecase::Usecase;
 
 use crate::backend::common::{
-    Backend, DeleteResponse, ExpiryUpdate, GetResponse, MetadataResponse, MultipartUploadBackend,
-    PutResponse, SetExpiryResponse,
+    Backend, DeleteResponse, ExpiryUpdate, GetResponse, MetadataResponse, PutResponse,
+    SetExpiryResponse,
 };
 use crate::error::Result;
 use crate::id::ObjectId;
-use crate::multipart::{
-    AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
-    ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
-};
 use crate::resumable::{BackendToken, Session};
 use crate::stream::ClientStream;
 
@@ -44,14 +40,9 @@ fn count(usecase: &Usecase) {
     objectstore_metrics::count!("cogs.usage" += 1, app_feature = usecase.to_string());
 }
 
-/// A [`Backend`] decorator that counts each operation performed for COGS. Also implements
-/// [`MultipartUploadBackend`]. See the [module documentation](self) for how it should be used.
+/// A [`Backend`] decorator that counts each operation performed for COGS.
 ///
-/// [`CountingBackend`]'s implementation clashes with how the [`MultipartUploadBackend`] trait is
-/// connected to the [`Backend`] trait. The workaround is to give `CountingBackend` (up to) two
-/// `Arc`s that point to the inner backend:
-/// - `inner: Arc<dyn Backend>`
-/// - `inner_multipart: Option<Arc<dyn MultipartUploadBackend>>` if `inner` supports it
+/// See the [module documentation](self) for how it should be used.
 #[derive(Debug)]
 pub struct CountingBackend {
     inner: Arc<dyn Backend>,
@@ -127,11 +118,6 @@ impl Backend for CountingBackend {
         self.inner.join().await;
     }
 
-    fn as_multipart_upload_backend(&self) -> Result<&dyn MultipartUploadBackend> {
-        self.inner.as_multipart_upload_backend()?;
-        Ok(self)
-    }
-
     async fn create_upload_session(
         &self,
         id: &ObjectId,
@@ -165,84 +151,6 @@ impl Backend for CountingBackend {
     async fn cancel_upload(&self, session: &Session) -> Result<()> {
         count(session.object_id.usecase());
         self.inner.cancel_upload(session).await
-    }
-}
-
-#[async_trait::async_trait]
-impl MultipartUploadBackend for CountingBackend {
-    async fn initiate_multipart(
-        &self,
-        id: &ObjectId,
-        metadata: &Metadata,
-    ) -> Result<InitiateMultipartResponse> {
-        count(id.usecase());
-        self.inner
-            .as_multipart_upload_backend()?
-            .initiate_multipart(id, metadata)
-            .await
-    }
-
-    async fn upload_part(
-        &self,
-        id: &ObjectId,
-        upload_id: &UploadId,
-        part_number: PartNumber,
-        content_length: u64,
-        content_md5: Option<&str>,
-        body: ClientStream,
-    ) -> Result<UploadPartResponse> {
-        count(id.usecase());
-        self.inner
-            .as_multipart_upload_backend()?
-            .upload_part(
-                id,
-                upload_id,
-                part_number,
-                content_length,
-                content_md5,
-                body,
-            )
-            .await
-    }
-
-    async fn list_parts(
-        &self,
-        id: &ObjectId,
-        upload_id: &UploadId,
-        max_parts: Option<u32>,
-        part_number_marker: Option<PartNumber>,
-    ) -> Result<ListPartsResponse> {
-        count(id.usecase());
-        self.inner
-            .as_multipart_upload_backend()?
-            .list_parts(id, upload_id, max_parts, part_number_marker)
-            .await
-    }
-
-    async fn abort_multipart(
-        &self,
-        id: &ObjectId,
-        upload_id: &UploadId,
-    ) -> Result<AbortMultipartResponse> {
-        count(id.usecase());
-        self.inner
-            .as_multipart_upload_backend()?
-            .abort_multipart(id, upload_id)
-            .await
-    }
-
-    async fn complete_multipart(
-        &self,
-        id: &ObjectId,
-        upload_id: &UploadId,
-        parts: Vec<CompletedPart>,
-        access_time: Timestamp,
-    ) -> Result<CompleteMultipartResponse> {
-        count(id.usecase());
-        self.inner
-            .as_multipart_upload_backend()?
-            .complete_multipart(id, upload_id, parts, access_time)
-            .await
     }
 }
 
@@ -356,53 +264,6 @@ mod tests {
                 .iter()
                 .any(|m| m == "cogs.usage:+1|c|#app_feature:new_usecase"),
             "captured: {captured:?}"
-        );
-    }
-
-    #[test]
-    fn counts_each_multipart_operation() {
-        let captured = capture(async {
-            let backend: Arc<dyn Backend> = Arc::new(CountingBackend::new(Box::new(
-                InMemoryBackend::new("in-memory"),
-            )));
-            let multipart = backend.as_multipart_upload_backend().unwrap();
-            let id = object_id("attachments");
-
-            let upload_id = multipart
-                .initiate_multipart(&id, &Metadata::default())
-                .await
-                .unwrap();
-            multipart
-                .upload_part(
-                    &id,
-                    &upload_id,
-                    PartNumber::new(1).unwrap(),
-                    2,
-                    None,
-                    stream::single("hi"),
-                )
-                .await
-                .unwrap();
-            multipart
-                .list_parts(&id, &upload_id, None, None)
-                .await
-                .unwrap();
-            multipart
-                .complete_multipart(&id, &upload_id, vec![], Timestamp::now())
-                .await
-                .unwrap();
-            // The upload was completed above, so aborting it is a no-op; counting
-            // happens on dispatch regardless, which is what this asserts.
-            let _ = multipart.abort_multipart(&id, &upload_id).await;
-        });
-
-        assert_eq!(
-            captured
-                .iter()
-                .filter(|m| m == &"cogs.usage:+1|c|#app_feature:attachments")
-                .count(),
-            5,
-            "expected one count per multipart operation, captured: {captured:?}"
         );
     }
 }

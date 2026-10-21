@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr, TcpListener};
 
 use objectstore_server::config::{
-    AuthZVerificationKey, Config, MultipartUploadStorageConfig, StorageConfig,
+    AuthZVerificationKey, Config, LongTermStorageConfig, StorageConfig,
 };
 use objectstore_server::state::Services;
 use objectstore_server::web::App;
@@ -136,7 +136,7 @@ fn replace_fs_paths(config: &mut StorageConfig, tempdirs: &mut Vec<TempDir>) {
             tempdirs.push(dir);
         }
         StorageConfig::Tiered(c) => {
-            if let MultipartUploadStorageConfig::FileSystem(fs) = &mut c.long_term {
+            if let LongTermStorageConfig::FileSystem(fs) = &mut c.long_term {
                 let dir = tempfile::tempdir().unwrap();
                 fs.path = dir.path().into();
                 tempdirs.push(dir);

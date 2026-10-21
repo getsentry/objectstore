@@ -143,7 +143,6 @@
 ### Documentation 📚
 
 - Fix and expand documentation across the workspace by @jan-auer in [#521](https://github.com/getsentry/objectstore/pull/521)
-- Fix multipart endpoint paths and client examples by @jan-auer in [#505](https://github.com/getsentry/objectstore/pull/505)
 
 ### Internal Changes 🔧
 
@@ -167,8 +166,6 @@
 
 ### New Features ✨
 
-- (py-client) Add Multipart Upload API by @lcian in [#476](https://github.com/getsentry/objectstore/pull/476)
-- (rust-client) Add Multipart Upload API by @lcian in [#468](https://github.com/getsentry/objectstore/pull/468)
 
 ## 0.1.9
 

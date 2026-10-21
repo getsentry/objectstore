@@ -547,41 +547,6 @@ impl Session {
         url
     }
 
-    #[cfg(feature = "multipart")]
-    fn multipart_url(
-        &self,
-        suffix: Option<&'static str>,
-        object_key: Option<&str>,
-        query_pairs: Option<Vec<(&str, String)>>,
-    ) -> Url {
-        let mut url = self.client.service_url.clone();
-
-        // `path_segments_mut` can only error if the url is cannot-be-a-base,
-        // and we check that in `ClientBuilder::new`, therefore this will never panic.
-        let mut segments = url.path_segments_mut().unwrap();
-        segments
-            .push("v1")
-            .push(match suffix {
-                Some("parts") => "objects:multipart:parts",
-                Some("complete") => "objects:multipart:complete",
-                _ => "objects:multipart",
-            })
-            .push(self.scope.usecase.name())
-            .push(&self.scope.scopes.as_api_path().to_string());
-        if let Some(object_key) = object_key.filter(|key| !key.is_empty()) {
-            segments.extend(object_key.split('/'));
-        }
-        drop(segments);
-        if let Some(query_pairs) = query_pairs {
-            let mut pairs = url.query_pairs_mut();
-            for (key, value) in query_pairs {
-                pairs.append_pair(key, &value);
-            }
-        }
-
-        url
-    }
-
     fn prepare_builder(&self, mut builder: RequestBuilder) -> crate::Result<RequestBuilder> {
         if let Some(token) = self.get_token()? {
             builder = builder.header("x-os-auth", format!("Bearer {token}"));
@@ -609,19 +574,6 @@ impl Session {
     pub(crate) fn batch_request(&self) -> crate::Result<RequestBuilder> {
         let url = self.batch_url();
         let builder = self.client.reqwest.post(url);
-        self.prepare_builder(builder)
-    }
-
-    #[cfg(feature = "multipart")]
-    pub(crate) fn multipart_request(
-        &self,
-        method: reqwest::Method,
-        action: Option<&'static str>,
-        object_key: Option<&str>,
-        query_pairs: Option<Vec<(&str, String)>>,
-    ) -> crate::Result<RequestBuilder> {
-        let url = self.multipart_url(action, object_key, query_pairs);
-        let builder = self.client.reqwest.request(method, url);
         self.prepare_builder(builder)
     }
 }

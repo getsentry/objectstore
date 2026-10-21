@@ -41,7 +41,6 @@ from objectstore_client.metrics import (
     NoOpMetricsBackend,
     measure_storage_operation,
 )
-from objectstore_client.multipart import MultipartUpload
 from objectstore_client.scope import Scope
 from objectstore_client.tracing import storage_span
 
@@ -94,7 +93,7 @@ class Usecase:
                 "usecase name must contain only ASCII letters, digits, '_' or '-'"
             )
         self._name = name
-        
+
         if resumable_threshold_bytes != "none" and (
             type(resumable_threshold_bytes) is not int or resumable_threshold_bytes < 0
         ):
@@ -398,25 +397,6 @@ class Session:
         path = utils.encode_path(self._base_path.rstrip("/") + relative_path)
         if full:
             return f"{self._base_url()}{path}"
-        return path
-
-    def _make_multipart_url(
-        self,
-        action: str | None,
-        key: str | None,
-        query: str | None = None,
-    ) -> str:
-        if action == "parts":
-            resource = "objects:multipart:parts"
-        elif action == "complete":
-            resource = "objects:multipart:complete"
-        else:
-            resource = "objects:multipart"
-
-        relative_path = f"/v1/{resource}/{self._usecase.name}/{self._scope}/{key or ''}"
-        path = utils.encode_path(self._base_path.rstrip("/") + relative_path)
-        if query:
-            return f"{path}?{query}"
         return path
 
     def put(
@@ -1003,73 +983,3 @@ class Session:
     def _resume_upload(self, key: str, token: str) -> _resumable.ResumableUpload:
         """Reconstruct a resumable upload handle, without contacting the server."""
         return _resumable.ResumableUpload(self, key, token)
-
-    def initiate_multipart_upload(
-        self,
-        *,
-        key: str | None = None,
-        compression: Compression | Literal["none"] | None = None,
-        content_type: str | None = None,
-        metadata: dict[str, str] | None = None,
-        expiration_policy: ExpirationPolicy | None = None,
-        origin: str | None = None,
-        filename: str | None = None,
-    ) -> MultipartUpload:
-        """
-        Initiates a multipart upload.
-
-        Returns a :class:`~objectstore_client.multipart.MultipartUpload` handle
-        that can be used to upload parts, list parts, complete, or abort.
-
-        **Important:** unlike :meth:`put`, the ``compression`` parameter only
-        records the compression algorithm in the object's metadata.
-        The caller is responsible for compressing each part in accordance with the
-        chosen algorithm before passing it to
-        :meth:`~objectstore_client.multipart.MultipartUpload.upload_part`.
-        """
-        if compression and compression not in ("none", "zstd"):
-            raise ValueError(f"Invalid compression: {compression}")
-
-        headers = self._metadata_headers(
-            compression=compression or self._usecase._compression,
-            content_type=content_type,
-            metadata=metadata,
-            expiration_policy=expiration_policy,
-            origin=origin,
-            filename=filename,
-        )
-
-        if key == "":
-            key = None
-
-        with (
-            storage_span(
-                "multipart.initiate", self._usecase, self._scope, key=key
-            ) as span,
-            measure_storage_operation(
-                self._metrics_backend, "multipart.initiate", self._usecase.name
-            ),
-        ):
-            response = self._pool.request(
-                "POST" if not key else "PUT",
-                self._make_multipart_url(None, key),
-                headers=headers,
-                preload_content=True,
-                decode_content=True,
-            )
-            raise_for_status(response)
-            res = response.json()
-            # Set after the response, since the key may be server-generated.
-            span.set_attribute("objectstore.key", res["key"])
-            span.set_attribute("objectstore.upload_id", res["upload_id"])
-            return MultipartUpload(self, res["key"], res["upload_id"])
-
-    def resume_multipart_upload(self, key: str, upload_id: str) -> MultipartUpload:
-        """
-        Reconstructs a multipart upload handle.
-
-        This does not make any network calls.
-        Use it to resume an upload after a process restart or to
-        continue an upload started elsewhere.
-        """
-        return MultipartUpload(self, key, upload_id)

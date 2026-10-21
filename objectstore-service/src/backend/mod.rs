@@ -123,10 +123,10 @@ async fn hv_from_config(
 
 /// Configuration for the long-term backend in a [`tiered::TieredStorageConfig`].
 ///
-/// Only backends that implement [`common::MultipartUploadBackend`] are valid here.
+/// Supports GCS and local filesystem storage.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
-pub enum MultipartUploadStorageConfig {
+pub enum LongTermStorageConfig {
     /// Local filesystem storage backend (type `"filesystem"`).
     FileSystem(local_fs::FileSystemConfig),
 
@@ -136,15 +136,13 @@ pub enum MultipartUploadStorageConfig {
     Gcs(gcs::GcsConfig),
 }
 
-/// Constructs a type-erased [`common::MultipartUploadBackend`] from the given config.
+/// Constructs a type-erased [`common::Backend`] from the given config.
 async fn lt_from_config(
-    config: MultipartUploadStorageConfig,
+    config: LongTermStorageConfig,
     streams: &ChangeStreamFactory,
-) -> Result<Box<dyn common::MultipartUploadBackend>> {
+) -> Result<Box<dyn common::Backend>> {
     Ok(match config {
-        MultipartUploadStorageConfig::FileSystem(c) => {
-            Box::new(local_fs::LocalFsBackend::new(c, streams))
-        }
-        MultipartUploadStorageConfig::Gcs(c) => Box::new(gcs::GcsBackend::new(c, streams).await?),
+        LongTermStorageConfig::FileSystem(c) => Box::new(local_fs::LocalFsBackend::new(c, streams)),
+        LongTermStorageConfig::Gcs(c) => Box::new(gcs::GcsBackend::new(c, streams).await?),
     })
 }
