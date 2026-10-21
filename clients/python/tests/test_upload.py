@@ -1,4 +1,5 @@
 from io import BytesIO
+from socket import gaierror
 from typing import Any
 from unittest.mock import Mock
 
@@ -122,3 +123,31 @@ def test_sizing_must_restore_position(
         session.put(source)
 
     request.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        urllib3.exceptions.ConnectTimeoutError("connection timed out"),
+        urllib3.exceptions.NewConnectionError(Mock(), "connection refused"),
+        urllib3.exceptions.NameResolutionError("localhost", Mock(), gaierror()),
+    ],
+)
+def test_exhausted_connect_retries_recover(
+    session: Session, monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    request = Mock(
+        side_effect=[
+            urllib3.HTTPResponse(status=201, body=b'{"key":"key","session":"token"}'),
+            # The initial write and all three urllib3 connection retries fail.
+            *[failure] * 4,
+            urllib3.HTTPResponse(status=204, headers={"Upload-Offset": "0"}),
+            urllib3.HTTPResponse(status=201),
+        ]
+    )
+    monkeypatch.setattr(session._pool, "_make_request", request)
+
+    assert session.put(b"payload") == "key"
+    assert request.call_count == 7
+    assert request.call_args_list[5].kwargs["headers"]["Upload-Offset"] == "*"
+    assert request.call_args_list[6].kwargs["headers"]["Upload-Offset"] == "0"

@@ -304,6 +304,7 @@ def is_transient(error: Exception) -> bool:
         error,
         (
             NoUploadProgress,
+            urllib3.exceptions.ConnectTimeoutError,
             urllib3.exceptions.ReadTimeoutError,
             urllib3.exceptions.ProtocolError,
         ),
