@@ -91,7 +91,7 @@ class Server:
 
         for _ in range(max_attempts):
             try:
-                response = pool.request("GET", "/health", timeout=0.1)
+                response = pool.request("GET", "/health/live", timeout=0.1)
                 if response.status == 200:
                     return
             except Exception:

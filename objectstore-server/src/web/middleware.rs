@@ -146,7 +146,7 @@ mod tests {
     ///
     /// The `/v1/test/_/key` handler notifies `paused` on entry and waits on `resume`
     /// before returning, allowing tests to hold a request in-flight. Internal routes
-    /// (`/health`, `/ready`, `/keda`) return 200 immediately.
+    /// (`/health/live`, `/health/ready`, `/health/serving`, `/keda`) return 200 immediately.
     fn make_app(max: usize) -> (Router, Arc<Notify>, Arc<Notify>) {
         let counter = RequestCounter::new(max);
         let paused = Arc::new(Notify::new());
@@ -165,8 +165,18 @@ mod tests {
                     }
                 }),
             )
-            .route("/health", get(|| async { StatusCode::OK.into_response() }))
-            .route("/ready", get(|| async { StatusCode::OK.into_response() }))
+            .route(
+                "/health/live",
+                get(|| async { StatusCode::OK.into_response() }),
+            )
+            .route(
+                "/health/ready",
+                get(|| async { StatusCode::OK.into_response() }),
+            )
+            .route(
+                "/health/serving",
+                get(|| async { StatusCode::OK.into_response() }),
+            )
             .route("/keda", get(|| async { StatusCode::OK.into_response() }))
             .layer(counter.layer())
             .layer(from_fn_with_state(counter, limit_web_concurrency));
@@ -200,14 +210,10 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 
-        let health = app.clone().oneshot(make_request("/health")).await.unwrap();
-        assert_eq!(health.status(), StatusCode::OK);
-
-        let ready = app.clone().oneshot(make_request("/ready")).await.unwrap();
-        assert_eq!(ready.status(), StatusCode::OK);
-
-        let keda = app.clone().oneshot(make_request("/keda")).await.unwrap();
-        assert_eq!(keda.status(), StatusCode::OK);
+        for path in ["/health/live", "/health/ready", "/health/serving", "/keda"] {
+            let response = app.clone().oneshot(make_request(path)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+        }
 
         resume.notify_one();
         blocking.await.unwrap().unwrap();

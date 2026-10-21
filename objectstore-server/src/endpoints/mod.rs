@@ -139,9 +139,7 @@ mod resumable;
 
 /// Returns `true` for internal endpoints that are exempt from metrics and concurrency limits.
 pub fn is_internal_route(route: &str) -> bool {
-    matches!(route, "/health" | "/ready" | "/keda")
-        || route.starts_with("/health/")
-        || route.starts_with("/debug/")
+    route == "/keda" || route.starts_with("/health/") || route.starts_with("/debug/")
 }
 
 /// Returns a router with all objectstore HTTP endpoints mounted.

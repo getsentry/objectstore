@@ -26,9 +26,6 @@ pub fn router() -> Router<ServiceState> {
         .route("/health/live", routing::get(live))
         .route("/health/ready", routing::get(ready))
         .route("/health/serving", routing::get(serving))
-        // TODO: Remove these legacy routes once all consumers use /health/<kind>.
-        .route("/health", routing::get(live))
-        .route("/ready", routing::get(ready))
 }
 
 async fn live() -> impl IntoResponse {

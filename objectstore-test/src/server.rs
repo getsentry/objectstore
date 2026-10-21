@@ -6,7 +6,7 @@
 //! #[tokio::main]
 //! async fn main() {
 //!    let server = TestServer::new().await;
-//!    let url = server.url("/health");
+//!    let url = server.url("/health/live");
 //!    // use the URL in tests...
 //! }
 //! ```
