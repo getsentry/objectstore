@@ -400,10 +400,16 @@ impl HighVolumeBackend for InMemoryBackend {
         revision: &ObjectId,
         time_expires: Timestamp,
     ) -> Result<()> {
+        self.change_stream
+            .begin_write(revision, Some(time_expires))
+            .await?;
         self.upload_markers
             .lock()
             .unwrap()
             .insert(revision.clone(), time_expires);
+        self.change_stream
+            .commit_write(revision, 1, Some(time_expires))
+            .await;
         Ok(())
     }
 
@@ -421,12 +427,16 @@ impl HighVolumeBackend for InMemoryBackend {
         revision: &ObjectId,
         access_time: Timestamp,
     ) -> Result<bool> {
-        Ok(self
+        let deleted = self
             .upload_markers
             .lock()
             .unwrap()
             .remove(revision)
-            .is_some_and(|expiry| expiry >= access_time))
+            .is_some_and(|expiry| expiry >= access_time);
+        if deleted {
+            self.change_stream.commit_delete(revision).await;
+        }
+        Ok(deleted)
     }
 
     async fn put_non_tombstone(

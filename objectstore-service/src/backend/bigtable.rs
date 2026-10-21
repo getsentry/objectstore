@@ -1085,18 +1085,21 @@ impl HighVolumeBackend for BigTableBackend {
         revision: &ObjectId,
         time_expires: Timestamp,
     ) -> Result<()> {
+        self.change_stream
+            .begin_write(revision, Some(time_expires))
+            .await?;
         let mutations = vec![mutation(mutation::Mutation::SetCell(mutation::SetCell {
             family_name: FAMILY_GC.to_owned(),
             column_qualifier: COLUMN_UPLOAD.to_vec(),
             timestamp_micros: time_expires.as_micros() as i64,
             value: vec![1],
         }))];
-        self.mutate(
-            revision.as_upload_path().to_string().into_bytes(),
-            mutations,
-            "create_upload_marker",
-        )
-        .await?;
+        let path = revision.as_upload_path().to_string().into_bytes();
+        let size = row_size(&path, &mutations);
+        self.mutate(path, mutations, "create_upload_marker").await?;
+        self.change_stream
+            .commit_write(revision, size, Some(time_expires))
+            .await;
         Ok(())
     }
 
@@ -1123,13 +1126,21 @@ impl HighVolumeBackend for BigTableBackend {
         revision: &ObjectId,
         access_time: Timestamp,
     ) -> Result<bool> {
-        self.check_and_mutate(
-            revision.as_upload_path().to_string().into_bytes(),
-            MutatePredicate::Include(live_row_filter(column_filter(COLUMN_UPLOAD), access_time)),
-            vec![delete_row_mutation()],
-            "delete_upload_marker",
-        )
-        .await
+        let deleted = self
+            .check_and_mutate(
+                revision.as_upload_path().to_string().into_bytes(),
+                MutatePredicate::Include(live_row_filter(
+                    column_filter(COLUMN_UPLOAD),
+                    access_time,
+                )),
+                vec![delete_row_mutation()],
+                "delete_upload_marker",
+            )
+            .await?;
+        if deleted {
+            self.change_stream.commit_delete(revision).await;
+        }
+        Ok(deleted)
     }
 
     #[tracing::instrument(level = "debug", fields(?id), skip_all)]
@@ -3086,6 +3097,34 @@ mod tests {
         assert_eq!(records[1].size, None);
         assert_eq!(records[1].record_id, records[0].record_id);
 
+        Ok(())
+    }
+
+    #[cfg(feature = "storage-cogs")]
+    #[tokio::test]
+    async fn change_stream_reports_upload_markers() -> Result<()> {
+        let (backend, producer) = create_test_backend_with_change_stream().await?;
+        let revision = new_test_revision(&make_id());
+        let now = Timestamp::now();
+        let expires_at = now + Duration::from_secs(3600);
+
+        backend.create_upload_marker(&revision, expires_at).await?;
+        assert!(backend.delete_upload_marker(&revision, now).await?);
+        assert!(!backend.delete_upload_marker(&revision, now).await?);
+
+        let records = producer.records();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].op_type, OpType::Write);
+        assert_eq!(
+            records[0].size,
+            Some(revision.as_upload_path().to_string().len() as u64 + 1)
+        );
+        assert_eq!(
+            records[0].expiration_time,
+            Some(expires_at.as_micros() as i64)
+        );
+        assert_eq!(records[1].op_type, OpType::Delete);
+        assert_eq!(records[1].record_id, records[0].record_id);
         Ok(())
     }
 
