@@ -818,8 +818,8 @@ pub struct Http {
     ///
     /// This is a flood protection limit. When the number of requests currently
     /// being processed reaches this value, new requests are rejected immediately
-    /// with HTTP 503. [Internal endpoints](crate::endpoints#internal-endpoints),
-    /// including health checks, are excluded from this limit.
+    /// with HTTP 503. Health and readiness endpoints (`/health`, `/ready`) are
+    /// excluded from this limit.
     ///
     /// Unlike readiness-based backpressure, direct rejection responds in
     /// milliseconds and recovers the moment any in-flight request completes.

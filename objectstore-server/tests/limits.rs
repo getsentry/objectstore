@@ -38,14 +38,8 @@ async fn test_web_concurrency_limit() -> Result<()> {
         "expected 503 for regular request at limit"
     );
 
-    // Health endpoints and legacy aliases need no auth and bypass the concurrency limit.
-    for path in [
-        "/health/live",
-        "/health/ready",
-        "/health/serving",
-        "/health",
-        "/ready",
-    ] {
+    // Health endpoints need no auth and bypass the concurrency limit.
+    for path in ["/health", "/ready"] {
         let response = client.get(server.url(path)).send().await?;
         assert_eq!(
             response.status(),

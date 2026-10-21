@@ -179,8 +179,8 @@ admitted instead of rejected.
 Before requests reach the storage service, a web-tier concurrency limit
 protects against connection floods. When the number of in-flight HTTP requests
 reaches `http.max_requests` (default: 10,000), new requests are rejected
-immediately with HTTP 503. [Internal endpoints](crate::endpoints#internal-endpoints),
-including health checks, are excluded from this limit. Rejections are counted in the
+immediately with HTTP 503. Health and readiness endpoints (`/health`, `/ready`)
+are excluded from this limit. Rejections are counted in the
 `web.concurrency.rejected` metric.
 
 Direct 503 rejection is preferred over readiness-based backpressure:
