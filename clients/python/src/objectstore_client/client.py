@@ -727,7 +727,6 @@ class Session:
         self,
         key: str,
         token_validity: timedelta | None = None,
-        *,
         response_content_disposition: Literal["inline", "attachment"] | None = None,
     ) -> str:
         """
@@ -741,11 +740,10 @@ class Session:
         information is embedded in the returned URL's query string, valid
         for the given duration.
 
-        Response options apply only to successful GET/HEAD responses. Disposition
-        defaults to attachment; inline responses include browser sandboxing without
-        restricting MIME types.
+        ``response_content_disposition`` selects ``attachment`` (default) or ``inline``
+        for successful GET/HEAD responses, retaining the stored filename.
 
-        These options are not bound by the JWT and can be changed by recipients.
+        These options are not bound by the auth token and can be changed by recipients.
         Use :meth:`presigned_object_url` to bind the options to a signature.
 
         Raises ``ValueError`` if ``token_validity`` is provided but no
@@ -772,7 +770,6 @@ class Session:
         method: Literal["GET", "HEAD"],
         key: str,
         duration: timedelta = timedelta(hours=1),
-        *,
         response_content_disposition: Literal["inline", "attachment"] | None = None,
     ) -> str:
         """
@@ -791,9 +788,8 @@ class Session:
         a request without an auth token. It can be handed to any HTTP client;
         the URL is already percent-encoded, and must be transmitted verbatim.
 
-        Response options apply only to successful GET/HEAD responses. Disposition
-        defaults to attachment; inline responses include browser sandboxing without
-        restricting MIME types.
+        ``response_content_disposition`` selects ``attachment`` (default) or ``inline``
+        for successful GET/HEAD responses, retaining the stored filename.
 
         Response options are included in the signature when supplied.
 

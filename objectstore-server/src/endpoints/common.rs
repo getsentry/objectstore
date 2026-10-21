@@ -1,22 +1,18 @@
 //! Common types and utilities for API endpoints.
 
 use std::borrow::Cow;
-use std::convert::Infallible;
 use std::error::Error;
-use std::fmt::Write as _;
 
 use axum::Json;
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, IntoResponseParts, Response, ResponseParts};
-use http::{HeaderValue, header};
+use axum::response::{IntoResponse, Response};
+use http::HeaderValue;
 use objectstore_service::error::{Error as ServiceError, ErrorKind as ServiceErrorKind};
-use objectstore_types::headers::ExtValue;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::auth::AuthError;
 use crate::extractors::batch::BatchError;
-use crate::extractors::response_options::ContentDisposition;
 
 /// A JSON error response returned by the API.
 #[derive(Serialize, Deserialize, Debug)]
@@ -217,113 +213,4 @@ pub fn insert_accept_ranges(response: &mut Response) {
         http::header::ACCEPT_RANGES,
         HeaderValue::from_static("bytes"),
     );
-}
-
-/// Object presentation headers, including mandatory browser safeguards.
-///
-/// All successful downloads get `nosniff`; inline responses also get a CSP sandbox without
-/// relaxation tokens. Sandboxing is a browser safeguard, not content sanitization, and does not
-/// prevent all external resource loads. Apply these parts only to successful object responses.
-#[derive(Debug)]
-pub(crate) struct DownloadHeaders {
-    disposition: HeaderValue,
-    inline: bool,
-}
-
-impl DownloadHeaders {
-    /// Builds success-only headers using the selected disposition and stored filename.
-    pub fn new(disposition: ContentDisposition, filename: Option<&str>) -> Self {
-        let header = match filename {
-            Some(filename) => format_content_disposition(disposition, filename),
-            None => HeaderValue::from_static(disposition.as_str()),
-        };
-        Self {
-            disposition: header,
-            inline: disposition == ContentDisposition::Inline,
-        }
-    }
-}
-
-impl IntoResponseParts for DownloadHeaders {
-    type Error = Infallible;
-
-    fn into_response_parts(
-        self,
-        mut response: ResponseParts,
-    ) -> Result<ResponseParts, Self::Error> {
-        let headers = response.headers_mut();
-        headers.insert(header::CONTENT_DISPOSITION, self.disposition);
-        headers.insert(
-            header::X_CONTENT_TYPE_OPTIONS,
-            HeaderValue::from_static("nosniff"),
-        );
-        if self.inline {
-            headers.insert(
-                header::CONTENT_SECURITY_POLICY,
-                HeaderValue::from_static("sandbox"),
-            );
-        }
-        Ok(response)
-    }
-}
-
-/// Formats the selected disposition with a stored filename.
-///
-/// The filename is sanitized (`/` and `\` become `-`, dots-only names become all dashes, non-ASCII
-/// and control characters become `_`) and then escaped for the RFC 6266 quoted-string (`"` is
-/// backslash-escaped).
-///
-/// A filename that is not pure ASCII cannot be represented in that quoted-string, so it
-/// additionally gets an RFC 8187 `filename*` parameter carrying the full UTF-8 value. The
-/// quoted-string then serves as the ASCII fallback for clients that ignore `filename*`.
-fn format_content_disposition(disposition: ContentDisposition, filename: &str) -> HeaderValue {
-    let all_dots = filename.chars().all(|c| c == '.');
-
-    let mut result = format!("{}; filename=\"", disposition.as_str());
-    for c in filename.chars() {
-        let c = match c {
-            '/' | '\\' => '-',
-            '.' if all_dots => '-',
-            '"' => {
-                result.push('\\');
-                '"'
-            }
-            c if !c.is_ascii() || c.is_control() => '_',
-            c => c,
-        };
-        result.push(c);
-    }
-    result.push('"');
-
-    if !filename.is_ascii() {
-        write!(result, "; filename*={}", ExtValue(filename))
-            .expect("writing to a string cannot fail");
-    }
-
-    // INVARIANT: every character written above is visible ASCII — the quoted-string replaces
-    // non-ASCII and control characters with `_`, and the `ext-value` is percent-encoded.
-    HeaderValue::from_str(&result).expect("content disposition is a valid header value")
-}
-
-#[cfg(test)]
-mod tests {
-    use axum::response::IntoResponse;
-
-    use crate::endpoints::common::DownloadHeaders;
-    use crate::extractors::response_options::ContentDisposition;
-
-    #[test]
-    fn inline_filename_retains_escaping_and_unicode_encoding() {
-        let response = (
-            DownloadHeaders::new(ContentDisposition::Inline, Some("réport.pdf")),
-            (),
-        )
-            .into_response();
-        assert_eq!(
-            response.headers()["content-disposition"],
-            "inline; filename=\"r_port.pdf\"; filename*=UTF-8''r%C3%A9port.pdf"
-        );
-        assert_eq!(response.headers()["content-security-policy"], "sandbox");
-        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
-    }
 }

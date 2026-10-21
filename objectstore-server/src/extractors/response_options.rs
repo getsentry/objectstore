@@ -16,8 +16,12 @@
 //! Content type and content encoding always come from stored metadata. Content-language and
 //! expires overrides are not supported. No MIME allowlist is applied to inline responses.
 
+use std::fmt::Write as _;
+
 use axum::extract::FromRequestParts;
+use http::HeaderValue;
 use http::request::Parts;
+use objectstore_types::headers::ExtValue;
 use serde::Deserialize;
 use serde::de::value::{Error, MapDeserializer};
 use url::form_urlencoded;
@@ -42,6 +46,44 @@ impl ContentDisposition {
             Self::Attachment => "attachment",
             Self::Inline => "inline",
         }
+    }
+
+    /// Formats the selected disposition with a stored filename.
+    ///
+    /// The filename is sanitized (`/` and `\` become `-`, dots-only names become all dashes, non-ASCII
+    /// and control characters become `_`) and then escaped for the RFC 6266 quoted-string (`"` is
+    /// backslash-escaped).
+    ///
+    /// A filename that is not pure ASCII cannot be represented in that quoted-string, so it
+    /// additionally gets an RFC 8187 `filename*` parameter carrying the full UTF-8 value. The
+    /// quoted-string then serves as the ASCII fallback for clients that ignore `filename*`.
+    pub fn with_filename(self, filename: &str) -> HeaderValue {
+        let all_dots = filename.chars().all(|c| c == '.');
+
+        let mut result = format!("{}; filename=\"", self.as_str());
+        for c in filename.chars() {
+            let c = match c {
+                '/' | '\\' => '-',
+                '.' if all_dots => '-',
+                '"' => {
+                    result.push('\\');
+                    '"'
+                }
+                c if !c.is_ascii() || c.is_control() => '_',
+                c => c,
+            };
+            result.push(c);
+        }
+        result.push('"');
+
+        if !filename.is_ascii() {
+            write!(result, "; filename*={}", ExtValue(filename))
+                .expect("writing to a string cannot fail");
+        }
+
+        // INVARIANT: every character written above is visible ASCII — the quoted-string replaces
+        // non-ASCII and control characters with `_`, and the `ext-value` is percent-encoded.
+        HeaderValue::from_str(&result).expect("content disposition is a valid header value")
     }
 }
 

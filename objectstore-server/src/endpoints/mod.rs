@@ -25,8 +25,8 @@
 //!
 //! GET and HEAD accept `response-content-disposition=inline|attachment` (default attachment).
 //! Response options apply only to successful object responses, including ranged GETs. See
-//! [`crate::extractors`] for validation and [`common`] for browser safeguards and filename
-//! formatting.
+//! [`crate::extractors::response_options`] for validation. The object handlers construct
+//! download headers with browser safeguards and filename formatting.
 //!
 //! # Resumable Upload Endpoints
 //!

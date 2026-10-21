@@ -256,7 +256,7 @@ with urllib.request.urlopen(url) as resp:
 
 ### Download response options
 
-Both `Session.object_url` and `Session.presigned_object_url` accept a keyword-only
+Both `Session.object_url` and `Session.presigned_object_url` accept a
 `response_content_disposition` option:
 
 ```python
@@ -269,21 +269,6 @@ url = session.presigned_object_url(
 
 Disposition accepts `inline` or `attachment`, defaulting to `attachment` when omitted.
 The stored filename is retained.
-
-These options apply only to successful GET/HEAD responses, including ranged downloads.
-404 and other error responses retain their existing headers.
-Successful downloads include `X-Content-Type-Options: nosniff`; inline responses also include
-`Content-Security-Policy: sandbox` without relaxation tokens. Inline MIME types are not
-restricted by an allowlist. Sandboxing is a browser safeguard, not content sanitization,
-and does not prevent all external resource loads.
-
-The object's declared content type and compression encoding cannot be overridden.
-Content-language and expires overrides are not supported.
-
-Pre-signed URLs bind the disposition option into the signature. JWT-bearing `object_url` URLs
-only authenticate the JWT's claims, so recipients can edit the response options.
-Existing URLs and signatures are unchanged when the options are omitted.
-Deploy server support before callers rely on these options; older servers ignore them.
 
 ## Configuration
 
