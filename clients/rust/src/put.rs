@@ -19,6 +19,7 @@ use crate::response::ResponseExt as _;
 use crate::{ClientStream, ObjectKey, Session};
 
 mod automatic;
+mod payload;
 
 /// The response returned from the service after uploading an object.
 #[derive(Debug, Deserialize)]
@@ -405,44 +406,46 @@ impl PutBuilder {
 
         self.metadata.compression = self.compression.map(CompressionMode::compression);
         let headers = self.metadata.to_headers("")?;
-        let prepared = automatic::prepare(
+        let prepared = payload::prepare(
             self.body,
             self.compression,
             self.resumable_threshold_bytes,
             self.session.client.spool_dir.clone(),
         )
         .await?;
-        let mut content_length = None;
-        // Keep the file reader alive until a direct fallback request finishes.
-        let mut replay = None;
-        let body = match prepared {
-            automatic::PreparedBody::Direct(body) => body,
-            automatic::PreparedBody::Replay(body) => {
+        let session = &self.session;
+        let key = self.key.as_deref().unwrap_or_default();
+        let send_direct = |body: Body, content_length: Option<u64>| async move {
+            // Prepare authentication only when ready to send: spooling can take long enough for
+            // a token minted before preparation to expire.
+            let mut builder = session.request(method, key)?.headers(headers);
+            if let Some(length) = content_length {
+                builder = builder.header(reqwest::header::CONTENT_LENGTH, length);
+            }
+            let response = builder.body(body).send().await?;
+            Ok(response.error_for_status_and_drain().await?.json().await?)
+        };
+        match prepared {
+            payload::PreparedBody::Direct(body) => {
+                send_direct(encode_body(body, self.compression).await?, None).await
+            }
+            payload::PreparedBody::Replay(mut body) => {
+                let length = body.len();
                 let create = crate::resumable::CreateResumableUploadBuilder {
                     session: self.session.clone(),
-                    total_length: body.len(),
+                    total_length: length,
                     key: self.key.clone(),
                     metadata: self.metadata,
                 };
                 if let Ok(Some(upload)) = create.send().await {
                     return automatic::upload(body, upload).await;
                 }
-                content_length = Some(body.len());
-                Body::wrap_stream(replay.insert(body).stream(0).await?)
+                body.with_stream(0, |stream| async {
+                    send_direct(Body::wrap_stream(stream), Some(length)).await
+                })
+                .await
             }
-        };
-
-        // Prepare authentication only when ready to send: spooling can take long enough for
-        // a token minted before preparation to expire.
-        let mut builder = self
-            .session
-            .request(method, self.key.as_deref().unwrap_or_default())?
-            .headers(headers);
-        if let Some(length) = content_length {
-            builder = builder.header(reqwest::header::CONTENT_LENGTH, length);
         }
-        let response = builder.body(body).send().await?;
-        Ok(response.error_for_status_and_drain().await?.json().await?)
     }
 }
 
