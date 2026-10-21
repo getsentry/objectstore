@@ -82,28 +82,6 @@
 //! | `410`  | The session expired or was canceled | Start a new session |
 //! | `501`  | The server declined the resumable upload session creation for the requested object | Fall back to a regular upload |
 //!
-//! # Multipart Upload Endpoints
-//!
-//! Multipart uploads are being replaced by [resumable
-//! uploads](#resumable-upload-endpoints) and will be removed once all consumers have
-//! migrated. See [`objectstore_types::multipart`] for the protocol types.
-//!
-//! | Method    | Path                                                         | Description                          |
-//! |-----------|--------------------------------------------------------------|--------------------------------------|
-//! | `POST`    | `/v1/objects:multipart/{usecase}/{scopes}/`                  | Initiate upload (server-generated key) |
-//! | `PUT`     | `/v1/objects:multipart/{usecase}/{scopes}/{*key}`            | Initiate upload (user-provided key)  |
-//! | `PUT`     | `/v1/objects:multipart:parts/{usecase}/{scopes}/{*key}`      | Upload a part (`upload_id`, `part_number` query params) |
-//! | `GET`     | `/v1/objects:multipart:parts/{usecase}/{scopes}/{*key}`      | List uploaded parts (`upload_id` query param) |
-//! | `POST`    | `/v1/objects:multipart:complete/{usecase}/{scopes}/{*key}`   | Complete upload (`upload_id` query param) |
-//! | `DELETE`  | `/v1/objects:multipart/{usecase}/{scopes}/{*key}`            | Abort upload (`upload_id` query param) |
-//!
-//! The initiate POST endpoint accepts both trailing-slash and non-trailing-slash forms.
-//!
-//! The complete endpoint returns `200 OK` immediately, with a streaming body that will
-//! contain the error (if any) as JSON. Whitespace is sent in the streaming body to keep the
-//! connection open. Clients must parse the body to determine the actual outcome, and not rely
-//! on the status code.
-//!
 //! # Internal Endpoints
 //!
 //! Internal endpoints are exempt from authentication, rate limiting, and the web concurrency
@@ -128,7 +106,6 @@ mod batch;
 pub mod common;
 pub mod health;
 mod keda;
-mod multipart;
 mod objects;
 #[cfg(all(target_os = "linux", feature = "profiling"))]
 mod profiling;
@@ -146,8 +123,7 @@ pub fn is_internal_route(route: &str) -> bool {
 pub fn routes() -> Router<ServiceState> {
     let routes_v1 = Router::new()
         .merge(objects::router())
-        .merge(batch::router())
-        .merge(multipart::router());
+        .merge(batch::router());
 
     let router = Router::new()
         .merge(health::router())
