@@ -89,18 +89,16 @@ def test_response_options_are_encoded_and_signed(key: str) -> None:
     session = Client("https://example.com/prefix", token=secret).session(
         Usecase("testing"), org=1
     )
-    cache_control = 'private, max-age=3600, x="a&b=+%?#"'
     with patch("objectstore_client.client.datetime") as clock:
         clock.now.return_value = datetime(2026, 4, 20, 13, 37, tzinfo=UTC)
         legacy = session.presigned_object_url("GET", key)
         explicit_none = session.presigned_object_url(
-            "GET", key, response_content_disposition=None, response_cache_control=None
+            "GET", key, response_content_disposition=None
         )
         url = session.presigned_object_url(
             "GET",
             key,
             response_content_disposition="inline",
-            response_cache_control=cache_control,
         )
     assert legacy == explicit_none
     legacy_path = utils.encode_path(f"/prefix/v1/objects/testing/org=1/{key}")
@@ -116,9 +114,7 @@ def test_response_options_are_encoded_and_signed(key: str) -> None:
     assert parsed.path == urlsplit(legacy).path
     query = parse_qs(parsed.query)
     assert query["response-content-disposition"] == ["inline"]
-    assert query["response-cache-control"] == [cache_control]
-    assert len(query) == 6
-    assert "%26" in parsed.query and "%2B" in parsed.query
+    assert len(query) == 5
     canonical = presign.build_canonical_form("GET", parsed.path, parsed.query)
     assert secret.signature_for_canonical_form(canonical) == query["os_sig"][0]
     altered = parsed.query.replace("=inline", "=attachment")
@@ -162,12 +158,10 @@ def test_jwt_url_options_roundtrip_without_binding_token() -> None:
             "key",
             token_validity=timedelta(minutes=5),
             response_content_disposition="inline",
-            response_cache_control='private, x="&=+"',
         )
     assert parse_qs(urlsplit(url).query) == {
         "os_auth": ["same.jwt.token"],
         "response-content-disposition": ["inline"],
-        "response-cache-control": ['private, x="&=+"'],
     }
     assert legacy.endswith("?os_auth=same.jwt.token")
     assert session.object_url(

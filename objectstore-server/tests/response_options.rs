@@ -34,10 +34,6 @@ async fn successful_downloads_apply_options_and_preserve_metadata() -> Result<()
     for method in [Method::GET, Method::HEAD] {
         for disposition in [None, Some("attachment"), Some("inline")] {
             let mut url = Url::parse(&server.url(path))?;
-            url.query_pairs_mut().append_pair(
-                "response-cache-control",
-                "private, max-age=3600, x=\"a&b=+%?#\"",
-            );
             if let Some(disposition) = disposition {
                 url.query_pairs_mut()
                     .append_pair("response-content-disposition", disposition);
@@ -53,10 +49,6 @@ async fn successful_downloads_apply_options_and_preserve_metadata() -> Result<()
                     "{}; filename=\"report.html\"",
                     disposition.unwrap_or("attachment")
                 )
-            );
-            assert_eq!(
-                response.headers()["cache-control"],
-                "private, max-age=3600, x=\"a&b=+%?#\""
             );
             assert_eq!(response.headers()["x-content-type-options"], "nosniff");
             assert_eq!(
@@ -77,8 +69,6 @@ async fn successful_downloads_apply_options_and_preserve_metadata() -> Result<()
             );
         }
     }
-    let response = client.get(server.url(path)).send().await?;
-    assert!(!response.headers().contains_key("cache-control"));
     Ok(())
 }
 
@@ -94,9 +84,7 @@ async fn ranged_and_error_responses() -> Result<()> {
         .await?
         .error_for_status()?;
     let mut url = Url::parse(&server.url(path))?;
-    url.set_query(Some(
-        "response-content-disposition=inline&response-cache-control=public%2C%20max-age%3D3600",
-    ));
+    url.set_query(Some("response-content-disposition=inline"));
     let response = client
         .get(url.clone())
         .header("range", "bytes=1-3")
@@ -125,7 +113,6 @@ async fn ranged_and_error_responses() -> Result<()> {
         assert_eq!(response.status(), expected);
         for name in [
             "content-disposition",
-            "cache-control",
             "x-content-type-options",
             "content-security-policy",
         ] {
@@ -140,7 +127,6 @@ async fn ranged_and_error_responses() -> Result<()> {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     for name in [
         "content-disposition",
-        "cache-control",
         "x-content-type-options",
         "content-security-policy",
     ] {
@@ -157,10 +143,7 @@ async fn invalid_and_duplicate_options_are_rejected() -> Result<()> {
     for query in [
         "response-content-disposition=other",
         "response-content-disposition=inline%3Bfilename%3Dx",
-        "response-cache-control=public%0D%0AX-Evil%3Ayes",
-        "response-cache-control=%00",
         "response-content-disposition=inline&RESPONSE-CONTENT-DISPOSITION=attachment",
-        "response-cache-control=public&%72esponse-cache-control=private",
     ] {
         let mut url = Url::parse(&server.url("/v1/objects/test/org=1/invalid-options"))?;
         url.set_query(Some(query));

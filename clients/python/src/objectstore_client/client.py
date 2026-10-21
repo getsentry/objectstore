@@ -54,7 +54,6 @@ USER_AGENT = f"objectstore-client/{version('objectstore-client')}"
 
 def _response_options_query(
     disposition: Literal["inline", "attachment"] | None,
-    cache_control: str | None,
 ) -> str:
     """Encode individual response options without changing legacy URLs."""
     pairs: list[tuple[str, str]] = []
@@ -64,8 +63,6 @@ def _response_options_query(
                 f"unsupported response content disposition {disposition!r}"
             )
         pairs.append(("response-content-disposition", disposition))
-    if cache_control is not None:
-        pairs.append(("response-cache-control", cache_control))
     return urlencode(pairs, quote_via=quote)
 
 
@@ -732,7 +729,6 @@ class Session:
         token_validity: timedelta | None = None,
         *,
         response_content_disposition: Literal["inline", "attachment"] | None = None,
-        response_cache_control: str | None = None,
     ) -> str:
         """
         Generates a GET url to the object with the given `key`.
@@ -747,8 +743,7 @@ class Session:
 
         Response options apply only to successful GET/HEAD responses. Disposition
         defaults to attachment; inline responses include browser sandboxing without
-        restricting MIME types. Cache control is passed through independently of
-        authorization expiry, so cached responses can outlive the URL's validity.
+        restricting MIME types.
 
         These options are not bound by the JWT and can be changed by recipients.
         Use :meth:`presigned_object_url` to bind the options to a signature.
@@ -757,9 +752,7 @@ class Session:
         ``SecretKey`` is configured on this session, or if disposition is invalid.
         """
         url = self._make_url(key, full=True)
-        query = _response_options_query(
-            response_content_disposition, response_cache_control
-        )
+        query = _response_options_query(response_content_disposition)
         if query:
             url = f"{url}?{query}"
         if token_validity is None:
@@ -781,7 +774,6 @@ class Session:
         duration: timedelta = timedelta(hours=1),
         *,
         response_content_disposition: Literal["inline", "attachment"] | None = None,
-        response_cache_control: str | None = None,
     ) -> str:
         """
         Generates a pre-signed URL authorizing a single ``method`` request on the
@@ -801,10 +793,9 @@ class Session:
 
         Response options apply only to successful GET/HEAD responses. Disposition
         defaults to attachment; inline responses include browser sandboxing without
-        restricting MIME types. Cache control is passed through independently of
-        authorization expiry, so cached responses can outlive the URL's validity.
+        restricting MIME types.
 
-        Both response options are included in the signature when supplied.
+        Response options are included in the signature when supplied.
 
         Note that `HEAD` and `GET` are considered equivalent from the point of view
         of signatures, meaning that a signature for `GET` can also be used for
@@ -843,9 +834,7 @@ class Session:
                 f"&{presign.PARAM_DURATION}={duration_secs}"
             )
 
-            response_query = _response_options_query(
-                response_content_disposition, response_cache_control
-            )
+            response_query = _response_options_query(response_content_disposition)
             if response_query:
                 encoded_query = f"{encoded_query}&{response_query}"
 

@@ -154,9 +154,7 @@ async fn response_options_are_signed_and_case_insensitive() -> Result<()> {
     seed_object(&server, "hello").await?;
     let legacy_query = presign_query(&Method::GET, OBJECT_PATH, ONE_HOUR);
     let (base, _) = legacy_query.rsplit_once("&os_sig=").unwrap();
-    let query = format!(
-        "{base}&response-content-disposition=inline&response-cache-control=private%2C%20max-age%3D3600&unknown=b&unknown=a"
-    );
+    let query = format!("{base}&response-content-disposition=inline&unknown=b&unknown=a");
     let signature = CanonicalRequest::new(&Method::GET, OBJECT_PATH, Some(&query))
         .sign(signing_key().as_bytes());
     let signed = format!("{query}&os_sig={signature}");
@@ -164,12 +162,10 @@ async fn response_options_are_signed_and_case_insensitive() -> Result<()> {
     for method in [Method::GET, Method::HEAD] {
         for query in [
             signed.clone(),
-            signed
-                .replace(
-                    "response-content-disposition",
-                    "RESPONSE-CONTENT-DISPOSITION",
-                )
-                .replace("response-cache-control", "RESPONSE-CACHE-CONTROL"),
+            signed.replace(
+                "response-content-disposition",
+                "RESPONSE-CONTENT-DISPOSITION",
+            ),
         ] {
             let response = client
                 .request(method.clone(), presigned_url(&server, OBJECT_PATH, &query))
@@ -177,17 +173,14 @@ async fn response_options_are_signed_and_case_insensitive() -> Result<()> {
                 .await?;
             assert_eq!(response.status(), reqwest::StatusCode::OK);
             assert_eq!(response.headers()["content-disposition"], "inline");
-            assert_eq!(response.headers()["cache-control"], "private, max-age=3600");
             assert_eq!(response.headers()["content-security-policy"], "sandbox");
         }
     }
     for query in [
         signed.replace("=inline", "=attachment"),
         signed.replace("&response-content-disposition=inline", ""),
-        signed.replace("max-age%3D3600", "max-age%3D60"),
-        signed.replace("&response-cache-control=private%2C%20max-age%3D3600", ""),
+        signed.replace("&unknown=b", ""),
         format!("{legacy_query}&response-content-disposition=inline"),
-        format!("{legacy_query}&response-cache-control=public"),
     ] {
         let response = client
             .get(presigned_url(&server, OBJECT_PATH, &query))
@@ -196,7 +189,6 @@ async fn response_options_are_signed_and_case_insensitive() -> Result<()> {
         assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
         for name in [
             "content-disposition",
-            "cache-control",
             "x-content-type-options",
             "content-security-policy",
         ] {

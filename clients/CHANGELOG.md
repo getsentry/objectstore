@@ -4,7 +4,7 @@
 
 ### New Features ✨
 
-- (py-client) Add disposition and cache-control options to object URLs and pre-signed URLs (FS-570).
+- (py-client) Add a content disposition option to object URLs and pre-signed URLs (FS-570).
 
 ## 0.2.10
 
