@@ -42,7 +42,7 @@ A request flows through several layers before reaching the storage service:
 6. **Response**: metadata is mapped to HTTP headers (see
    [`objectstore-types` docs](objectstore_types) for the header mapping) and
    the payload is streamed back. Successful individual-object downloads apply typed
-   [response-option headers](crate::response_options) for disposition and browser
+   [download headers](crate::endpoints::common) for disposition and browser
    safeguards; error responses retain their existing behavior.
 
 ## Authentication & Authorization

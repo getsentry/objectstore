@@ -40,12 +40,12 @@ use objectstore_types::range::ContentRange;
 use serde::Serialize;
 
 use crate::auth::AuthAwareService;
-use crate::endpoints::common::{ApiError, ApiResult, insert_accept_ranges};
+use crate::endpoints::common::{ApiError, ApiResult, DownloadHeaders, insert_accept_ranges};
 use crate::endpoints::resumable;
 use crate::extractors::byte_range::OptionalByteRange;
 use crate::extractors::request_time::RequestTime;
+use crate::extractors::response_options::ResponseOptions;
 use crate::extractors::{Xt, body::MeteredBody};
-use crate::response_options::ResponseOptions;
 use crate::resumable::ResumableTarget;
 use crate::state::ServiceState;
 
@@ -230,7 +230,11 @@ async fn object_get(
 
     insert_accept_ranges(&mut response);
 
-    Ok((options.into_headers(metadata.filename.as_deref()), response).into_response())
+    Ok((
+        DownloadHeaders::new(options.disposition, metadata.filename.as_deref()),
+        response,
+    )
+        .into_response())
 }
 
 async fn object_head(
@@ -250,7 +254,11 @@ async fn object_head(
 
     let mut response = (StatusCode::OK, headers).into_response();
     insert_accept_ranges(&mut response);
-    Ok((options.into_headers(metadata.filename.as_deref()), response).into_response())
+    Ok((
+        DownloadHeaders::new(options.disposition, metadata.filename.as_deref()),
+        response,
+    )
+        .into_response())
 }
 
 /// Inserts a `Content-Length` header covering the complete object.
