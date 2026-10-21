@@ -18,7 +18,6 @@ bytes = { workspace = true }
 chrono = { workspace = true }
 futures-util = { workspace = true }
 gcp_auth = { workspace = true }
-humantime = { workspace = true }
 humantime-serde = { workspace = true }
 objectstore-inventory-tracker = { workspace = true, features = ["kafka"], optional = true }
 objectstore-log = { workspace = true }
