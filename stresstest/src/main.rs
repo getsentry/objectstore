@@ -78,7 +78,6 @@ async fn main() -> anyhow::Result<()> {
 
     for w in config.workloads {
         w.validate()?;
-        let multipart = w.multipart_config();
 
         let workload = Workload::builder(w.name)
             .concurrency(w.concurrency)
@@ -87,7 +86,6 @@ async fn main() -> anyhow::Result<()> {
             .size_distribution(w.file_sizes.p50.0, w.file_sizes.p99.0)
             .max_size(w.file_sizes.max.map(|b| b.0))
             .action_weights(w.actions.writes, w.actions.reads, w.actions.deletes)
-            .multipart(multipart)
             .build();
 
         stresstest = stresstest.workload(workload);
