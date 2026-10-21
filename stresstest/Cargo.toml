@@ -12,7 +12,6 @@ publish = false
 [dependencies]
 anyhow = { workspace = true }
 argh = { workspace = true }
-bytes = { workspace = true }
 bytesize = { workspace = true, features = ["serde"] }
 futures = { workspace = true }
 humantime = { workspace = true }
