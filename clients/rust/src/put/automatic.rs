@@ -9,10 +9,10 @@ use crate::Error;
 use crate::resumable::{ResumableUpload, UploadProgress};
 
 pub(super) async fn upload(
-    mut body: ReplayBody,
+    body: &mut ReplayBody,
     handle: ResumableUpload,
 ) -> crate::Result<PutResponse> {
-    match upload_inner(&mut body, &handle).await {
+    match upload_inner(body, &handle).await {
         Ok(()) => Ok(PutResponse {
             key: handle.key().to_owned(),
         }),

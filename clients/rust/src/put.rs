@@ -36,25 +36,27 @@ pub(crate) enum PutBody {
 }
 
 impl PutBody {
-    /// Measures remaining bytes without opening queued paths or consuming a stream.
-    pub(crate) async fn remaining_size(&mut self) -> io::Result<Option<u64>> {
+    /// Returns the remaining byte length, or `None` when it cannot be determined.
+    pub(crate) async fn len(&mut self) -> Option<u64> {
         match self {
-            Self::Buffer(bytes) => Ok(Some(bytes.len() as u64)),
+            Self::Buffer(bytes) => Some(bytes.len() as u64),
             Self::File(file) => {
-                file.flush().await?;
-                let metadata = file.metadata().await?;
+                file.flush().await.ok()?;
+                let metadata = file.metadata().await.ok()?;
                 if !metadata.is_file() {
-                    return Ok(None);
+                    return None;
                 }
-                Ok(Some(
-                    metadata.len().saturating_sub(file.stream_position().await?),
-                ))
+                Some(
+                    metadata
+                        .len()
+                        .saturating_sub(file.stream_position().await.ok()?),
+                )
             }
             Self::Path(path) => {
-                let metadata = tokio::fs::metadata(path).await?;
-                Ok(metadata.is_file().then_some(metadata.len()))
+                let metadata = tokio::fs::metadata(path).await.ok()?;
+                metadata.is_file().then_some(metadata.len())
             }
-            Self::Stream(_) => Ok(None),
+            Self::Stream(_) => None,
         }
     }
 }
@@ -160,27 +162,17 @@ impl Session {
 ///
 /// # Automatic resumable uploads
 ///
-/// Buffers and regular files (including paths) use resumable uploads when their remaining
-/// input size meets the configured threshold, by default 256 MiB before client compression.
-/// Streams, generic readers, and files whose size cannot be determined use direct uploads.
-/// Files must remain unchanged until the upload finishes. File uploads start at the current
-/// position; path uploads open the file only when executed.
+/// Buffers and regular files (including paths) use resumable uploads at 256 MiB by default,
+/// measured from the current position before client compression. Override or disable this with
+/// [`Self::resumable_threshold_bytes`]. Streams, generic readers, and files of unknown size use
+/// direct uploads. Files must remain unchanged during upload.
 ///
-/// Eligible uploads reuse uncompressed or precompressed input. Client compression first spools
-/// the complete compressed payload to a temporary file, using [`crate::ClientBuilder::spool_dir`]
-/// when configured. If file creation fails, the client falls back to direct streaming. Later
-/// preparation errors propagate. Unsupported or failed session creation also falls back to a
-/// direct upload of the prepared bytes, without compressing them again.
+/// Input is reused unless compression is needed, in which case the compressed payload is spooled
+/// to a temporary file. Use [`crate::ClientBuilder::spool_dir`] to choose its directory.
+/// Transient failures and writes making no progress are retried up to twice. Acknowledged
+/// progress resets the retry count.
 ///
-/// Transient failures and writes making no progress are retried twice, with exponential delays
-/// of 2 and 4 seconds plus up to 1 second of jitter. Recovery queries the server's persisted
-/// offset before replaying data. The retry budget resets whenever that offset advances.
-/// Terminal failures after session creation attempt cancellation and return
-/// [`crate::Error::UploadFailed`] preserving the cause. Dropping the future releases local
-/// resources; the remote session is left to expire.
-///
-/// Automatic uploads require no feature flag. The `resumable-upload-api` feature exposes the
-/// manual protocol API. See [`Self::resumable_threshold_bytes`] to override eligibility.
+/// No feature flag is required. Uploads queued through [`Session::many`] do not use resumables.
 #[derive(Debug)]
 pub struct PutBuilder {
     pub(crate) session: Session,
@@ -195,9 +187,8 @@ impl PutBuilder {
     /// Sets the minimum remaining input size for automatic resumable uploads.
     ///
     /// Inherits [`crate::Usecase::resumable_threshold_bytes`] unless overridden. Pass [`None`]
-    /// to disable or zero to include every supported payload. Eligible uploads queued through
-    /// [`Session::many`] are sent individually rather than batched. See [`PutBuilder`] for
-    /// preparation and recovery behavior.
+    /// to disable or zero to include every supported payload. Uploads queued through
+    /// [`Session::many`] ignore this setting. See [`PutBuilder`] for preparation and recovery.
     ///
     /// ```no_run
     /// # async fn example(session: objectstore_client::Session) -> objectstore_client::Result<()> {
@@ -406,46 +397,40 @@ impl PutBuilder {
 
         self.metadata.compression = self.compression.map(CompressionMode::compression);
         let headers = self.metadata.to_headers("")?;
-        let prepared = payload::prepare(
+        let mut prepared = payload::prepare(
             self.body,
             self.compression,
             self.resumable_threshold_bytes,
             self.session.client.spool_dir.clone(),
         )
         .await?;
-        let session = &self.session;
-        let key = self.key.as_deref().unwrap_or_default();
-        let send_direct = |body: Body, content_length: Option<u64>| async move {
-            // Prepare authentication only when ready to send: spooling can take long enough for
-            // a token minted before preparation to expire.
-            let mut builder = session.request(method, key)?.headers(headers);
-            if let Some(length) = content_length {
-                builder = builder.header(reqwest::header::CONTENT_LENGTH, length);
-            }
-            let response = builder.body(body).send().await?;
-            Ok(response.error_for_status_and_drain().await?.json().await?)
-        };
-        match prepared {
-            payload::PreparedBody::Direct(body) => {
-                send_direct(encode_body(body, self.compression).await?, None).await
-            }
-            payload::PreparedBody::Replay(mut body) => {
-                let length = body.len();
-                let create = crate::resumable::CreateResumableUploadBuilder {
-                    session: self.session.clone(),
-                    total_length: length,
-                    key: self.key.clone(),
-                    metadata: self.metadata,
-                };
-                if let Ok(Some(upload)) = create.send().await {
-                    return automatic::upload(body, upload).await;
-                }
-                body.with_stream(0, |stream| async {
-                    send_direct(Body::wrap_stream(stream), Some(length)).await
-                })
-                .await
+        if let payload::PreparedBody::Replay(body) = &mut prepared {
+            let create = crate::resumable::CreateResumableUploadBuilder {
+                session: self.session.clone(),
+                total_length: body.len(),
+                key: self.key.clone(),
+                metadata: self.metadata,
+            };
+            if let Ok(Some(upload)) = create.send().await {
+                return automatic::upload(body, upload).await;
             }
         }
+
+        // All direct uploads, including preparation and session-creation fallbacks, converge here.
+        prepared
+            .with_body(self.compression, |body, content_length| async move {
+                // Mint authentication after preparation, which may outlast a token's validity.
+                let mut builder = self
+                    .session
+                    .request(method, self.key.as_deref().unwrap_or_default())?
+                    .headers(headers);
+                if let Some(length) = content_length {
+                    builder = builder.header(reqwest::header::CONTENT_LENGTH, length);
+                }
+                let response = builder.body(body).send().await?;
+                Ok(response.error_for_status_and_drain().await?.json().await?)
+            })
+            .await
     }
 }
 

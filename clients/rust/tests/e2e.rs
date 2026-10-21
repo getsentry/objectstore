@@ -504,8 +504,8 @@ async fn batch_operations() {
     let usecase = Usecase::new("usecase");
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
-    // First batch: batched PUTs alongside one automatic resumable upload.
-    // key-2 uses default compression; key-5 is precompressed.
+    // First batch: 4 PUT operations
+    // key-2 uses default compression (zstd), others are uncompressed
     let results: Vec<_> = session
         .many()
         .push(
@@ -518,19 +518,12 @@ async fn batch_operations() {
         .push(session.put("second object").key("key-2"))
         .push(session.put("third object").compress(None).key("key-3"))
         .push(session.put("fourth object").compress(None).key("key-4"))
-        .push(
-            session
-                .put(zstd::encode_all(&b"fifth object"[..], 0).unwrap())
-                .precompressed(Compression::Zstd)
-                .resumable_threshold_bytes(0)
-                .key("key-5"),
-        )
         .send()
         .await
         .collect()
         .await;
 
-    assert_eq!(results.len(), 5);
+    assert_eq!(results.len(), 4);
     let mut keys: Vec<String> = results
         .iter()
         .map(|r| match r {
@@ -539,7 +532,7 @@ async fn batch_operations() {
         })
         .collect();
     keys.sort();
-    assert_eq!(keys, vec!["key-1", "key-2", "key-3", "key-4", "key-5"]);
+    assert_eq!(keys, vec!["key-1", "key-2", "key-3", "key-4"]);
 
     // Second batch: GET key-1, GET key-2 (automatic decompression), DELETE key-3, PUT key-4 (override)
     let results: Vec<_> = session
@@ -615,10 +608,6 @@ async fn batch_operations() {
     // Verify the deleted object is gone
     let response = session.get("key-3").send().await.unwrap();
     assert!(response.is_none());
-
-    // The precompressed automatic upload remains readable through normal downloads.
-    let response = session.get("key-5").send().await.unwrap().unwrap();
-    assert_eq!(response.payload().await.unwrap(), "fifth object");
 }
 
 #[tokio::test]
@@ -763,62 +752,48 @@ async fn batch_put_files() {
     // This should be routed to a single PUT request instead of being batched.
     let large_body: Vec<u8> = vec![0xAB; 2 * 1024 * 1024]; // 2 MB
 
-    for threshold in [None, Some(0)] {
-        let mut many = session.many();
+    let mut many = session.many();
 
-        for (name, content) in &small_bodies {
-            let path = dir.path().join(name);
-            let mut f = std::fs::File::create(&path).unwrap();
-            f.write_all(content).unwrap();
-            let file = tokio::fs::File::open(&path).await.unwrap();
-            many = many.push(
-                session
-                    .put_file(file)
-                    .resumable_threshold_bytes(threshold)
-                    .compress(None)
-                    .key(*name),
-            );
-        }
-
-        let large_path = dir.path().join("large");
-        std::fs::File::create(&large_path)
-            .unwrap()
-            .write_all(&large_body)
-            .unwrap();
-        let large_file = tokio::fs::File::open(&large_path).await.unwrap();
-        many = many.push(
-            session
-                .put_file(large_file)
-                .resumable_threshold_bytes(threshold)
-                .compress(None)
-                .key("large"),
-        );
-
-        let results: Vec<_> = many.send().await.collect().await;
-
-        assert_eq!(results.len(), 4);
-
-        let mut keys: Vec<String> = results
-            .iter()
-            .map(|r| match r {
-                OperationResult::Put(key, Ok(_)) => key.clone(),
-                other => panic!("Expected successful Put result, got: {other:?}"),
-            })
-            .collect();
-        keys.sort();
-        assert_eq!(keys, vec!["large", "small-1", "small-2", "small-3"]);
-
-        // Verify all objects are retrievable with the correct content.
-        for (name, expected) in &small_bodies {
-            let response = session.get(name).send().await.unwrap().unwrap();
-            let payload = response.payload().await.unwrap();
-            assert_eq!(payload.as_ref(), expected.as_slice(), "mismatch for {name}");
-        }
-
-        let response = session.get("large").send().await.unwrap().unwrap();
-        let payload = response.payload().await.unwrap();
-        assert_eq!(payload.as_ref(), large_body.as_slice());
+    for (name, content) in &small_bodies {
+        let path = dir.path().join(name);
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(content).unwrap();
+        let file = tokio::fs::File::open(&path).await.unwrap();
+        many = many.push(session.put_file(file).compress(None).key(*name));
     }
+
+    let large_path = dir.path().join("large");
+    std::fs::File::create(&large_path)
+        .unwrap()
+        .write_all(&large_body)
+        .unwrap();
+    let large_file = tokio::fs::File::open(&large_path).await.unwrap();
+    many = many.push(session.put_file(large_file).compress(None).key("large"));
+
+    let results: Vec<_> = many.send().await.collect().await;
+
+    assert_eq!(results.len(), 4);
+
+    let mut keys: Vec<String> = results
+        .iter()
+        .map(|r| match r {
+            OperationResult::Put(key, Ok(_)) => key.clone(),
+            other => panic!("Expected successful Put result, got: {other:?}"),
+        })
+        .collect();
+    keys.sort();
+    assert_eq!(keys, vec!["large", "small-1", "small-2", "small-3"]);
+
+    // Verify all objects are retrievable with the correct content.
+    for (name, expected) in &small_bodies {
+        let response = session.get(name).send().await.unwrap().unwrap();
+        let payload = response.payload().await.unwrap();
+        assert_eq!(payload.as_ref(), expected.as_slice(), "mismatch for {name}");
+    }
+
+    let response = session.get("large").send().await.unwrap().unwrap();
+    let payload = response.payload().await.unwrap();
+    assert_eq!(payload.as_ref(), large_body.as_slice());
 }
 
 #[tokio::test]

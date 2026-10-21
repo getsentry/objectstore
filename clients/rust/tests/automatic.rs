@@ -372,12 +372,13 @@ async fn missing_spool_directory_falls_back_and_precompressed_input_needs_no_spo
 }
 
 #[tokio::test]
-async fn many_honors_threshold_overrides() {
-    let server = Server::new([Reply::Create, Reply::Complete]).await;
-    let session = server.session(None);
+async fn many_keeps_oversized_uploads_direct() {
+    let server = Server::new([Reply::Status(200)]).await;
+    let session = server.session(Some(0));
+    let data = Bytes::from(vec![b'x'; 1024 * 1024 + 1]);
     session
         .many()
-        .push(session.put("data").resumable_threshold_bytes(4))
+        .push(session.put(data.clone()).resumable_threshold_bytes(0))
         .send()
         .await
         .error_for_failures()
@@ -385,8 +386,9 @@ async fn many_honors_threshold_overrides() {
         .map_err(|errors| errors.collect::<Vec<_>>())
         .unwrap();
     let requests = server.finish();
-    assert_eq!(requests[0].uri.query(), Some("upload_type=resumable"));
-    assert_eq!(requests[1].body, "data");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].uri.query(), None);
+    assert_eq!(requests[0].body, data);
 }
 
 #[tokio::test]

@@ -258,8 +258,8 @@ impl Usecase {
     /// Sets the minimum remaining input size for automatic resumable uploads.
     ///
     /// Defaults to 256 MiB, measured before client compression. Pass [`None`] to disable
-    /// automatic resumables or zero to include every supported payload. This also applies to
-    /// uploads queued through [`Session::many`]. See [`crate::PutBuilder`] for eligibility.
+    /// automatic resumables or zero to include every supported payload. Uploads queued through
+    /// [`Session::many`] ignore this setting. See [`crate::PutBuilder`] for eligibility.
     /// Individual uploads can override this using [`crate::PutBuilder::resumable_threshold_bytes`].
     pub fn with_resumable_threshold_bytes(mut self, threshold: impl Into<Option<u64>>) -> Self {
         self.resumable_threshold_bytes = threshold.into();

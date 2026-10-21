@@ -17,6 +17,29 @@ pub(super) enum PreparedBody {
     Replay(ReplayBody),
 }
 
+impl PreparedBody {
+    /// Supplies a direct request with either the original input or prepared wire bytes.
+    pub(super) async fn with_body<T, F>(
+        self,
+        compression: Option<CompressionMode>,
+        request: impl FnOnce(reqwest::Body, Option<u64>) -> F,
+    ) -> crate::Result<T>
+    where
+        F: std::future::Future<Output = crate::Result<T>>,
+    {
+        match self {
+            Self::Direct(body) => request(super::encode_body(body, compression).await?, None).await,
+            Self::Replay(mut body) => {
+                let length = body.len();
+                body.with_stream(0, |stream| {
+                    request(reqwest::Body::wrap_stream(stream), Some(length))
+                })
+                .await
+            }
+        }
+    }
+}
+
 pub(super) enum ReplayBody {
     Buffer(Bytes),
     File { file: File, start: u64, length: u64 },
@@ -34,7 +57,7 @@ pub(super) async fn prepare(
     if let PutBody::Path(path) = body {
         body = PutBody::File(File::open(path).await?);
     }
-    let Some(mut length) = body.remaining_size().await.ok().flatten() else {
+    let Some(mut length) = body.len().await else {
         return Ok(PreparedBody::Direct(body));
     };
     if length < threshold {

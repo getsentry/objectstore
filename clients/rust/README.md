@@ -153,12 +153,13 @@ session.put("payload")
 
 ### Automatic Resumable Uploads
 
-Large buffer and regular-file uploads automatically use resumable uploads, including uploads
-queued through `many()`. The default threshold is 256 MiB before client compression. Compressed
-payloads are prepared in temporary files; uncompressed and precompressed inputs are reused.
-Streams and generic readers use direct uploads. No feature flag is required.
+Large buffer and regular-file uploads automatically use resumable uploads. The default
+threshold is 256 MiB before client compression. Compressed payloads are prepared in temporary
+files; uncompressed and precompressed inputs are reused.
+Streams, generic readers, and uploads queued through `many()` do not use resumables.
+No feature flag is required.
 
-See [`PutBuilder`] for eligibility, fallback, and recovery behavior,
+See [`PutBuilder`] for eligibility and recovery behavior,
 [`Usecase::with_resumable_threshold_bytes`] and [`PutBuilder::resumable_threshold_bytes`] to
 configure or disable it, and [`ClientBuilder::spool_dir`] to choose the temporary-file directory.
 
