@@ -13,15 +13,6 @@ use rand_distr::{Distribution, LogNormal, Zipf};
 use serde::Deserialize;
 use tokio::io::{AsyncRead, ReadBuf};
 
-/// Configuration for multipart uploads within a workload.
-#[derive(Debug, Clone)]
-pub struct MultipartConfig {
-    /// Maximum number of concurrent part uploads.
-    pub concurrency: usize,
-    /// Size of each part in bytes (except the last part, which may be smaller).
-    pub part_size: u64,
-}
-
 /// Defines how the workload schedules its operations.
 #[derive(Debug, Default, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -60,8 +51,6 @@ pub struct WorkloadBuilder {
     write_weight: usize,
     read_weight: usize,
     delete_weight: usize,
-
-    multipart: Option<MultipartConfig>,
 }
 
 impl WorkloadBuilder {
@@ -104,12 +93,6 @@ impl WorkloadBuilder {
         self
     }
 
-    /// Sets the multipart upload configuration.
-    pub fn multipart(mut self, config: Option<MultipartConfig>) -> Self {
-        self.multipart = config;
-        self
-    }
-
     /// Creates the workload instance.
     pub fn build(self) -> Workload {
         let rng = SmallRng::seed_from_u64(self.seed);
@@ -129,7 +112,6 @@ impl WorkloadBuilder {
             concurrency: self.concurrency,
             organizations: self.organizations,
             mode: self.mode,
-            multipart: self.multipart,
 
             rng,
             size_distribution,
@@ -162,8 +144,6 @@ pub struct Workload {
     pub(crate) organizations: u64,
     /// The target throughput for the workload, in bytes per second. Overrides concurrency.
     pub(crate) mode: WorkloadMode,
-    /// Optional multipart upload configuration.
-    pub(crate) multipart: Option<MultipartConfig>,
 
     /// The RNG driving all our distributions.
     rng: SmallRng,
@@ -198,8 +178,6 @@ impl Workload {
             write_weight: 33,
             read_weight: 33,
             delete_weight: 33,
-
-            multipart: None,
         }
     }
 

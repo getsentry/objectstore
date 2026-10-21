@@ -50,9 +50,6 @@ workloads:
     file_sizes:
       p50: 20 MiB
       p99: 100 MiB
-    multipart:
-      concurrency: 4
-      part_size: 10 MiB
     actions:
       writes: 100
       reads: 0

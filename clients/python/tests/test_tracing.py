@@ -9,7 +9,6 @@ import pytest
 import sentry_sdk
 from objectstore_client import Client, Usecase
 from objectstore_client.errors import RequestError
-from objectstore_client.multipart import MultipartUpload
 from sentry_sdk.envelope import Envelope
 from sentry_sdk.transport import Transport
 from sentry_sdk.types import Hint
@@ -121,56 +120,6 @@ SIMPLE_OPERATIONS = [
         {"objectstore.key": "my-key"},
         id="delete",
     ),
-    pytest.param(
-        lambda upload: upload["session"].initiate_multipart_upload(key="my-key"),
-        FakeResponse(200, json_data={"key": "my-key", "upload_id": "upload-1"}),
-        "objectstore.multipart.initiate",
-        {"objectstore.key": "my-key", "objectstore.upload_id": "upload-1"},
-        id="multipart.initiate",
-    ),
-    pytest.param(
-        lambda upload: upload["upload"].put_part(
-            b"part-data", part_number=1, content_length=len(b"part-data")
-        ),
-        FakeResponse(200, json_data={"etag": "etag-1"}),
-        "objectstore.multipart.put_part",
-        {
-            "objectstore.key": "my-key",
-            "objectstore.upload_id": "upload-1",
-            "objectstore.part_number": 1,
-            "objectstore.size": len(b"part-data"),
-        },
-        id="multipart.put_part",
-    ),
-    pytest.param(
-        lambda upload: upload["upload"].list_parts(),
-        FakeResponse(200, json_data={"parts": [], "is_truncated": False}),
-        "objectstore.multipart.list_parts",
-        {
-            "objectstore.key": "my-key",
-            "objectstore.upload_id": "upload-1",
-            "objectstore.part_count": 0,
-        },
-        id="multipart.list_parts",
-    ),
-    pytest.param(
-        lambda upload: upload["upload"].complete([]),
-        FakeResponse(200, data=b'{"key": "my-key"}'),
-        "objectstore.multipart.complete",
-        {
-            "objectstore.key": "my-key",
-            "objectstore.upload_id": "upload-1",
-            "objectstore.part_count": 0,
-        },
-        id="multipart.complete",
-    ),
-    pytest.param(
-        lambda upload: upload["upload"].abort(),
-        FakeResponse(200),
-        "objectstore.multipart.abort",
-        {"objectstore.key": "my-key", "objectstore.upload_id": "upload-1"},
-        id="multipart.abort",
-    ),
 ]
 
 
@@ -186,12 +135,11 @@ def test_storage_span_attributes(
     client = Client("http://127.0.0.1:8888")
     usecase = Usecase("testing")
     session = client.session(usecase, org=1)
-    upload = MultipartUpload(session, "my-key", "upload-1")
 
     monkeypatch.setattr(session._pool, "request", lambda *args, **kwargs: response)
 
     with sentry_sdk.traces.start_span(name="test", parent_span=None):
-        call({"session": session, "upload": upload})
+        call({"session": session})
 
     spans = _spans_by_op(captured_spans)
     span = spans[expected_op]

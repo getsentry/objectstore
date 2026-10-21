@@ -2822,7 +2822,6 @@ version = "0.2.10"
 dependencies = [
  "anyhow",
  "async-compression",
- "base64",
  "bytes",
  "futures-util",
  "http-body-util",
@@ -4629,7 +4628,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "argh",
- "bytes",
  "bytesize",
  "futures",
  "humantime",
