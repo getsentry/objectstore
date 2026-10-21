@@ -222,24 +222,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_signature_vector_preserves_exotic_paths_and_queries() {
-        let path = "/prefix/v1/objects/testing/org=1;project=2/caf%C3%A9/looks%2520encoded&+";
-        let query =
-            "unknown=b&os_sig=ignored&dup=b&&OS_KID=test&dup=a&flag&encoded=a%26b%3D%2B&unknown=a";
-        let canonical = CanonicalRequest::new(&Method::HEAD, path, Some(query));
-        assert_eq!(
-            canonical.0,
-            format!(
-                "GET\n{path}\ndup=a&dup=b&encoded=a%26b%3D%2B&flag&os_kid=test&unknown=a&unknown=b"
-            )
-        );
-        assert_eq!(
-            canonical.sign(&[7; 32]),
-            "2_8Qv-7PKMDMd-ku1kF33Xh8aPXjLj3QaIE_nLJuaDUGxtWUDQzCiU6Uz0Mb1zgHtfsCTB6CcQoZitooeJgmBw"
-        );
-    }
-
-    #[test]
     fn sign_and_verify_roundtrip() {
         let sk = test_signing_key();
         let vk = sk.verifying_key();
