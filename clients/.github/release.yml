@@ -26,8 +26,5 @@ changelog:
     - title: Other Changes 🔧
       commit_patterns:
         - "^(?<type>\\w+(?:\\([^)]+\\))?:\\s*)"
-      semver: patch
-    - title: Other Changes 🔧
-      labels:
-        - "*"
+        - ".*"
       semver: patch
