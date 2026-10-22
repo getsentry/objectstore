@@ -9,7 +9,7 @@ from urllib.parse import parse_qs, urlsplit
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
 from objectstore_client import Client, Usecase, presign, utils
-from objectstore_client.auth import SecretKey
+from objectstore_client.auth import SecretKey, TokenGenerator
 
 TEST_EDDSA_PRIVKEY_PATH = os.path.join(os.path.dirname(__file__), "ed25519.private.pem")
 TEST_EDDSA_PUBKEY_PATH = os.path.join(os.path.dirname(__file__), "ed25519.public.pem")
@@ -81,9 +81,9 @@ def test_sign_canonical_form_roundtrips_with_public_key() -> None:
 def test_presigned_url_response_options() -> None:
     with open(TEST_EDDSA_PRIVKEY_PATH) as f:
         secret = SecretKey("test_kid", f.read())
-    session = Client("https://example.com/prefix", token=secret).session(
-        Usecase("testing"), org=1
-    )
+    session = Client(
+        "https://example.com/prefix", token=TokenGenerator(secret)
+    ).session(Usecase("testing"), org=1)
     with patch("objectstore_client.client.datetime") as clock:
         clock.now.return_value = datetime(2026, 4, 20, 13, 37, tzinfo=UTC)
         legacy = session.presigned_object_url("GET", "key")
@@ -107,9 +107,9 @@ def test_presigned_url_response_options() -> None:
 def test_jwt_url_options_roundtrip_without_binding_token() -> None:
     with open(TEST_EDDSA_PRIVKEY_PATH) as f:
         secret = SecretKey("test_kid", f.read())
-    session = Client("https://example.com/prefix", token=secret).session(
-        Usecase("testing")
-    )
+    session = Client(
+        "https://example.com/prefix", token=TokenGenerator(secret)
+    ).session(Usecase("testing"))
     with patch.object(session, "mint_token", return_value="same.jwt.token"):
         legacy = session.object_url("key", token_validity=timedelta(minutes=5))
         url = session.object_url(

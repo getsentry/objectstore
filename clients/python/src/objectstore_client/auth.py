@@ -28,71 +28,18 @@ class SecretKey:
     """
     An EdDSA keypair used to authenticate with Objectstore.
 
-    Can generate JWTs for request-level auth and sign canonical forms for
-    pre-signed URLs. Pass a ``SecretKey`` directly to ``Client(token=...)``
-    and it will sign a fresh JWT for each request.
+    ``kid`` is the key ID that the Objectstore server uses to load the
+    corresponding public key from its configuration, and ``secret_key`` is the
+    PEM-encoded EdDSA private key.
+
+    A ``SecretKey`` only identifies the signer. To authenticate requests, wrap
+    it in a :class:`TokenGenerator`, which adds the expiry and permissions for
+    the tokens it signs.
     """
 
-    def __init__(
-        self,
-        kid: str,
-        secret_key: str,
-        expiry_seconds: int = 60,
-        permissions: list[Permission] | None = None,
-    ):
+    def __init__(self, kid: str, secret_key: str):
         self.kid = kid
         self.secret_key = secret_key
-        self.expiry_seconds = expiry_seconds
-        self.permissions = permissions if permissions is not None else Permission.max()
-
-    def token_for_scope(
-        self,
-        usecase: str,
-        scope: Scope,
-        permissions: list[Permission] | None = None,
-        expiry_seconds: int | None = None,
-    ) -> str:
-        """
-        Sign a JWT for the passed-in usecase and scope using the configured key
-        information, expiry, and permissions.
-
-        When ``permissions`` is ``None``, the default permissions are used.
-        When provided, they override the defaults for this token only.
-
-        When ``expiry_seconds`` is ``None``, the default expiry is used.
-
-        Raises ``ValueError`` if any requested permission is not granted to
-        this key.
-
-        The JWT is signed using EdDSA, so ``self.secret_key`` must be an EdDSA
-        private key. ``self.kid`` is used by the Objectstore server to load the
-        corresponding public key from its configuration.
-        """
-        if permissions is not None:
-            escalated = set(permissions) - set(self.permissions)
-            if escalated:
-                raise ValueError(
-                    "requested permissions not granted to this "
-                    f"secret key: {sorted(escalated)}"
-                )
-
-        headers = {"kid": self.kid}
-        expiry = expiry_seconds if expiry_seconds is not None else self.expiry_seconds
-        claims = {
-            "res": {
-                "os:usecase": usecase,
-                **{k: str(v) for k, v in scope.dict().items()},
-            },
-            "permissions": (
-                permissions if permissions is not None else self.permissions
-            ),
-            "exp": datetime.now(tz=UTC) + timedelta(seconds=expiry),
-        }
-
-        return jwt.encode(claims, self.secret_key, algorithm="EdDSA", headers=headers)
-
-    # Deprecated: use token_for_scope() instead.
-    sign_for_scope = token_for_scope
 
     def signature_for_canonical_form(self, canonical_form: str) -> str:
         """Signs a canonical request form with the Ed25519 private key.
@@ -107,12 +54,76 @@ class SecretKey:
         return base64.urlsafe_b64encode(signature).rstrip(b"=").decode()
 
 
-TokenProvider = SecretKey | str
+class TokenGenerator:
+    """
+    Generates auth tokens for Objectstore requests, signed with a :class:`SecretKey`.
+
+    ``expiry_seconds`` and ``permissions`` are the defaults for every token this
+    generator signs. Per-token overrides may shorten the expiry or narrow the
+    permissions, but cannot grant permissions beyond ``permissions``.
+
+    Pass a ``TokenGenerator`` directly to ``Client(token=...)`` and it will sign a
+    fresh JWT for each request. Its key is also used to sign pre-signed URLs.
+    """
+
+    def __init__(
+        self,
+        key: SecretKey,
+        expiry_seconds: int = 60,
+        permissions: list[Permission] | None = None,
+    ):
+        self.key = key
+        self.expiry_seconds = expiry_seconds
+        self.permissions = permissions if permissions is not None else Permission.max()
+
+    def token_for_scope(
+        self,
+        usecase: str,
+        scope: Scope,
+        permissions: list[Permission] | None = None,
+        expiry_seconds: int | None = None,
+    ) -> str:
+        """
+        Sign a JWT for the passed-in usecase and scope using this generator's
+        key, expiry, and permissions.
+
+        When ``permissions`` is ``None``, the default permissions are used.
+        When provided, they override the defaults for this token only.
+
+        When ``expiry_seconds`` is ``None``, the default expiry is used.
+
+        Raises ``ValueError`` if any requested permission is not granted to
+        this generator.
+        """
+        if permissions is not None:
+            escalated = set(permissions) - set(self.permissions)
+            if escalated:
+                raise ValueError(
+                    "requested permissions not granted to this "
+                    f"token generator: {sorted(escalated)}"
+                )
+
+        headers = {"kid": self.key.kid}
+        expiry = expiry_seconds if expiry_seconds is not None else self.expiry_seconds
+        claims = {
+            "res": {
+                "os:usecase": usecase,
+                **{k: str(v) for k, v in scope.dict().items()},
+            },
+            "permissions": (
+                permissions if permissions is not None else self.permissions
+            ),
+            "exp": datetime.now(tz=UTC) + timedelta(seconds=expiry),
+        }
+
+        return jwt.encode(
+            claims, self.key.secret_key, algorithm="EdDSA", headers=headers
+        )
+
+
+TokenProvider = TokenGenerator | str
 """Authentication provider for Objectstore requests.
 
-Can be either a :class:`SecretKey` that signs a fresh JWT per request,
+Can be either a :class:`TokenGenerator` that signs a fresh JWT per request,
 or a static pre-signed JWT string.
 """
-
-# Deprecated: use SecretKey instead.
-TokenGenerator = SecretKey
