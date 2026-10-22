@@ -113,8 +113,8 @@ impl ClientBuilder {
     /// Sets the authentication token to use for requests to Objectstore.
     ///
     /// Accepts anything that implements [`IntoTokenProvider`]:
-    /// - A [`TokenGenerator`](crate::TokenGenerator) — for internal services that have access to
-    ///   an EdDSA keypair. The generator signs a fresh JWT for each request.
+    /// - A [`SecretKey`](crate::SecretKey) — for internal services that have access to
+    ///   an EdDSA keypair. The key signs a fresh JWT for each request.
     /// - A `String` or `&str` — a pre-signed JWT, used as-is for every request.
     /// - An `Option` of any of the above — a `None` leaves the client unauthenticated, which is
     ///   convenient when authentication is configured conditionally.
@@ -340,8 +340,8 @@ pub(crate) struct ClientInner {
 /// authentication via [`ClientBuilder::token`]. It accepts anything that converts
 /// into a [`TokenProvider`]:
 ///
-/// - **[`TokenGenerator`](crate::TokenGenerator)** — for internal services that have access to
-///   an EdDSA keypair. The generator signs a fresh JWT for each request, scoped to the
+/// - **[`SecretKey`](crate::SecretKey)** — for internal services that have access to
+///   an EdDSA keypair. The key signs a fresh JWT for each request, scoped to the
 ///   specific usecase and scope being accessed.
 /// - **`String` / `&str`** — a pre-signed JWT, used as-is for every request.
 ///   Use this for external services that receive a token from another source.
@@ -352,38 +352,34 @@ pub(crate) struct ClientInner {
 ///
 /// ```no_run
 /// use std::time::Duration;
-/// use objectstore_client::{Client, SecretKey, TokenGenerator, Usecase};
+/// use objectstore_client::{Client, SecretKey, Usecase};
 /// use objectstore_types::auth::Permission;
 ///
 /// # async fn example() -> objectstore_client::Result<()> {
-/// let token_generator = TokenGenerator::new(SecretKey {
-///         secret_key: "<safely inject secret key>".into(),
-///         kid: "my-service".into(),
-///     })?
+/// let secret_key = SecretKey::new("my-service", "<safely inject secret key>")?
 ///     .expiry_seconds(30)
 ///     .permissions(&[Permission::ObjectRead]);
 ///
 /// let client = Client::builder("http://localhost:8888/")
 ///     .timeout(Duration::from_secs(1))
 ///     .propagate_traces(true)
-///     .token(token_generator)
+///     .token(secret_key)
 ///     .build()?;
 /// # Ok(())
 /// # }
 /// ```
 ///
 /// External service with a pre-signed JWT (obtained via
-/// [`TokenGenerator::create_token`](crate::TokenGenerator::create_token)):
+/// [`SecretKey::create_token`](crate::SecretKey::create_token)):
 ///
 /// ```no_run
-/// use objectstore_client::{Client, SecretKey, TokenGenerator, Usecase};
+/// use objectstore_client::{Client, SecretKey, Usecase};
 ///
 /// # fn example() -> objectstore_client::Result<()> {
 /// let scope = Usecase::new("my_app").for_project(42, 1337);
-/// let token = TokenGenerator::new(SecretKey {
-///     secret_key: "<private key>".into(),
-///     kid: "my-service".into(),
-/// })?.create_token(&scope).sign()?;
+/// let token = SecretKey::new("my-service", "<private key>")?
+///     .create_token(&scope)
+///     .sign()?;
 ///
 /// let client = Client::builder("http://localhost:8888/")
 ///     .token(token)
@@ -481,7 +477,7 @@ impl Session {
 
     /// Returns a token authorizing access to this session's scope.
     ///
-    /// With a [`TokenGenerator`](crate::TokenGenerator), each call signs a fresh token whose expiry
+    /// With a [`SecretKey`](crate::SecretKey), each call signs a fresh token whose expiry
     /// starts now, using the configured permissions; use [`create_token`](Self::create_token) to
     /// narrow either.
     ///
@@ -496,8 +492,8 @@ impl Session {
     /// pre-signed token never fails.
     pub fn get_token(&self) -> crate::Result<Option<String>> {
         match self.client.token {
-            Some(TokenProvider::Generator(ref generator)) => {
-                generator.request_inner(&self.scope).sign().map(Some)
+            Some(TokenProvider::SecretKey(ref key)) => {
+                key.request_inner(&self.scope).sign().map(Some)
             }
             Some(TokenProvider::Static(ref token)) => Ok(Some(token.clone())),
             None => Ok(None),
@@ -517,14 +513,12 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// This requires a [`TokenGenerator`](crate::TokenGenerator) to sign a new token.
+    /// This requires a [`SecretKey`](crate::SecretKey) to sign a new token.
     /// If not available, this will result in an error. To retrieve a token with the current
     /// session's default permissions and expiry, use [`get_token`](Self::get_token) instead.
     pub fn create_token(&self) -> crate::Result<Option<TokenRequest<'_>>> {
         match self.client.token {
-            Some(TokenProvider::Generator(ref generator)) => {
-                Ok(Some(generator.request_inner(&self.scope)))
-            }
+            Some(TokenProvider::SecretKey(ref key)) => Ok(Some(key.request_inner(&self.scope))),
             Some(TokenProvider::Static(_)) => Err(crate::Error::StaticTokenOverride),
             None => Ok(None),
         }

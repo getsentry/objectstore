@@ -273,34 +273,26 @@ session
 If your Objectstore instance enforces authorization, you must configure authentication
 via [`ClientBuilder::token`]. It accepts either:
 
-- A **[`TokenGenerator`]** — for internal services that have access to an EdDSA keypair.
-  The generator signs a fresh JWT for each request, scoped to the specific usecase
+- A **[`SecretKey`]** — for internal services that have access to an EdDSA keypair.
+  The key signs a fresh JWT for each request, scoped to the specific usecase
   and scope being accessed.
 - A **`String` / `&str`** — a pre-signed JWT, used as-is for every request.
   Use this for external services that receive a token from another source.
 - An `Option` of any of the above — useful for chained builder calls.
 
 ```rust,ignore
-use objectstore_client::{Client, SecretKey, TokenGenerator, Usecase};
+use objectstore_client::{Client, SecretKey, Usecase};
 
 // Option 1: Internal service with a keypair
 let client = Client::builder("http://localhost:8888/")
-    .token(
-        TokenGenerator::new(SecretKey {
-            secret_key: "<private key>".into(),
-            kid: "my-service".into(),
-        })?
-    )
+    .token(SecretKey::new("my-service", "<private key>")?)
     .build()?;
 
 // Option 2: External service with a pre-signed JWT
-// Use TokenGenerator::create_token() to obtain a static token from an authority
+// Use SecretKey::create_token() to obtain a static token from an authority
 let scope = Usecase::new("my_app").for_project(42, 1337);
-let generator = TokenGenerator::new(SecretKey {
-    secret_key: "<private key>".into(),
-    kid: "my-service".into(),
-})?;
-let token = generator.create_token(&scope).sign()?;
+let secret_key = SecretKey::new("my-service", "<private key>")?;
+let token = secret_key.create_token(&scope).sign()?;
 
 // Then pass the token directly to a client builder.
 let client = Client::builder("http://localhost:8888/")
@@ -326,7 +318,7 @@ static CLIENT: LazyLock<Client> = LazyLock::new(|| {
         // .propagate_traces(true) // default: false
         // .timeout(Duration::from_secs(5)) // default: no read timeout (connect: 100ms)
         // .configure_reqwest(|builder| { ... }) // customize the reqwest::ClientBuilder
-        // .token(token_generator) // see Authentication section
+        // .token(secret_key) // see Authentication section
         .build()
         .expect("Objectstore client to build successfully")
 });
@@ -344,7 +336,7 @@ async fn example() -> Result<()> {
 ```
 
 See [`ClientBuilder`] for all available options, including authentication via
-[`TokenGenerator`].
+[`SecretKey`].
 
 See the [API docs](https://getsentry.github.io/objectstore/rust/objectstore_client/) for full reference documentation.
 

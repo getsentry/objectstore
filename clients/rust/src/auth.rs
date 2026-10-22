@@ -15,49 +15,32 @@ const DEFAULT_PERMISSIONS: [Permission; 3] = [
     Permission::ObjectDelete,
 ];
 
-/// Key configuration that will be used to sign tokens in Objectstore requests.
-pub struct SecretKey {
-    /// A key ID that Objectstore must use to load the corresponding public key.
-    pub kid: String,
-
-    /// An EdDSA private key.
-    pub secret_key: String,
-}
-
-impl std::fmt::Debug for SecretKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SecretKey")
-            .field("kid", &self.kid)
-            .field("secret_key", &"[redacted]")
-            .finish()
-    }
-}
-
 /// Authentication provider for Objectstore requests.
 ///
-/// Can be either a [`TokenGenerator`] that signs a fresh JWT per request,
+/// Can be either a [`SecretKey`] that signs a fresh JWT per request,
 /// or a static pre-signed JWT string.
 pub enum TokenProvider {
     /// A pre-signed JWT token string, used as-is for every request.
     Static(String),
-    /// A generator that signs a fresh JWT for each request using an EdDSA keypair.
-    Generator(TokenGenerator),
+    /// A secret key that signs a fresh JWT for each request using an EdDSA keypair.
+    SecretKey(SecretKey),
 }
 
 impl std::fmt::Debug for TokenProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TokenProvider::Static(_) => f.write_str("TokenProvider::Static([redacted])"),
-            TokenProvider::Generator(g) => {
-                f.debug_tuple("TokenProvider::Generator").field(g).finish()
-            }
+            TokenProvider::SecretKey(key) => f
+                .debug_tuple("TokenProvider::SecretKey")
+                .field(key)
+                .finish(),
         }
     }
 }
 
 /// Conversion into an optional [`TokenProvider`] for [`ClientBuilder::token`].
 ///
-/// This is implemented for [`TokenGenerator`], `String`, and `&str`, each of which yields a
+/// This is implemented for [`SecretKey`], `String`, and `&str`, each of which yields a
 /// configured provider. It is also implemented for any `Option<T>` where `T: IntoTokenProvider`,
 /// so a `None` resolves to no authentication and a `Some(value)` to the inner provider. This lets
 /// callers pass optional auth configuration to [`ClientBuilder::token`] without an explicit
@@ -78,9 +61,9 @@ where
     }
 }
 
-impl IntoTokenProvider for TokenGenerator {
+impl IntoTokenProvider for SecretKey {
     fn into_token_provider(self) -> Option<TokenProvider> {
-        Some(TokenProvider::Generator(self))
+        Some(TokenProvider::SecretKey(self))
     }
 }
 
@@ -96,17 +79,17 @@ impl IntoTokenProvider for &str {
     }
 }
 
-/// A utility to generate auth tokens to be used in Objectstore requests.
+/// An EdDSA keypair used to sign auth tokens for Objectstore requests.
 ///
-/// Tokens are signed with an EdDSA private key and have certain permissions and expiry timeouts
+/// Tokens are signed with the private key and have certain permissions and expiry timeouts
 /// applied.
 ///
-/// Use this for internal services that have access to an EdDSA keypair. A `TokenGenerator`
+/// Use this for internal services that have access to an EdDSA keypair. A `SecretKey`
 /// implements [`IntoTokenProvider`], so it can be passed directly to
 /// [`ClientBuilder::token`](crate::ClientBuilder::token), where it becomes a
-/// [`TokenProvider::Generator`].
+/// [`TokenProvider::SecretKey`].
 #[derive(Debug)]
-pub struct TokenGenerator {
+pub struct SecretKey {
     kid: String,
     encoding_key: EncodingKey,
     expiry_seconds: u64,
@@ -129,25 +112,31 @@ struct JwtClaims {
     res: JwtRes,
 }
 
-impl TokenGenerator {
-    /// Create a new [`TokenGenerator`] for a given key configuration.
-    pub fn new(secret_key: SecretKey) -> crate::Result<TokenGenerator> {
-        let encoding_key = EncodingKey::from_ed_pem(secret_key.secret_key.as_bytes())?;
-        Ok(TokenGenerator {
-            kid: secret_key.kid,
+impl SecretKey {
+    /// Creates a new [`SecretKey`] from a key ID and a PEM-encoded EdDSA private key.
+    ///
+    /// `kid` is the key ID that Objectstore uses to load the corresponding public key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `secret_key` is not a valid PEM-encoded EdDSA private key.
+    pub fn new(kid: impl Into<String>, secret_key: &str) -> crate::Result<SecretKey> {
+        let encoding_key = EncodingKey::from_ed_pem(secret_key.as_bytes())?;
+        Ok(SecretKey {
+            kid: kid.into(),
             encoding_key,
             expiry_seconds: DEFAULT_EXPIRY_SECONDS,
             permissions: HashSet::from(DEFAULT_PERMISSIONS),
         })
     }
 
-    /// Set the expiry duration for tokens signed by this generator.
+    /// Set the expiry duration for tokens signed by this key.
     pub fn expiry_seconds(mut self, expiry_seconds: u64) -> Self {
         self.expiry_seconds = expiry_seconds;
         self
     }
 
-    /// Set the permissions that will be granted to tokens signed by this generator.
+    /// Set the permissions that will be granted to tokens signed by this key.
     pub fn permissions(mut self, permissions: &[Permission]) -> Self {
         self.permissions = HashSet::from_iter(permissions.iter().copied());
         self
@@ -158,11 +147,11 @@ impl TokenGenerator {
     /// Use this to produce a static token that can be handed to an external service
     /// which then passes it to [`ClientBuilder::token`](crate::ClientBuilder::token).
     ///
-    /// By default, the token is signed with the generator's default permissions and expiry.
+    /// By default, the token is signed with the key's default permissions and expiry.
     /// Use the builder methods on the returned [`TokenRequest`] to customize them.
     pub fn create_token<'a>(&'a self, scope: &'a Scope) -> TokenRequest<'a> {
         TokenRequest {
-            generator: self,
+            key: self,
             scope: scope.0.as_ref(),
             permissions: None,
             expiry_seconds: None,
@@ -171,7 +160,7 @@ impl TokenGenerator {
 
     pub(crate) fn request_inner<'a>(&'a self, scope: &'a ScopeInner) -> TokenRequest<'a> {
         TokenRequest {
-            generator: self,
+            key: self,
             scope: Ok(scope),
             permissions: None,
             expiry_seconds: None,
@@ -179,7 +168,7 @@ impl TokenGenerator {
     }
 
     /// Resolves the permissions to embed in a token, validating that any explicitly requested
-    /// permissions are a subset of those granted to this generator.
+    /// permissions are a subset of those granted to this key.
     fn resolve_permissions(
         &self,
         requested: Option<&[Permission]>,
@@ -199,24 +188,24 @@ impl TokenGenerator {
     }
 }
 
-/// A request to mint a new token returned from [`TokenGenerator::create_token`].
+/// A request to mint a new token returned from [`SecretKey::create_token`].
 #[derive(Debug)]
 pub struct TokenRequest<'a> {
-    generator: &'a TokenGenerator,
+    key: &'a SecretKey,
     scope: Result<&'a ScopeInner, &'a crate::Error>,
     permissions: Option<Vec<Permission>>,
     expiry_seconds: Option<u64>,
 }
 
 impl TokenRequest<'_> {
-    /// Override the permissions for this token, which must be a subset of the generator's
+    /// Override the permissions for this token, which must be a subset of the key's
     /// permissions.
     pub fn permissions(mut self, permissions: &[Permission]) -> Self {
         self.permissions = Some(permissions.to_vec());
         self
     }
 
-    /// Set the expiry duration for this token, overriding the generator's default.
+    /// Set the expiry duration for this token, overriding the key's default.
     pub fn expiry_seconds(mut self, expiry_seconds: u64) -> Self {
         self.expiry_seconds = Some(expiry_seconds);
         self
@@ -238,11 +227,8 @@ impl TokenRequest<'_> {
         };
 
         let claims = JwtClaims {
-            exp: get_current_timestamp()
-                + self.expiry_seconds.unwrap_or(self.generator.expiry_seconds),
-            permissions: self
-                .generator
-                .resolve_permissions(self.permissions.as_deref())?,
+            exp: get_current_timestamp() + self.expiry_seconds.unwrap_or(self.key.expiry_seconds),
+            permissions: self.key.resolve_permissions(self.permissions.as_deref())?,
             res: JwtRes {
                 usecase: scope.usecase().name().into(),
                 scopes: scope
@@ -254,8 +240,8 @@ impl TokenRequest<'_> {
         };
 
         let mut header = Header::new(Algorithm::EdDSA);
-        header.kid = Some(self.generator.kid.clone());
+        header.kid = Some(self.key.kid.clone());
 
-        Ok(encode(&header, &claims, &self.generator.encoding_key)?)
+        Ok(encode(&header, &claims, &self.key.encoding_key)?)
     }
 }

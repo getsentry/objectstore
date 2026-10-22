@@ -23,10 +23,10 @@ pub enum Error {
     #[error(transparent)]
     TokenError(#[from] jsonwebtoken::errors::Error),
     /// Error when the permissions requested for a token exceed those granted to the
-    /// [`TokenGenerator`](crate::TokenGenerator).
-    #[error("requested permissions not granted to this token generator: {escalated:?}")]
+    /// [`SecretKey`](crate::SecretKey).
+    #[error("requested permissions not granted to this secret key: {escalated:?}")]
     PermissionEscalation {
-        /// The requested permissions that are not granted to the generator.
+        /// The requested permissions that are not granted to the key.
         escalated: Vec<objectstore_types::auth::Permission>,
     },
     /// Error when per-token permission or expiry overrides are requested for a static

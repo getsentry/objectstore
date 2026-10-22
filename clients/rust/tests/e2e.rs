@@ -15,7 +15,7 @@ use objectstore_types::metadata::Compression;
 use reqwest::StatusCode;
 use serde::Serialize;
 
-use common::{test_server, test_token_generator};
+use common::{test_secret_key, test_server};
 
 #[cfg(feature = "resumable-upload-api")]
 use objectstore_client::UploadProgress;
@@ -63,7 +63,7 @@ async fn stores_uncompressed() {
     let server = test_server().await;
 
     let client = Client::builder(server.url("/"))
-        .token(test_token_generator())
+        .token(test_secret_key())
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase");
@@ -86,7 +86,7 @@ async fn uses_zstd_by_default() {
     let server = test_server().await;
 
     let client = Client::builder(server.url("/"))
-        .token(test_token_generator())
+        .token(test_secret_key())
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase");
@@ -117,7 +117,7 @@ async fn stores_precompressed_payload_verbatim() {
     let server = test_server().await;
 
     let client = Client::builder(server.url("/"))
-        .token(test_token_generator())
+        .token(test_secret_key())
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase");
@@ -154,7 +154,7 @@ async fn deletes_stores_stuff() {
     let server = test_server().await;
 
     let client = Client::builder(server.url("/"))
-        .token(test_token_generator())
+        .token(test_secret_key())
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase");
@@ -174,7 +174,7 @@ async fn stores_under_given_key() {
     let server = test_server().await;
 
     let client = Client::builder(server.url("/"))
-        .token(test_token_generator())
+        .token(test_secret_key())
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase");
@@ -192,7 +192,7 @@ async fn roundtrips_unicode_metadata() {
     let server = test_server().await;
 
     let client = Client::builder(server.url("/"))
-        .token(test_token_generator())
+        .token(test_secret_key())
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase");
@@ -240,7 +240,7 @@ async fn stores_structured_keys() {
     let server = test_server().await;
 
     let client = Client::builder(server.url("/"))
-        .token(test_token_generator())
+        .token(test_secret_key())
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase");
@@ -261,7 +261,7 @@ async fn overwrites_existing_key() {
     let server = test_server().await;
 
     let client = Client::builder(server.url("/"))
-        .token(test_token_generator())
+        .token(test_secret_key())
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase");
@@ -283,7 +283,7 @@ async fn not_found_with_wrong_scope() {
     let server = test_server().await;
 
     let client = Client::builder(server.url("/"))
-        .token(test_token_generator())
+        .token(test_secret_key())
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase");
@@ -303,7 +303,7 @@ async fn stores_with_origin() {
     let server = test_server().await;
 
     let client = Client::builder(server.url("/"))
-        .token(test_token_generator())
+        .token(test_secret_key())
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase");
@@ -327,7 +327,7 @@ async fn stores_without_origin() {
     let server = test_server().await;
 
     let client = Client::builder(server.url("/"))
-        .token(test_token_generator())
+        .token(test_secret_key())
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase");
@@ -349,10 +349,10 @@ async fn stores_without_origin() {
 async fn fails_with_insufficient_auth_token_perms() {
     let server = test_server().await;
 
-    let token_generator = test_token_generator().permissions(&[]);
+    let secret_key = test_secret_key().permissions(&[]);
 
     let client = Client::builder(server.url("/"))
-        .token(token_generator)
+        .token(secret_key)
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase");
@@ -387,9 +387,9 @@ async fn fails_with_insufficient_auth_token_perms() {
 
 #[tokio::test]
 async fn create_token_rejects_escalation() {
-    // A read-only generator cannot create a token requesting write access.
+    // A read-only key cannot create a token requesting write access.
     let client = Client::builder("http://127.0.0.1:8888/")
-        .token(test_token_generator().permissions(&[Permission::ObjectRead]))
+        .token(test_secret_key().permissions(&[Permission::ObjectRead]))
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase");
@@ -398,7 +398,7 @@ async fn create_token_rejects_escalation() {
     let result = session
         .create_token()
         .unwrap()
-        .expect("generator is configured")
+        .expect("secret key is configured")
         .permissions(&[Permission::ObjectRead, Permission::ObjectWrite])
         .sign();
     match result {
@@ -413,7 +413,7 @@ async fn create_token_rejects_escalation() {
         session
             .create_token()
             .unwrap()
-            .expect("generator is configured")
+            .expect("secret key is configured")
             .permissions(&[Permission::ObjectRead])
             .expiry_seconds(30)
             .sign()
@@ -478,7 +478,7 @@ async fn batch_operations() {
     let server = test_server().await;
 
     let client = Client::builder(server.url("/"))
-        .token(test_token_generator())
+        .token(test_secret_key())
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase");
@@ -595,7 +595,7 @@ async fn batch_insert_without_key() {
     let server = test_server().await;
 
     let client = Client::builder(server.url("/"))
-        .token(test_token_generator())
+        .token(test_secret_key())
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase");
@@ -634,7 +634,7 @@ async fn batch_partial_failures() {
     let server = test_server().await;
 
     // Use a read-only token so writes/deletes fail with 403
-    let read_only_token = test_token_generator().permissions(&[Permission::ObjectRead]);
+    let read_only_token = test_secret_key().permissions(&[Permission::ObjectRead]);
 
     let client = Client::builder(server.url("/"))
         .token(read_only_token)
@@ -713,7 +713,7 @@ async fn batch_put_files() {
     let server = test_server().await;
 
     let client = Client::builder(server.url("/"))
-        .token(test_token_generator())
+        .token(test_secret_key())
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase");
@@ -782,7 +782,7 @@ async fn put_path_does_not_exhaust_file_descriptors() {
     // On macOS the default ulimit is 256; 1000 concurrent put_file calls would fail.
     let server = test_server().await;
     let client = Client::builder(server.url("/"))
-        .token(test_token_generator())
+        .token(test_secret_key())
         .build()
         .unwrap();
     let session = client
@@ -808,7 +808,7 @@ async fn put_file_with_compression() {
     let server = test_server().await;
 
     let client = Client::builder(server.url("/"))
-        .token(test_token_generator())
+        .token(test_secret_key())
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase");
@@ -850,7 +850,7 @@ async fn head_returns_metadata() {
     let server = test_server().await;
 
     let client = Client::builder(server.url("/"))
-        .token(test_token_generator())
+        .token(test_secret_key())
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase");
@@ -879,7 +879,7 @@ async fn round_trips_expiration_policy_beyond_a_year() {
     let server = test_server().await;
 
     let client = Client::builder(server.url("/"))
-        .token(test_token_generator())
+        .token(test_secret_key())
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase");
@@ -984,7 +984,7 @@ async fn batch_head_operations() {
     let server = test_server().await;
 
     let client = Client::builder(server.url("/"))
-        .token(test_token_generator())
+        .token(test_secret_key())
         .build()
         .unwrap();
     let usecase = Usecase::new("usecase");

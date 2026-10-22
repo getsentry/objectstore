@@ -129,7 +129,7 @@ pub enum InvalidScopeError {
     /// Indicates that the key or value contains an invalid character.
     #[error("invalid character '{0}'")]
     InvalidChar(char),
-    /// Placeholder error variant for use in `objectstore_client::auth::TokenGenerator`.
+    /// Placeholder error variant for use in `objectstore_client::auth::SecretKey`.
     ///
     /// This should never be encountered in practice.
     #[error("unexpected error, please report a bug")]

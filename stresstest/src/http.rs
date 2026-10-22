@@ -2,7 +2,7 @@
 
 use anyhow::Context;
 use futures::StreamExt;
-use objectstore_client::{Client, GetResponse, Session, TokenGenerator, Usecase};
+use objectstore_client::{Client, GetResponse, SecretKey, Session, Usecase};
 use tokio::io::AsyncReadExt;
 use tokio_util::io::{ReaderStream, StreamReader};
 
@@ -15,8 +15,8 @@ pub struct HttpRemote {
 }
 
 impl HttpRemote {
-    /// Creates a new `HttpRemote` instance with the given remote URL and optional token generator.
-    pub fn new(remote: &str, token: Option<TokenGenerator>) -> Self {
+    /// Creates a new `HttpRemote` instance with the given remote URL and optional secret key.
+    pub fn new(remote: &str, token: Option<SecretKey>) -> Self {
         Self {
             client: Client::builder(remote)
                 .configure_reqwest(|r| r.no_hickory_dns())
