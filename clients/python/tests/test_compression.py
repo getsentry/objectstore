@@ -1,8 +1,11 @@
 import gzip
 import io
 import random
+from typing import IO, cast
+from unittest.mock import Mock
 
 import pytest
+import urllib3
 import zstandard
 from objectstore_client import _compression
 from objectstore_client.metadata import Compression
@@ -70,6 +73,30 @@ def test_decompressing_reader_reads_concatenated_members(
     assert _compression.decompressing_reader(stream, compression).read() == (
         b"hello world"
     )
+
+
+def test_gzip_reader_closes_partially_read_http_response() -> None:
+    connection = Mock()
+    body = io.BytesIO(gzip.compress(PAYLOAD))
+    response = urllib3.HTTPResponse(
+        body=body,
+        preload_content=False,
+        connection=connection,
+    )
+    reader = _compression.decompressing_reader(cast(IO[bytes], response), "gzip")
+
+    assert reader.read(10) == PAYLOAD[:10]
+    assert not response.closed
+    assert not reader.seekable()
+    with pytest.raises(io.UnsupportedOperation):
+        reader.seek(0)
+
+    reader.close()
+    assert body.closed
+    connection.close.assert_called_once_with()
+
+    reader.close()
+    connection.close.assert_called_once_with()
 
 
 def test_decompressing_reader_rejects_unknown() -> None:

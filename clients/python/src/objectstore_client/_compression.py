@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gzip
+import io
 import zlib
 from typing import IO, cast
 
@@ -15,6 +16,28 @@ SUPPORTED_COMPRESSIONS: tuple[Compression, ...] = ("zstd", "gzip")
 """Compression algorithms that the client can apply and transparently decode."""
 
 _CHUNK_SIZE = 64 * 1024
+
+
+class _GzipReader(gzip.GzipFile):
+    """Decode gzip from a stream, closing the source with the reader."""
+
+    def __init__(self, source: IO[bytes]) -> None:
+        super().__init__(fileobj=source, mode="rb")
+        self._source = source
+
+    def seekable(self) -> bool:
+        return False
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        raise io.UnsupportedOperation("gzip download stream is not seekable")
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        try:
+            super().close()
+        finally:
+            self._source.close()
 
 
 def _gzip_compressor() -> _Compressor:
@@ -75,13 +98,14 @@ def decompressing_reader(stream: IO[bytes], compression: str) -> IO[bytes]:
     """Return a readable stream decoding `stream` compressed with `compression`.
 
     Concatenated zstd frames and gzip members, as produced by multipart uploads
-    with individually compressed parts, are decoded as a single payload.
+    with individually compressed parts, are decoded as a single payload. The
+    returned reader is non-seekable and closes the source when closed.
     """
     if compression == "zstd":
         dctx = zstandard.ZstdDecompressor()
         return cast(IO[bytes], dctx.stream_reader(stream, read_across_frames=True))
     if compression == "gzip":
-        return cast(IO[bytes], gzip.GzipFile(fileobj=stream, mode="rb"))
+        return cast(IO[bytes], _GzipReader(stream))
     raise NotImplementedError(
         f"Transparent decoding of `{compression}` is not implemented"
     )
