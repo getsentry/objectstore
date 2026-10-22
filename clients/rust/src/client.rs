@@ -504,12 +504,6 @@ impl Session {
         }
     }
 
-    /// Deprecated. Use [`get_token`](Self::get_token) instead.
-    #[deprecated(note = "Use `get_token` instead.")]
-    pub fn mint_token(&self) -> crate::Result<Option<String>> {
-        self.get_token()
-    }
-
     /// Creates a new token with configurable permissions and expiry.
     ///
     /// Use this to produce a static token that can be handed to an external service
