@@ -388,7 +388,6 @@ class Session:
         contents: bytes | IO[bytes],
         key: str | None = None,
         compress: Compression | None = None,
-        compression: Compression | Literal["none"] | None = None,
         precompressed: Compression | None = None,
         content_type: str | None = None,
         metadata: dict[str, str] | None = None,
@@ -415,8 +414,6 @@ class Session:
         You can use the utility function `objectstore_client.utils.guess_mime_type`
         to attempt to guess a `content_type` based on magic bytes.
 
-        `compression` is deprecated in favor of `compress`.
-
         .. rubric:: Resumable Uploads
 
         This method uses Objectstore's Resumable Uploads API when the size of
@@ -439,16 +436,6 @@ class Session:
         Set ``Client(spool_dir=<path>)`` if you wish to customize the directory where
         the temporary files are created in.
         """
-        if compression is not None:
-            warnings.warn(
-                "`compression` is deprecated, use `compress` instead",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            if compress is not None:
-                raise ValueError("Cannot pass both `compress` and `compression`")
-            compress = compression
-
         if compress is not None and precompressed is not None:
             raise ValueError("Cannot pass both `compress` and `precompressed`")
         if compress and compress not in ("none", "zstd"):
