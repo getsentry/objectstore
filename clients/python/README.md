@@ -204,7 +204,6 @@ from objectstore_client import Client, Usecase
 
 client = Client(
     "http://localhost:8888",
-    propagate_traces=False,  # default
     retries=3,               # default: 3 connect retries, no read retries
     timeout_ms=None,         # default: no read timeout (connect: 100ms)
     connection_kwargs={},    # default: empty (override urllib3.HTTPConnectionPool kwargs)
