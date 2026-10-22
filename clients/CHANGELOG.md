@@ -1,11 +1,5 @@
 # Changelog
 
-## Unreleased
-
-### New Features ✨
-
-- (Python) Add a content disposition option to object URLs and pre-signed URLs (FS-570).
-
 ## 0.2.10
 
 ### New Features ✨
