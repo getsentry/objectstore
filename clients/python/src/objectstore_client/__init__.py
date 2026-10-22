@@ -1,4 +1,4 @@
-from objectstore_client.auth import Permission, SecretKey, TokenGenerator, TokenProvider
+from objectstore_client.auth import Permission, SecretKey, TokenProvider
 from objectstore_client.client import (
     Client,
     GetResponse,
@@ -36,7 +36,6 @@ __all__ = [
     "TimeToLive",
     "TokenProvider",
     "SecretKey",
-    "TokenGenerator",
     "MetricsBackend",
     "NoOpMetricsBackend",
     "parse_accept_encoding",
