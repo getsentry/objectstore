@@ -312,6 +312,16 @@ impl TieredStorage {
         }
     }
 
+    /// Records the size of a resumable upload chunk written to the long-term backend.
+    fn record_chunk_size(&self, id: &ObjectId, content_length: u64) {
+        objectstore_metrics::record!(
+            "put_chunk.size" = content_length,
+            usecase = id.usecase().to_string(),
+            backend_choice = BackendChoice::LongTerm.as_str(),
+            backend_type = self.backend_type(&BackendChoice::LongTerm),
+        );
+    }
+
     /// Updates a latency timer to identify the selected route.
     fn tag_backend(&self, timer: &mut TimerGuard, choice: &BackendChoice) {
         timer.set_tag("backend_choice", choice.as_str());
@@ -511,6 +521,9 @@ impl Backend for TieredStorage {
             }
             return Err(error);
         }
+        if metadata.origin.is_none() {
+            objectstore_metrics::count!("put.origin_missing", usecase = id.usecase().to_string());
+        }
         let token = TieredResumableToken {
             revision: revision.key,
             inner,
@@ -530,6 +543,12 @@ impl Backend for TieredStorage {
         content_length: u64,
         stream: ClientStream,
     ) -> Result<UploadProgress> {
+        let timer = objectstore_metrics::timer!(
+            "put_chunk.latency",
+            usecase = session.object_id.usecase().to_string(),
+            backend_choice = BackendChoice::LongTerm.as_str(),
+            backend_type = self.backend_type(&BackendChoice::LongTerm),
+        );
         let tiered = TieredResumableToken::decode(&session.backend_token)?;
         let time_expires = tiered.time_expires;
         let inner_session = tiered.into_inner_session(session);
@@ -561,10 +580,12 @@ impl Backend for TieredStorage {
                 .long_term
                 .put_chunk(&inner_session, offset, content_length, stream)
                 .await?;
-            return match progress {
-                UploadProgress::Incomplete { .. } => Ok(progress),
-                UploadProgress::Complete => Err(ErrorKind::UploadSessionGone.into()),
-            };
+            if progress == UploadProgress::Complete {
+                return Err(ErrorKind::UploadSessionGone.into());
+            }
+            timer.record();
+            self.record_chunk_size(id, content_length);
+            return Ok(progress);
         }
 
         // Read the publication precondition while verifying the LT offset.
@@ -582,7 +603,9 @@ impl Backend for TieredStorage {
             UploadProgress::Incomplete { .. } => {}
         }
         let current = match current? {
+            // A retried final chunk whose upload was already published writes nothing.
             TieredMetadata::Tombstone(t) if t.target == *revision => {
+                timer.record();
                 return Ok(UploadProgress::Complete);
             }
             TieredMetadata::Tombstone(t) => Some(t.target),
@@ -626,6 +649,16 @@ impl Backend for TieredStorage {
             )
             .await?;
         guard.advance(ChangePhase::compare_and_write(written));
+
+        timer.record();
+        self.record_chunk_size(id, content_length);
+        objectstore_metrics::record!(
+            "put.size" = session.upload_length.get(),
+            usecase = id.usecase().to_string(),
+            backend_choice = BackendChoice::LongTerm.as_str(),
+            backend_type = self.backend_type(&BackendChoice::LongTerm),
+            upload_type = "resumable",
+        );
         Ok(UploadProgress::Complete)
     }
 
@@ -1520,6 +1553,56 @@ mod tests {
             .unwrap();
         assert_eq!(stream::read_to_vec(body).await?, payload);
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn resumable_emits_storage_metrics() {
+        let (storage, _, _, _) = make_tiered_storage();
+        let id = make_id("resumable-metrics");
+        let payload = vec![b'a'; BACKEND_SIZE_THRESHOLD + 1];
+        let split = 256 * 1024;
+
+        let captured = objectstore_metrics::with_capturing_test_client_async(async {
+            let token =
+                resumable_token(&storage, &id, &Metadata::default(), payload.len() as u64).await;
+            for (offset, chunk) in [(0, &payload[..split]), (split, &payload[split..])] {
+                storage
+                    .put_chunk(
+                        &token,
+                        offset as u64,
+                        chunk.len() as u64,
+                        stream::single(chunk.to_vec()),
+                    )
+                    .await
+                    .unwrap();
+            }
+        })
+        .await;
+
+        let backend_tags = "usecase:testing,backend_choice:long-term,backend_type:in-memory-lt";
+        let expected = [
+            "put.origin_missing:+1|c|#usecase:testing".to_owned(),
+            format!("put_chunk.size:{split}|d|#{backend_tags}"),
+            format!("put_chunk.size:{}|d|#{backend_tags}", payload.len() - split),
+            format!(
+                "put.size:{}|d|#{backend_tags},upload_type:resumable",
+                payload.len()
+            ),
+        ];
+        for metric in &expected {
+            assert!(
+                captured.contains(metric),
+                "missing {metric} in {captured:?}"
+            );
+        }
+        let latencies = captured
+            .iter()
+            .filter(|m| {
+                m.starts_with("put_chunk.latency:")
+                    && m.ends_with(&format!("{backend_tags},success:true"))
+            })
+            .count();
+        assert_eq!(latencies, 2, "{captured:?}");
     }
 
     #[tokio::test]
