@@ -121,9 +121,12 @@ class TokenGenerator:
         )
 
 
-TokenProvider = TokenGenerator | str
+Token = str
+"""A static, pre-signed JWT used as-is for every request."""
+
+TokenProvider = TokenGenerator | Token
 """Authentication provider for Objectstore requests.
 
 Can be either a :class:`TokenGenerator` that signs a fresh JWT per request,
-or a static pre-signed JWT string.
+or a static pre-signed :data:`Token`.
 """
