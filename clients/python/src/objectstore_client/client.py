@@ -12,7 +12,6 @@ from os import PathLike
 from typing import IO, Any, Literal, NamedTuple, cast
 from urllib.parse import urlparse
 
-import sentry_sdk
 import urllib3
 import zstandard
 from urllib3.connectionpool import HTTPConnectionPool
@@ -150,13 +149,6 @@ class Client:
             "http://objectstore:8888"). metrics_backend: Optional metrics backend for
             tracking storage operations. Defaults to ``NoOpMetricsBackend`` if not
             provided.
-        propagate_traces: **Deprecated.** Use Sentry's ``StdlibIntegration``
-            instead; it propagates traces on the underlying HTTP request
-            regardless of this flag, unless the host application's Sentry SDK
-            is configured to opt out.
-
-            This only controls headers this client adds itself. Defaults to
-            ``False``.
         retries: Number of connection retries for failed requests.
             Defaults to ``3`` if not specified. **Note:** only connection failures are
             retried, not read failures (as compression streams cannot be rewound).
@@ -193,21 +185,12 @@ class Client:
         self,
         base_url: str,
         metrics_backend: MetricsBackend | None = None,
-        propagate_traces: bool = False,
         retries: int | None = None,
         timeout_ms: float | None = None,
         connection_kwargs: Mapping[str, Any] | None = None,
         token: TokenProvider | None = None,
         spool_dir: str | PathLike[str] | None = None,
     ):
-        if propagate_traces:
-            warnings.warn(
-                "`propagate_traces` is deprecated; Sentry's `StdlibIntegration` "
-                "already propagates traces on the underlying HTTP request",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-
         connection_kwargs_to_use = asdict(_ConnectionDefaults())
 
         if retries is not None:
@@ -235,7 +218,6 @@ class Client:
         )
         self._base_path = urlparse(base_url).path
         self._metrics_backend = metrics_backend or NoOpMetricsBackend()
-        self._propagate_traces = propagate_traces
         self._token = token
         self._spool_dir = spool_dir
 
@@ -269,7 +251,6 @@ class Client:
             self._pool,
             self._base_path,
             self._metrics_backend,
-            self._propagate_traces,
             usecase,
             Scope(**scopes),
             self._token,
@@ -289,7 +270,6 @@ class Session:
         pool: HTTPConnectionPool,
         base_path: str,
         metrics_backend: MetricsBackend,
-        propagate_traces: bool,
         usecase: Usecase,
         scope: Scope,
         token: TokenProvider | None = None,
@@ -298,7 +278,6 @@ class Session:
         self._pool = pool
         self._base_path = base_path
         self._metrics_backend = metrics_backend
-        self._propagate_traces = propagate_traces
         self._usecase = usecase
         self._scope = scope
         self._token = token
@@ -358,10 +337,6 @@ class Session:
 
     def _make_headers(self) -> dict[str, str]:
         headers = dict(self._pool.headers)
-        if self._propagate_traces:
-            headers.update(
-                dict(sentry_sdk.get_current_scope().iter_trace_propagation_headers())
-            )
         if token := self._auth_token():
             headers["x-os-auth"] = f"Bearer {token}"
         return headers
