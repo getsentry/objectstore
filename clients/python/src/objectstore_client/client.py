@@ -10,7 +10,7 @@ from importlib.metadata import version
 from io import BytesIO
 from os import PathLike
 from typing import IO, Any, Literal, NamedTuple, cast
-from urllib.parse import quote, urlencode, urlparse
+from urllib.parse import urlparse
 
 import sentry_sdk
 import urllib3
@@ -53,17 +53,12 @@ USER_AGENT = f"objectstore-client/{version('objectstore-client')}"
 
 
 def _response_options_query(
-    disposition: Literal["inline", "attachment"] | None,
+    disposition: Literal["inline", "attachment"],
 ) -> str:
-    """Encode individual response options without changing legacy URLs."""
-    pairs: list[tuple[str, str]] = []
-    if disposition is not None:
-        if disposition not in ("inline", "attachment"):
-            raise ValueError(
-                f"unsupported response content disposition {disposition!r}"
-            )
-        pairs.append(("response-content-disposition", disposition))
-    return urlencode(pairs, quote_via=quote)
+    """Validate and encode the response-content-disposition query parameter."""
+    if disposition not in ("inline", "attachment"):
+        raise ValueError(f"unsupported response content disposition {disposition!r}")
+    return utils.encode_query(f"response-content-disposition={disposition}")
 
 
 class GetResponse(NamedTuple):
@@ -750,9 +745,8 @@ class Session:
         ``SecretKey`` is configured on this session, or if disposition is invalid.
         """
         url = self._make_url(key, full=True)
-        query = _response_options_query(response_content_disposition)
-        if query:
-            url = f"{url}?{query}"
+        if response_content_disposition is not None:
+            url = f"{url}?{_response_options_query(response_content_disposition)}"
         if token_validity is None:
             return url
 
@@ -762,7 +756,7 @@ class Session:
         )
         # A JWT's compact serialization is base64url, whose alphabet is URL-safe,
         # so it can go in the query string as-is with no further encoding.
-        separator = "&" if query else "?"
+        separator = "&" if response_content_disposition is not None else "?"
         return f"{url}{separator}{PARAM_AUTH}={token}"
 
     def presigned_object_url(
@@ -830,9 +824,10 @@ class Session:
                 f"&{presign.PARAM_DURATION}={duration_secs}"
             )
 
-            response_query = _response_options_query(response_content_disposition)
-            if response_query:
-                encoded_query = f"{encoded_query}&{response_query}"
+            if response_content_disposition is not None:
+                encoded_query += (
+                    f"&{_response_options_query(response_content_disposition)}"
+                )
 
             canonical = presign.build_canonical_form(
                 method, encoded_path, encoded_query
