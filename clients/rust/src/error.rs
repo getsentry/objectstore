@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 /// Errors that can happen within the objectstore-client
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     /// Any error emitted from the underlying [`reqwest`] client.
     #[error(transparent)]

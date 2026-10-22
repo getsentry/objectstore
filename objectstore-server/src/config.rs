@@ -622,7 +622,7 @@ pub struct Service {
     ///
     /// This caps the total number of in-flight storage operations (reads,
     /// writes, deletes) across all requests. Operations that exceed the limit
-    /// are rejected with HTTP 429.
+    /// are rejected with HTTP 503.
     ///
     /// # Default
     ///
@@ -634,7 +634,7 @@ pub struct Service {
     /// When all `max_concurrency` execution slots are held, up to this many
     /// additional requests will park and wait (for at most
     /// `concurrency_timeout`) instead of being rejected immediately.
-    /// Requests beyond that are rejected with HTTP 429.
+    /// Requests beyond that are rejected with HTTP 503.
     ///
     /// Sizing guidance: `concurrency_queue ≈ permit_release_rate ×
     /// acceptable_added_latency`.

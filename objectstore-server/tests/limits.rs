@@ -21,10 +21,6 @@ async fn test_web_concurrency_limit() -> Result<()> {
     // with 503, giving us a fully deterministic test without needing concurrent requests.
     let server = TestServer::with_config(Config {
         http: Http { max_requests: 0 },
-        auth: AuthZ {
-            enforce: false,
-            ..Default::default()
-        },
         ..Default::default()
     })
     .await;
@@ -42,21 +38,16 @@ async fn test_web_concurrency_limit() -> Result<()> {
         "expected 503 for regular request at limit"
     );
 
-    // Health endpoint bypasses the concurrency limit.
-    let response = client.get(server.url("/health")).send().await?;
-    assert_eq!(
-        response.status(),
-        reqwest::StatusCode::OK,
-        "/health must not be subject to the concurrency limit"
-    );
-
-    // Ready endpoint bypasses the concurrency limit.
-    let response = client.get(server.url("/ready")).send().await?;
-    assert_eq!(
-        response.status(),
-        reqwest::StatusCode::OK,
-        "/ready must not be subject to the concurrency limit"
-    );
+    // Health endpoints need no auth and bypass the concurrency limit.
+    for path in ["/health", "/ready"] {
+        let response = client.get(server.url(path)).send().await?;
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::OK,
+            "{path} must not be subject to the concurrency limit"
+        );
+        assert_eq!(response.text().await?, "OK", "{path}");
+    }
 
     Ok(())
 }
@@ -142,7 +133,8 @@ async fn test_throughput_global_rps_limit() -> Result<()> {
         .get(server.url("/v1/objects/test/org=1/nonexistent"))
         .send()
         .await?;
-    assert_eq!(response.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.text().await?, "service at capacity");
 
     // Refill bucket
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -193,7 +185,7 @@ async fn test_throughput_usecase_pct_limit() -> Result<()> {
         .get(server.url("/v1/objects/test/org=1/nonexistent"))
         .send()
         .await?;
-    assert_eq!(response.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
 
     // Request to a different usecase should succeed
     let response = client
@@ -251,7 +243,7 @@ async fn test_throughput_scope_pct_limit() -> Result<()> {
         .get(server.url("/v1/objects/test/org=1/nonexistent"))
         .send()
         .await?;
-    assert_eq!(response.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
 
     // Request to a different scope should succeed
     let response = client
@@ -313,6 +305,7 @@ async fn test_throughput_rule() -> Result<()> {
         .send()
         .await?;
     assert_eq!(response.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.text().await?, "rate limit exceeded");
 
     // Different usecase should not be affected by rule
     let response = client
@@ -378,7 +371,7 @@ async fn test_bandwidth_global_bps_limit() -> Result<()> {
         .body(payload.clone())
         .send()
         .await?;
-    assert_eq!(response.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
 
     // Wait for debt to drain (100 bytes / 100 bps = 1s, use 2s for CI reliability).
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -441,7 +434,7 @@ async fn test_bandwidth_burst_tolerance() -> Result<()> {
         .body(payload.clone())
         .send()
         .await?;
-    assert_eq!(response.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
 
     Ok(())
 }
@@ -537,7 +530,7 @@ async fn test_bandwidth_usecase_pct_limit() -> Result<()> {
         .body(payload.clone())
         .send()
         .await?;
-    assert_eq!(response.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
 
     // Different usecase has a separate bucket → admitted.
     let response = client
@@ -599,7 +592,7 @@ async fn test_bandwidth_scope_pct_limit() -> Result<()> {
         .body(payload.clone())
         .send()
         .await?;
-    assert_eq!(response.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
 
     // Different scope has a separate bucket → admitted.
     let response = client
@@ -624,52 +617,102 @@ async fn test_bandwidth_scope_pct_limit() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_batch_at_capacity_returns_per_op_error() -> Result<()> {
-    // With max_concurrency=0 no batch operations can acquire a permit.
-    // Each operation fails individually with AtCapacity inside the
-    // multipart response (the endpoint itself returns 200).
-    let server = TestServer::with_config(Config {
-        service: Service {
-            max_concurrency: 0,
+async fn test_batch_admission_rejections_return_per_op_errors() -> Result<()> {
+    let cases = [
+        (
+            Service {
+                max_concurrency: 0,
+                ..Default::default()
+            },
+            ThroughputLimits::default(),
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            "service error: service at capacity",
+        ),
+        (
+            Service::default(),
+            ThroughputLimits {
+                global_rps: Some(1),
+                // Both limits are exhausted after admission; the general
+                // capacity check takes precedence over the explicit rule.
+                rules: vec![ThroughputRule {
+                    usecase: Some("test".parse().unwrap()),
+                    scopes: vec![],
+                    rps: Some(1),
+                    pct: None,
+                }],
+                ..Default::default()
+            },
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            "batch error: service at capacity",
+        ),
+        (
+            Service::default(),
+            ThroughputLimits {
+                rules: vec![ThroughputRule {
+                    usecase: Some("test".parse().unwrap()),
+                    scopes: vec![("org".to_string(), "1".to_string())],
+                    rps: Some(1),
+                    pct: None,
+                }],
+                ..Default::default()
+            },
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            "batch error: rate limit exceeded",
+        ),
+        (
+            Service::default(),
+            ThroughputLimits {
+                global_rps: Some(100),
+                rules: vec![ThroughputRule {
+                    usecase: Some("test".parse().unwrap()),
+                    scopes: vec![],
+                    rps: None,
+                    pct: Some(1),
+                }],
+                ..Default::default()
+            },
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            "batch error: rate limit exceeded",
+        ),
+    ];
+
+    for (service, throughput, status, detail) in cases {
+        let server = TestServer::with_config(Config {
+            service,
+            rate_limits: RateLimits {
+                throughput,
+                ..Default::default()
+            },
+            auth: AuthZ {
+                enforce: false,
+                ..Default::default()
+            },
             ..Default::default()
-        },
-        auth: AuthZ {
-            enforce: false,
-            ..Default::default()
-        },
-        ..Default::default()
-    })
-    .await;
+        })
+        .await;
 
-    let client = reqwest::Client::new();
+        // The request-level check consumes the sole throughput token, so the
+        // operation is rejected inside the multipart response. With concurrency
+        // disabled, the operation instead fails when acquiring its service permit.
+        let body = "--boundary\r\nx-sn-batch-operation-key: some-key\r\nx-sn-batch-operation-kind: get\r\n\r\n\r\n--boundary--\r\n";
+        let response = reqwest::Client::new()
+            .post(server.url("/v1/objects:batch/test/org=1/"))
+            .header("content-type", "multipart/form-data; boundary=boundary")
+            .body(body)
+            .send()
+            .await?;
 
-    let body = "\
-        --boundary\r\n\
-         x-sn-batch-operation-key: some-key\r\n\
-         x-sn-batch-operation-kind: get\r\n\
-         \r\n\
-         \r\n\
-         --boundary--\r\n";
-
-    let response = client
-        .post(server.url("/v1/objects:batch/test/org=1/"))
-        .header("content-type", "multipart/form-data; boundary=boundary")
-        .body(body)
-        .send()
-        .await?;
-
-    assert_eq!(
-        response.status(),
-        reqwest::StatusCode::OK,
-        "batch endpoint returns 200 with per-operation errors"
-    );
-
-    let body = response.text().await?;
-    assert!(
-        body.contains("429"),
-        "expected per-operation 429 in multipart body, got: {body}"
-    );
-
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let body = response.text().await?;
+        assert!(
+            body.contains(&format!("x-sn-batch-operation-status: {status}")),
+            "expected per-operation {status} in multipart body, got: {body}"
+        );
+        assert!(
+            body.contains(&format!("\"detail\":\"{detail}\"")),
+            "expected generic error message {detail:?} in multipart body, got: {body}"
+        );
+    }
     Ok(())
 }
 

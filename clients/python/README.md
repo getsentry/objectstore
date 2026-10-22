@@ -194,6 +194,22 @@ with urllib.request.urlopen(url) as resp:
     content = resp.read()
 ```
 
+### Download response options
+
+Both `Session.object_url` and `Session.presigned_object_url` accept a
+`response_content_disposition` option:
+
+```python
+url = session.presigned_object_url(
+    "GET",
+    "my-key",
+    response_content_disposition="inline",
+)
+```
+
+Disposition accepts `inline` or `attachment`, defaulting to `attachment` when omitted.
+The stored filename is retained.
+
 ## Configuration
 
 In production, store the `Client` and `Usecase` at module level and reuse them.
@@ -204,7 +220,6 @@ from objectstore_client import Client, Usecase
 
 client = Client(
     "http://localhost:8888",
-    propagate_traces=False,  # default
     retries=3,               # default: 3 connect retries, no read retries
     timeout_ms=None,         # default: no read timeout (connect: 100ms)
     connection_kwargs={},    # default: empty (override urllib3.HTTPConnectionPool kwargs)

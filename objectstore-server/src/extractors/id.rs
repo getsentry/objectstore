@@ -11,13 +11,14 @@ use serde::{Deserialize, de};
 
 use crate::extractors::Xt;
 use crate::extractors::downstream_service::DownstreamService;
+use crate::rate_limits::LimitExceeded;
 use crate::state::ServiceState;
 
 #[derive(Debug)]
 pub enum ObjectRejection {
     Path(PathRejection),
     Killswitched,
-    RateLimited,
+    RateLimited(LimitExceeded),
 }
 
 impl IntoResponse for ObjectRejection {
@@ -29,11 +30,9 @@ impl IntoResponse for ObjectRejection {
                 "Object access is disabled for this scope through killswitches",
             )
                 .into_response(),
-            ObjectRejection::RateLimited => (
-                http::StatusCode::TOO_MANY_REQUESTS,
-                "Object access is rate limited",
-            )
-                .into_response(),
+            ObjectRejection::RateLimited(error) => {
+                (error.status(), error.to_string()).into_response()
+            }
         }
     }
 }
@@ -69,9 +68,10 @@ impl FromRequestParts<ServiceState> for Xt<ObjectId> {
             return Err(ObjectRejection::Killswitched);
         }
 
-        if !state.rate_limiter.check(id.context(), Some(id.key())) {
-            return Err(ObjectRejection::RateLimited);
-        }
+        state
+            .rate_limiter
+            .check(id.context(), Some(id.key()))
+            .map_err(ObjectRejection::RateLimited)?;
 
         Ok(Xt(id))
     }
@@ -142,9 +142,10 @@ impl FromRequestParts<ServiceState> for Xt<ObjectContext> {
             return Err(ObjectRejection::Killswitched);
         }
 
-        if !state.rate_limiter.check(&context, None) {
-            return Err(ObjectRejection::RateLimited);
-        }
+        state
+            .rate_limiter
+            .check(&context, None)
+            .map_err(ObjectRejection::RateLimited)?;
 
         Ok(Xt(context))
     }
@@ -553,7 +554,7 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         let response = app.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
@@ -586,6 +587,6 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         let response = app.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import warnings
 from collections.abc import Mapping, Sequence
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
@@ -12,7 +11,6 @@ from os import PathLike
 from typing import IO, Any, Literal, NamedTuple, cast
 from urllib.parse import urlparse
 
-import sentry_sdk
 import urllib3
 import zstandard
 from urllib3.connectionpool import HTTPConnectionPool
@@ -49,6 +47,15 @@ PARAM_AUTH = "os_auth"
 
 # Identifies this library to the server, mirroring the Rust client's user agent.
 USER_AGENT = f"objectstore-client/{version('objectstore-client')}"
+
+
+def _response_options_query(
+    disposition: Literal["inline", "attachment"],
+) -> str:
+    """Validate and encode the response-content-disposition query parameter."""
+    if disposition not in ("inline", "attachment"):
+        raise ValueError(f"unsupported response content disposition {disposition!r}")
+    return utils.encode_query(f"response-content-disposition={disposition}")
 
 
 class GetResponse(NamedTuple):
@@ -141,13 +148,6 @@ class Client:
             "http://objectstore:8888"). metrics_backend: Optional metrics backend for
             tracking storage operations. Defaults to ``NoOpMetricsBackend`` if not
             provided.
-        propagate_traces: **Deprecated.** Use Sentry's ``StdlibIntegration``
-            instead; it propagates traces on the underlying HTTP request
-            regardless of this flag, unless the host application's Sentry SDK
-            is configured to opt out.
-
-            This only controls headers this client adds itself. Defaults to
-            ``False``.
         retries: Number of connection retries for failed requests.
             Defaults to ``3`` if not specified. **Note:** only connection failures are
             retried, not read failures (as compression streams cannot be rewound).
@@ -184,21 +184,12 @@ class Client:
         self,
         base_url: str,
         metrics_backend: MetricsBackend | None = None,
-        propagate_traces: bool = False,
         retries: int | None = None,
         timeout_ms: float | None = None,
         connection_kwargs: Mapping[str, Any] | None = None,
         token: TokenProvider | None = None,
         spool_dir: str | PathLike[str] | None = None,
     ):
-        if propagate_traces:
-            warnings.warn(
-                "`propagate_traces` is deprecated; Sentry's `StdlibIntegration` "
-                "already propagates traces on the underlying HTTP request",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-
         connection_kwargs_to_use = asdict(_ConnectionDefaults())
 
         if retries is not None:
@@ -226,7 +217,6 @@ class Client:
         )
         self._base_path = urlparse(base_url).path
         self._metrics_backend = metrics_backend or NoOpMetricsBackend()
-        self._propagate_traces = propagate_traces
         self._token = token
         self._spool_dir = spool_dir
 
@@ -260,7 +250,6 @@ class Client:
             self._pool,
             self._base_path,
             self._metrics_backend,
-            self._propagate_traces,
             usecase,
             Scope(**scopes),
             self._token,
@@ -280,7 +269,6 @@ class Session:
         pool: HTTPConnectionPool,
         base_path: str,
         metrics_backend: MetricsBackend,
-        propagate_traces: bool,
         usecase: Usecase,
         scope: Scope,
         token: TokenProvider | None = None,
@@ -289,7 +277,6 @@ class Session:
         self._pool = pool
         self._base_path = base_path
         self._metrics_backend = metrics_backend
-        self._propagate_traces = propagate_traces
         self._usecase = usecase
         self._scope = scope
         self._token = token
@@ -349,10 +336,6 @@ class Session:
 
     def _make_headers(self) -> dict[str, str]:
         headers = dict(self._pool.headers)
-        if self._propagate_traces:
-            headers.update(
-                dict(sentry_sdk.get_current_scope().iter_trace_propagation_headers())
-            )
         if token := self._auth_token():
             headers["x-os-auth"] = f"Bearer {token}"
         return headers
@@ -404,7 +387,6 @@ class Session:
         contents: bytes | IO[bytes],
         key: str | None = None,
         compress: Compression | None = None,
-        compression: Compression | Literal["none"] | None = None,
         precompressed: Compression | None = None,
         content_type: str | None = None,
         metadata: dict[str, str] | None = None,
@@ -431,8 +413,6 @@ class Session:
         You can use the utility function `objectstore_client.utils.guess_mime_type`
         to attempt to guess a `content_type` based on magic bytes.
 
-        `compression` is deprecated in favor of `compress`.
-
         .. rubric:: Resumable Uploads
 
         This method uses Objectstore's Resumable Uploads API when the size of
@@ -455,16 +435,6 @@ class Session:
         Set ``Client(spool_dir=<path>)`` if you wish to customize the directory where
         the temporary files are created in.
         """
-        if compression is not None:
-            warnings.warn(
-                "`compression` is deprecated, use `compress` instead",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            if compress is not None:
-                raise ValueError("Cannot pass both `compress` and `compression`")
-            compress = compression
-
         if compress is not None and precompressed is not None:
             raise ValueError("Cannot pass both `compress` and `precompressed`")
         if compress and compress not in ("none", "zstd"):
@@ -689,7 +659,12 @@ class Session:
             span.set_attribute("objectstore.decompressed", decompressed)
             return GetResponse(metadata, stream)
 
-    def object_url(self, key: str, token_validity: timedelta | None = None) -> str:
+    def object_url(
+        self,
+        key: str,
+        token_validity: timedelta | None = None,
+        response_content_disposition: Literal["inline", "attachment"] | None = None,
+    ) -> str:
         """
         Generates a GET url to the object with the given `key`.
 
@@ -701,10 +676,18 @@ class Session:
         information is embedded in the returned URL's query string, valid
         for the given duration.
 
+        ``response_content_disposition`` selects ``attachment`` (default) or ``inline``
+        for successful GET/HEAD responses, retaining the stored filename.
+
+        These options are not bound by the auth token and can be changed by recipients.
+        Use :meth:`presigned_object_url` to bind the options to a signature.
+
         Raises ``ValueError`` if ``token_validity`` is provided but no
-        ``SecretKey`` is configured on this session.
+        ``SecretKey`` is configured on this session, or if disposition is invalid.
         """
         url = self._make_url(key, full=True)
+        if response_content_disposition is not None:
+            url = f"{url}?{_response_options_query(response_content_disposition)}"
         if token_validity is None:
             return url
 
@@ -714,13 +697,15 @@ class Session:
         )
         # A JWT's compact serialization is base64url, whose alphabet is URL-safe,
         # so it can go in the query string as-is with no further encoding.
-        return f"{url}?{PARAM_AUTH}={token}"
+        separator = "&" if response_content_disposition is not None else "?"
+        return f"{url}{separator}{PARAM_AUTH}={token}"
 
     def presigned_object_url(
         self,
         method: Literal["GET", "HEAD"],
         key: str,
         duration: timedelta = timedelta(hours=1),
+        response_content_disposition: Literal["inline", "attachment"] | None = None,
     ) -> str:
         """
         Generates a pre-signed URL authorizing a single ``method`` request on the
@@ -732,11 +717,16 @@ class Session:
 
         Raises ``ValueError`` if no ``SecretKey`` is configured on this
         session's client, if ``method`` is not supported, or if ``duration``
-        is above the one-week maximum.
+        is above the one-week maximum, or if disposition is invalid.
 
         The returned URL carries a signature that allows the recipient to perform
         a request without an auth token. It can be handed to any HTTP client;
         the URL is already percent-encoded, and must be transmitted verbatim.
+
+        ``response_content_disposition`` selects ``attachment`` (default) or ``inline``
+        for successful GET/HEAD responses, retaining the stored filename.
+
+        Response options are included in the signature when supplied.
 
         Note that `HEAD` and `GET` are considered equivalent from the point of view
         of signatures, meaning that a signature for `GET` can also be used for
@@ -774,6 +764,11 @@ class Session:
                 f"&{presign.PARAM_TIMESTAMP}={timestamp}"
                 f"&{presign.PARAM_DURATION}={duration_secs}"
             )
+
+            if response_content_disposition is not None:
+                encoded_query += (
+                    f"&{_response_options_query(response_content_disposition)}"
+                )
 
             canonical = presign.build_canonical_form(
                 method, encoded_path, encoded_query

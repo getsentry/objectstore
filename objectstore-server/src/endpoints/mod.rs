@@ -23,6 +23,11 @@
 //! Object metadata travels in request and response headers; see
 //! [`objectstore_types::metadata`] for the mapping and the separate JSON update contract.
 //!
+//! GET and HEAD accept `response-content-disposition=inline|attachment` (default attachment).
+//! Response options apply only to successful object responses, including ranged GETs. See
+//! [`crate::extractors::response_options`] for validation. The object handlers construct
+//! download headers with browser safeguards and filename formatting.
+//!
 //! # Resumable Upload Endpoints
 //!
 //! A resumable upload transfers a single object across several requests.
@@ -91,7 +96,7 @@
 //! | Method | Path | Description |
 //! |--------|------|-------------|
 //! | `GET` | `/health` | Liveness probe (always returns 200) |
-//! | `GET` | `/ready` | Readiness probe (returns 503 when `/tmp/objectstore.down` exists, enabling graceful drain) |
+//! | `GET` | `/ready` | Readiness probe (remains healthy during shutdown) |
 //! | `GET` | `/keda` | Prometheus text-format gauges for KEDA autoscaling (see [KEDA Metrics](crate#keda-metrics)) |
 //!
 //! # Code Usage

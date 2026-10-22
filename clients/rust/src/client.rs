@@ -164,31 +164,31 @@ pub struct Usecase {
 }
 
 impl Usecase {
-    /// Creates a Usecase for a statically defined name.
+    /// Creates a Usecase, returning an error if the name is invalid.
     ///
-    /// Use [`Self::try_new`] for dynamic names that may fail validation.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the name violates the naming rules on [`Usecase`].
-    pub fn new(name: &str) -> Self {
-        Self::try_new(name).expect("invalid usecase name")
-    }
-
-    /// Creates a Usecase for a dynamic name, returning any validation error.
-    ///
-    /// Use [`Self::new`] for statically defined names.
+    /// Use [`Self::from_static`] for statically defined names.
     ///
     /// # Errors
     ///
     /// Returns [`InvalidUsecaseName`] if the name violates the naming rules on
     /// [`Usecase`].
-    pub fn try_new(name: &str) -> Result<Self, InvalidUsecaseName> {
+    pub fn new(name: &str) -> Result<Self, InvalidUsecaseName> {
         Ok(Self {
             name: Arc::new(UsecaseName::new(name)?),
             compression: Some(Compression::Zstd),
             expiration_policy: ExpirationPolicy::default(),
         })
+    }
+
+    /// Creates a Usecase for a statically defined name.
+    ///
+    /// Use [`Self::new`] for dynamic names.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the name violates the naming rules on [`Usecase`].
+    pub fn from_static(name: &'static str) -> Self {
+        Self::new(name).expect("invalid usecase name")
     }
 
     /// Returns the name of this usecase.
@@ -379,7 +379,7 @@ pub(crate) struct ClientInner {
 /// use objectstore_client::{Client, SecretKey, TokenGenerator, Usecase};
 ///
 /// # fn example() -> objectstore_client::Result<()> {
-/// let scope = Usecase::new("my_app").for_project(42, 1337);
+/// let scope = Usecase::from_static("my_app").for_project(42, 1337);
 /// let token = TokenGenerator::new(SecretKey {
 ///     secret_key: "<private key>".into(),
 ///     kid: "my-service".into(),
@@ -504,12 +504,6 @@ impl Session {
         }
     }
 
-    /// Deprecated. Use [`get_token`](Self::get_token) instead.
-    #[deprecated(note = "Use `get_token` instead.")]
-    pub fn mint_token(&self) -> crate::Result<Option<String>> {
-        self.get_token()
-    }
-
     /// Creates a new token with configurable permissions and expiry.
     ///
     /// Use this to produce a static token that can be handed to an external service
@@ -585,14 +579,14 @@ mod tests {
     #[test]
     fn test_usecase_construction() {
         let name = "Debug_Files-123";
-        assert_eq!(Usecase::new(name).name(), name);
-        assert_eq!(Usecase::try_new(name).unwrap().name(), name);
+        assert_eq!(Usecase::from_static(name).name(), name);
+        assert_eq!(Usecase::new(name).unwrap().name(), name);
         assert!(matches!(
-            Usecase::try_new("_"),
+            Usecase::new("_"),
             Err(InvalidUsecaseName::InvalidLength)
         ));
         assert!(matches!(
-            Usecase::try_new("testing/org=999/injected"),
+            Usecase::new("testing/org=999/injected"),
             Err(InvalidUsecaseName::InvalidChar('/'))
         ));
     }
@@ -600,13 +594,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "invalid usecase name")]
     fn test_invalid_usecase_panics() {
-        Usecase::new("testing/org=999/injected");
+        Usecase::from_static("testing/org=999/injected");
     }
 
     #[test]
     fn test_object_url() {
         let client = Client::new("http://127.0.0.1:8888/").unwrap();
-        let usecase = Usecase::new("testing");
+        let usecase = Usecase::from_static("testing");
         let scope = usecase
             .for_project(12345, 1337)
             .push("app_slug", "email_app");
@@ -621,7 +615,7 @@ mod tests {
     #[test]
     fn test_object_url_with_base_path() {
         let client = Client::new("http://127.0.0.1:8888/api/prefix").unwrap();
-        let usecase = Usecase::new("testing");
+        let usecase = Usecase::from_static("testing");
         let scope = usecase.for_project(12345, 1337);
         let session = client.session(scope).unwrap();
 
