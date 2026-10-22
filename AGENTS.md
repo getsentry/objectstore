@@ -73,8 +73,7 @@ cargo doc --workspace --all-features --no-deps --document-private-items
 
 ## Pull Requests
 
-When making a change that touches one of the clients, consider the user-facing changelog entry, which is generated from PR titles:
+The Python and Rust clients are released separately, each with its own changelog (`clients/python/CHANGELOG.md`, `clients/rust/CHANGELOG.md`). When making a change that touches one of the clients, consider the user-facing changelog entry, which is generated from PR titles:
 
-- Scope client changes as `py-client` or `rs-client`, e.g. `feat(py-client): Add X`. This allows the automatic changelog generation workflow to pick those changes up.
-- Split changes to both clients into one PR per client.
-- If the title doesn't describe the change well for client users, add a `### Changelog Entry` section to the PR description with the text to use instead.
+- A PR is listed in the changelog of every client whose directory it changes, grouped by the conventional commit type of its title (`feat`, `fix`, ...). The scope doesn't matter.
+- If the title doesn't describe the change well for client users, add a `### Changelog Entry` section to the PR description with the text to use instead. It's used for every client the PR touches.

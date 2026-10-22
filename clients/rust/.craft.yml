@@ -1,0 +1,14 @@
+changelog:
+  policy: auto
+  # Categories in `.github/release.yml` group entries by change type.
+  scopeGrouping: false
+preReleaseCommand: ../../scripts/bump-version-rs-client.sh
+releaseBranchPrefix: release-library/rs-client
+# The crates target publishes from source, so there are no build artifacts.
+artifactProvider:
+  name: none
+
+targets:
+  - name: github
+    tagPrefix: rs-client@
+  - name: crates

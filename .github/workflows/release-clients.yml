@@ -1,8 +1,15 @@
-name: Release client libraries
+name: Release client library
 
 on:
   workflow_dispatch:
     inputs:
+      client:
+        description: Client to release
+        required: true
+        type: choice
+        options:
+          - python
+          - rust
       version:
         description: Version to release
         required: true
@@ -41,4 +48,4 @@ jobs:
           version: ${{ github.event.inputs.version }}
           force: ${{ github.event.inputs.force }}
           merge_target: ${{ github.event.inputs.merge_target }}
-          path: clients
+          path: clients/${{ github.event.inputs.client }}

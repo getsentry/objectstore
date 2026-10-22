@@ -1,34 +1,44 @@
-# Changelog categories for client releases, read by Craft from `clients/`.
+# Changelog categories for the client releases. Craft reads `.github/release.yml`
+# next to each client's `.craft.yml`, so `clients/python/.github/release.yml` and
+# `clients/rust/.github/release.yml` are symlinks to this file.
 #
-# PR titles must use the `py-client` or `rs-client` scope to be listed, e.g.
-# `feat(py-client): Add X`. Entries are matched top to bottom; categories that
-# share a title render as one section, and `semver` drives the version bump.
+# Each client has its own release and changelog, so entries are grouped by
+# change type. The `type(scope):` prefix is stripped from titles. Entries are
+# matched top to bottom; categories that share a title render as one section,
+# and `semver` drives the version bump.
 changelog:
   exclude:
     labels:
       - skip-changelog
   categories:
-    - title: Python Client
+    - title: Breaking Changes 🛠
       commit_patterns:
-        - "^(?<type>\\w+\\(py-client\\)!:\\s*)"
+        - "^(?<type>\\w+(?:\\([^)]+\\))?!:\\s*)"
       semver: major
-    - title: Rust Client
+    - title: Security 🔒
       commit_patterns:
-        - "^(?<type>\\w+\\(rs-client\\)!:\\s*)"
-      semver: major
-    - title: Python Client
-      commit_patterns:
-        - "^(?<type>feat\\(py-client\\):\\s*)"
-      semver: minor
-    - title: Rust Client
-      commit_patterns:
-        - "^(?<type>feat\\(rs-client\\):\\s*)"
-      semver: minor
-    - title: Python Client
-      commit_patterns:
-        - "^(?<type>\\w+\\(py-client\\):\\s*)"
+        - "^(?<type>security(?:\\([^)]+\\))?:\\s*)"
       semver: patch
-    - title: Rust Client
+    - title: New Features ✨
       commit_patterns:
-        - "^(?<type>\\w+\\(rs-client\\):\\s*)"
+        - "^(?<type>feat(?:\\([^)]+\\))?:\\s*)"
+      semver: minor
+    - title: Bug Fixes 🐛
+      commit_patterns:
+        - "^(?<type>fix(?:\\([^)]+\\))?:\\s*)"
+        - '^Revert "'
+      semver: patch
+    - title: Documentation 📚
+      commit_patterns:
+        - "^(?<type>docs?(?:\\([^)]+\\))?:\\s*)"
+      semver: patch
+    # Catch-all, so every change to a client lands in its changelog and bumps
+    # the version: any other type, then titles that aren't conventional at all.
+    - title: Internal Changes 🔧
+      commit_patterns:
+        - "^(?<type>\\w+(?:\\([^)]+\\))?:\\s*)"
+      semver: patch
+    - title: Internal Changes 🔧
+      labels:
+        - "*"
       semver: patch
