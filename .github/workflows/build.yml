@@ -32,8 +32,8 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          # libcurl4-openssl-dev: librdkafka is built from source and links against libcurl,
-          # whose headers are not on the runner by default.
+          # libcurl4-openssl-dev: librdkafka 2.12 includes curl headers even when built
+          # without curl (fixed upstream, unreleased).
           sudo apt-get install -y llvm libcurl4-openssl-dev
 
       - name: Install sentry-cli
