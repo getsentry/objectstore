@@ -16,7 +16,7 @@ import zstandard
 from urllib3.connectionpool import HTTPConnectionPool
 
 from objectstore_client import _resumable, presign, utils
-from objectstore_client.auth import Permission, SecretKey, TokenProvider
+from objectstore_client.auth import Permission, TokenGenerator, TokenProvider
 from objectstore_client.errors import (
     ExpiryExtensionRejected,
     ObjectNotFound,
@@ -171,9 +171,9 @@ class Client:
             timeouts). By default, requests carry a ``User-Agent`` header of
             ``objectstore-client/{version}``; pass a ``headers`` mapping with a
             ``User-Agent`` key here to override it.
-        token: A ``SecretKey`` that signs a fresh JWT for each request
+        token: A ``TokenGenerator`` that signs a fresh JWT for each request
             using an EdDSA keypair, or a static pre-signed JWT string used
-            as-is for every request. Use a ``SecretKey`` for internal
+            as-is for every request. Use a ``TokenGenerator`` for internal
             services that have access to the signing key, and a string for
             external services that receive a token from another source.
         spool_dir: Directory that temporary files are created in when preparing
@@ -297,11 +297,11 @@ class Session:
         When ``expiry_seconds`` is ``None``, the generator's default
         expiry is used.
 
-        Raises ``ValueError`` if no ``SecretKey`` is configured
-        or if any requested permission is not granted to the key.
+        Raises ``ValueError`` if no ``TokenGenerator`` is configured
+        or if any requested permission is not granted to the generator.
         """
-        if not isinstance(self._token, SecretKey):
-            raise ValueError("no secret key configured on this session")
+        if not isinstance(self._token, TokenGenerator):
+            raise ValueError("no token generator configured on this session")
 
         resolved_expiry = (
             expiry_seconds if expiry_seconds is not None else self._token.expiry_seconds
@@ -328,7 +328,7 @@ class Session:
 
     def _auth_token(self) -> str | None:
         """Returns a token for internal auth headers."""
-        if isinstance(self._token, SecretKey):
+        if isinstance(self._token, TokenGenerator):
             return self._token.token_for_scope(self._usecase.name, self._scope)
         elif isinstance(self._token, str):
             return self._token
@@ -683,7 +683,7 @@ class Session:
         Use :meth:`presigned_object_url` to bind the options to a signature.
 
         Raises ``ValueError`` if ``token_validity`` is provided but no
-        ``SecretKey`` is configured on this session, or if disposition is invalid.
+        ``TokenGenerator`` is configured on this session, or if disposition is invalid.
         """
         url = self._make_url(key, full=True)
         if response_content_disposition is not None:
@@ -715,7 +715,7 @@ class Session:
             Experimental: pre-signed URLs are an experimental feature and this
             API may change in a future release.
 
-        Raises ``ValueError`` if no ``SecretKey`` is configured on this
+        Raises ``ValueError`` if no ``TokenGenerator`` is configured on this
         session's client, if ``method`` is not supported, or if ``duration``
         is above the one-week maximum, or if disposition is invalid.
 
@@ -738,8 +738,8 @@ class Session:
                 f"expected one of {presign.SUPPORTED_METHODS}"
             )
 
-        if not isinstance(self._token, SecretKey):
-            raise ValueError("no secret key configured on this session")
+        if not isinstance(self._token, TokenGenerator):
+            raise ValueError("no token generator configured on this session")
 
         if duration > presign.MAX_PRESIGN_DURATION:
             raise ValueError(
@@ -760,7 +760,7 @@ class Session:
             encoded_path = self._make_url(key)
             timestamp = datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
             encoded_query = utils.encode_query(
-                f"{presign.PARAM_KID}={self._token.kid}"
+                f"{presign.PARAM_KID}={self._token.key.kid}"
                 f"&{presign.PARAM_TIMESTAMP}={timestamp}"
                 f"&{presign.PARAM_DURATION}={duration_secs}"
             )
@@ -773,7 +773,7 @@ class Session:
             canonical = presign.build_canonical_form(
                 method, encoded_path, encoded_query
             )
-            signature = self._token.signature_for_canonical_form(canonical)
+            signature = self._token.key.signature_for_canonical_form(canonical)
 
             return (
                 f"{self._base_url()}"
