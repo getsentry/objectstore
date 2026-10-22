@@ -70,7 +70,7 @@ pub async fn from_config(
     Ok(match config {
         StorageConfig::Tiered(c) => {
             let hv = hv_from_config(c.high_volume, streams).await?;
-            let lt = lt_from_config(c.long_term, streams).await?;
+            let lt = from_leaf_config(*c.long_term, streams).await?;
             let log = Box::new(changelog::NoopChangeLog);
             Box::new(tiered::TieredStorage::new(hv, lt, log))
         }
@@ -118,31 +118,5 @@ async fn hv_from_config(
         HighVolumeStorageConfig::BigTable(c) => {
             Box::new(bigtable::BigTableBackend::new(c, streams).await?)
         }
-    })
-}
-
-/// Configuration for the long-term backend in a [`tiered::TieredStorageConfig`].
-///
-/// Supports GCS and local filesystem storage.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-pub enum LongTermStorageConfig {
-    /// Local filesystem storage backend (type `"filesystem"`).
-    FileSystem(local_fs::FileSystemConfig),
-
-    /// [Google Cloud Storage] backend (type `"gcs"`).
-    ///
-    /// [Google Cloud Storage]: https://cloud.google.com/storage
-    Gcs(gcs::GcsConfig),
-}
-
-/// Constructs a type-erased [`common::Backend`] from the given config.
-async fn lt_from_config(
-    config: LongTermStorageConfig,
-    streams: &ChangeStreamFactory,
-) -> Result<Box<dyn common::Backend>> {
-    Ok(match config {
-        LongTermStorageConfig::FileSystem(c) => Box::new(local_fs::LocalFsBackend::new(c, streams)),
-        LongTermStorageConfig::Gcs(c) => Box::new(gcs::GcsBackend::new(c, streams).await?),
     })
 }

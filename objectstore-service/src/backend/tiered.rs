@@ -129,7 +129,7 @@ use crate::backend::common::{
     MetadataResponse, PutResponse, SetExpiryResponse, TieredGet, TieredMetadata, TieredUpdate,
     TieredWrite, Tombstone,
 };
-use crate::backend::{HighVolumeStorageConfig, LongTermStorageConfig};
+use crate::backend::{HighVolumeStorageConfig, StorageConfig};
 use crate::error::{ErrorKind, Result, ResultExt as _};
 use crate::id::ObjectId;
 use crate::resumable::{BackendToken, Session};
@@ -156,7 +156,7 @@ fn new_long_term_revision(id: &ObjectId) -> ObjectId {
 /// Configuration for [`TieredStorage`].
 ///
 /// Composes two backends into a tiered routing setup: `high_volume` for small
-/// objects and `long_term` for large objects. Nesting [`super::StorageConfig::Tiered`]
+/// objects and `long_term` for large objects. Nesting [`StorageConfig::Tiered`]
 /// inside another tiered config is not supported.
 ///
 /// # Example
@@ -181,9 +181,7 @@ pub struct TieredStorageConfig {
     /// only BigTable).
     pub high_volume: HighVolumeStorageConfig,
     /// Backend for large, long-term objects.
-    ///
-    /// Supports GCS and local filesystem storage.
-    pub long_term: LongTermStorageConfig,
+    pub long_term: Box<StorageConfig>,
 }
 
 /// Two-tier storage backend that routes objects by size.
