@@ -128,7 +128,8 @@ Key configuration sections:
 - `service` — storage service parameters (backend concurrency limit)
 - `killswitches` — traffic blocking rules
 - `storage_cogs` — where backends publish their cost-tracking change stream; corresponds
-  to config on each backend. See [`change_stream`](objectstore_service::change_stream).
+  to config on each backend. Requires the `storage-cogs` Cargo feature. See
+  [`change_stream`](objectstore_service::change_stream).
 - `usecases` — per-use-case properties (expiration policy constraints)
 - `runtime` — worker threads, metrics interval
 - `sentry` / `metrics` / `logging` — observability
