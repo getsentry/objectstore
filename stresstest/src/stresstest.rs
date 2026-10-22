@@ -292,7 +292,7 @@ async fn run_workload(
                             let file_size = payload.len;
                             let organization_id = workload.lock().unwrap().next_organization_id();
 
-                            let mut usecase = Usecase::new(&workload.lock().unwrap().name);
+                            let mut usecase = Usecase::new(&workload.lock().unwrap().name).expect("invalid usecase name");
                             if let Some(ttl) = ttl {
                                 usecase = usecase.with_expiration_policy(ExpirationPolicy::TimeToLive(ttl));
                             }
@@ -419,7 +419,7 @@ async fn run_batch_workload(
                     let mut wl = workload.lock().unwrap();
                     let payloads = wl.next_write_payloads(batch_size);
                     let org_id = wl.next_organization_id();
-                    let mut usecase = Usecase::new(&wl.name);
+                    let mut usecase = Usecase::new(&wl.name).expect("invalid usecase name");
                     if let Some(ttl) = ttl {
                         usecase = usecase.with_expiration_policy(ExpirationPolicy::TimeToLive(ttl));
                     }
