@@ -36,11 +36,6 @@ jobs:
           rustup toolchain install stable --profile minimal --no-self-update
           rustup component add clippy rustfmt rust-docs --toolchain stable
 
-      - name: Install protoc
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
       - uses: swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
         with:
           key: ${{ github.job }}
@@ -126,11 +121,6 @@ jobs:
           rustup toolchain install stable --profile minimal --no-self-update
           rustup component add llvm-tools-preview
 
-      - name: Install protoc
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
       - uses: swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
         with:
           key: ${{ github.job }}
@@ -168,11 +158,6 @@ jobs:
       - name: Install Rust Toolchain
         run: |
           rustup toolchain install stable --profile minimal --no-self-update
-
-      - name: Install protoc
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
 
@@ -215,11 +200,6 @@ jobs:
 
       - name: Install Rust Toolchain
         run: rustup toolchain install stable --profile minimal --component rust-docs --no-self-update
-
-      - name: Install protoc
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
         with:
