@@ -113,8 +113,8 @@ for detailed setup and usage instructions.
 
 ## Building
 
-Ensure `protoc` and the latest stable Rust toolchain are installed on your
-machine. A release build can be created with:
+Ensure the latest stable Rust toolchain is installed on your machine. A release
+build can be created with:
 
 ```sh
 cargo build --release --locked
