@@ -19,14 +19,7 @@ test-utils = []
 
 [dependencies]
 blake3 = { workspace = true }
-# Allow a range of possible `rdkafka` versions so library users can pin whichever they use.
-# The lower bound matches `sentry_arroyo`, which shares the same `rdkafka` types.
-rdkafka = { version = ">=0.37.0, <0.40.0", features = [
-    "cmake-build",
-    "libz-static", # for distroless
-    "ssl",
-    "tracing",
-], optional = true }
+rdkafka = { workspace = true, optional = true }
 sentry_arroyo = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
