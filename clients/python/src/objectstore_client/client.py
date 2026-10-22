@@ -90,7 +90,7 @@ class Usecase:
         """Create a usecase.
 
         Raises ``ValueError`` if the name violates the naming rules on ``Usecase``,
-        or if the ``compression`` or ``resumable_threshold_bytes`` is invalid.
+        or if either ``compression`` or ``resumable_threshold_bytes`` is invalid.
         """
         if not 3 <= len(name) <= 64:
             raise ValueError("usecase name must be 3–64 ASCII characters long")

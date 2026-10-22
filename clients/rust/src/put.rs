@@ -1,7 +1,6 @@
 use std::fmt;
 use std::io::{self, Cursor};
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::{borrow::Cow, collections::BTreeMap};
 
 use async_compression::tokio::bufread::{GzipEncoder, ZstdEncoder};
@@ -274,27 +273,27 @@ pub(crate) async fn encode_body(body: PutBody, mode: Option<CompressionMode>) ->
         Some(CompressionMode::Precompressed(_)) | None => None,
     };
 
-    let Some(compression) = compression else {
-        return Ok(match body {
+    Ok(match compression {
+        None => match body {
             PutBody::Buffer(bytes) => bytes.into(),
             PutBody::Stream(stream) => Body::wrap_stream(stream),
             PutBody::File(file) => Body::wrap_stream(ReaderStream::new(file)),
             PutBody::Path(path) => Body::wrap_stream(ReaderStream::new(File::open(path).await?)),
-        });
-    };
+        },
+        Some(compression) => match body {
+            PutBody::Buffer(bytes) => compress(Cursor::new(bytes), compression),
+            PutBody::Stream(stream) => compress(StreamReader::new(stream), compression),
+            PutBody::File(file) => compress(BufReader::new(file), compression),
+            PutBody::Path(path) => compress(BufReader::new(File::open(path).await?), compression),
+        },
+    })
+}
 
-    let reader: Pin<Box<dyn AsyncBufRead + Send>> = match body {
-        PutBody::Buffer(bytes) => Box::pin(Cursor::new(bytes)),
-        PutBody::Stream(stream) => Box::pin(StreamReader::new(stream)),
-        PutBody::File(file) => Box::pin(BufReader::new(file)),
-        PutBody::Path(path) => Box::pin(BufReader::new(File::open(path).await?)),
-    };
-
-    let stream = match compression {
-        Compression::Zstd => ReaderStream::new(ZstdEncoder::new(reader)).boxed(),
-        Compression::Gzip => ReaderStream::new(GzipEncoder::new(reader)).boxed(),
-    };
-    Ok(Body::wrap_stream(stream))
+fn compress(reader: impl AsyncBufRead + Send + 'static, compression: Compression) -> Body {
+    match compression {
+        Compression::Zstd => Body::wrap_stream(ReaderStream::new(ZstdEncoder::new(reader))),
+        Compression::Gzip => Body::wrap_stream(ReaderStream::new(GzipEncoder::new(reader))),
+    }
 }
 
 // TODO: instead of a separate `send` method, it would be nice to just implement `IntoFuture`.
@@ -370,7 +369,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gzip_compresses_all_body_kinds() {
+    async fn gzip_body_kinds() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("payload");
         std::fs::write(&path, b"hello world").unwrap();

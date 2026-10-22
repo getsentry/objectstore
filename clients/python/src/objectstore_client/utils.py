@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import io
-from typing import IO, Protocol
+from typing import IO
 from urllib.parse import quote, unquote
 
 import filetype  # type: ignore[import-untyped]
@@ -125,67 +124,3 @@ def guess_mime_type(contents: bytes | IO[bytes]) -> str | None:
 
     kind = filetype.guess(header)
     return kind.mime if kind else None
-
-
-class _Compressor(Protocol):
-    """A streaming compression object, such as `zlib.compressobj()`."""
-
-    def compress(self, data: bytes, /) -> bytes: ...
-
-    def flush(self) -> bytes: ...
-
-
-class _CompressionReader(io.RawIOBase):
-    """
-    A readable stream that compresses `source` with `compressor` as it is read.
-
-    `tell()` reports the number of compressed bytes produced so far. `seek(0)` is
-    allowed as long as no data has been read yet, so that urllib3 can record the body
-    position. Closing the reader does not close `source`.
-    """
-
-    _CHUNK_SIZE = 64 * 1024
-
-    def __init__(self, source: IO[bytes], compressor: _Compressor) -> None:
-        super().__init__()
-        self._source = source
-        self._compressor = compressor
-        self._buffer = bytearray()
-        self._finished = False
-        self._position = 0
-
-    def readable(self) -> bool:
-        return True
-
-    def read(self, size: int | None = -1, /) -> bytes:
-        if size is None or size < 0:
-            size = -1
-        while not self._finished and (size < 0 or len(self._buffer) < size):
-            if chunk := self._source.read(self._CHUNK_SIZE):
-                self._buffer += self._compressor.compress(chunk)
-            else:
-                self._buffer += self._compressor.flush()
-                self._finished = True
-
-        if size < 0:
-            size = len(self._buffer)
-        out = bytes(self._buffer[:size])
-        del self._buffer[:size]
-        self._position += len(out)
-        return out
-
-    def readall(self) -> bytes:
-        return self.read(-1)
-
-    def readinto(self, buffer: memoryview | bytearray) -> int:  # type: ignore[override]
-        data = self.read(len(buffer))
-        buffer[: len(data)] = data
-        return len(data)
-
-    def tell(self) -> int:
-        return self._position
-
-    def seek(self, offset: int, whence: int = io.SEEK_SET, /) -> int:
-        if offset == 0 and whence == io.SEEK_SET and self._position == 0:
-            return 0
-        raise OSError("Cannot seek in a compressed stream after reading has started")

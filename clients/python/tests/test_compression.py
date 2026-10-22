@@ -14,6 +14,38 @@ from objectstore_client.metadata import Compression
 PAYLOAD = random.Random(0).randbytes(300_000) + b"tail" * 1000
 
 
+def _make_wrapper(data: bytes = b"hello world") -> _compression._CompressionReader:
+    compressor = zstandard.ZstdCompressor().compressobj()
+    return _compression._CompressionReader(io.BytesIO(data), compressor)
+
+
+def test_seek_zero_before_read() -> None:
+    wrapper = _make_wrapper()
+    assert wrapper.seek(0) == 0
+    assert wrapper.seek(0) == 0
+
+
+def test_seek_nonzero_before_read() -> None:
+    wrapper = _make_wrapper()
+    with pytest.raises(OSError, match="Cannot seek"):
+        wrapper.seek(1)
+
+
+def test_seek_zero_after_read() -> None:
+    wrapper = _make_wrapper()
+    wrapper.read(1)
+    with pytest.raises(OSError, match="Cannot seek"):
+        wrapper.seek(0)
+
+
+def test_read_and_tell_forwarded() -> None:
+    wrapper = _make_wrapper()
+    assert wrapper.tell() == 0
+    data = wrapper.read(4)
+    assert len(data) > 0
+    assert wrapper.tell() > 0
+
+
 @pytest.mark.parametrize("compression", ["zstd", "gzip"])
 @pytest.mark.parametrize("read_size", [-1, 1, 4096, 100_000])
 def test_compressing_reader_roundtrip(compression: Compression, read_size: int) -> None:
@@ -35,7 +67,7 @@ def test_compressing_reader_roundtrip(compression: Compression, read_size: int) 
 
 
 @pytest.mark.parametrize("compression", ["zstd", "gzip"])
-def test_compressing_reader_seeks_to_start_only_before_reading(
+def test_compressing_reader_seek(
     compression: Compression,
 ) -> None:
     reader = _compression.compressing_reader(io.BytesIO(PAYLOAD), compression)
@@ -56,7 +88,7 @@ def test_compress_into(compression: Compression) -> None:
     assert _compression.decompressing_reader(dest, compression).read() == PAYLOAD
 
 
-def test_gzip_output_is_standard() -> None:
+def test_gzip_format() -> None:
     reader = _compression.compressing_reader(io.BytesIO(PAYLOAD), "gzip")
     assert gzip.decompress(reader.read()) == PAYLOAD
 
@@ -65,9 +97,7 @@ def test_gzip_output_is_standard() -> None:
     "compression,compress",
     [("zstd", zstandard.ZstdCompressor().compress), ("gzip", gzip.compress)],
 )
-def test_decompressing_reader_reads_concatenated_members(
-    compression: str, compress: object
-) -> None:
+def test_concatenated_members(compression: str, compress: object) -> None:
     assert callable(compress)
     stream = io.BytesIO(compress(b"hello ") + compress(b"world"))
     assert _compression.decompressing_reader(stream, compression).read() == (
@@ -75,7 +105,7 @@ def test_decompressing_reader_reads_concatenated_members(
     )
 
 
-def test_gzip_reader_closes_partially_read_http_response() -> None:
+def test_gzip_partial_read_close() -> None:
     connection = Mock()
     body = io.BytesIO(gzip.compress(PAYLOAD))
     response = urllib3.HTTPResponse(
@@ -99,7 +129,7 @@ def test_gzip_reader_closes_partially_read_http_response() -> None:
     connection.close.assert_called_once_with()
 
 
-def test_decompressing_reader_rejects_unknown() -> None:
+def test_unknown_compression() -> None:
     with pytest.raises(NotImplementedError):
         _compression.decompressing_reader(io.BytesIO(b""), "lz4")
 

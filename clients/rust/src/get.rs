@@ -118,7 +118,7 @@ impl GetBuilder {
     }
 }
 
-/// Wraps a stream in a decompression layer matching the object's compression.
+/// Wraps a stream in a decompression layer.
 ///
 /// Decompresses if the metadata indicates compression, `decompress` is `true`,
 /// and the stored encoding is not listed in `accept_encoding`. When the stored encoding
@@ -134,7 +134,6 @@ pub(crate) fn maybe_decompress(
         .compression
         .is_some_and(|c| accept_encoding.contains(&c));
     match (metadata.compression, decompress && !encoding_accepted) {
-        // Compressed payloads may contain concatenated zstd frames or gzip members.
         (Some(Compression::Zstd), true) => {
             metadata.compression = None;
             let mut decoder = ZstdDecoder::new(StreamReader::new(stream));
@@ -145,6 +144,7 @@ pub(crate) fn maybe_decompress(
         (Some(Compression::Gzip), true) => {
             metadata.compression = None;
             let mut decoder = GzipDecoder::new(StreamReader::new(stream));
+            // Gzip streams may contain concatenated members (RFC 1952 §2.2).
             decoder.multiple_members(true);
             ReaderStream::new(decoder).boxed()
         }
@@ -264,7 +264,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gzip_decompresses() {
+    async fn gzip_decompression() {
         let payload = b"hello world";
         let stream = raw_stream(&gzip_compress(payload));
         let mut metadata = gzip_metadata();
@@ -275,7 +275,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gzip_accept_skips_decompression() {
+    async fn gzip_accept_encoding() {
         let compressed = gzip_compress(b"hello world");
         let stream = raw_stream(&compressed);
         let mut metadata = gzip_metadata();
@@ -286,7 +286,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gzip_concatenated_members_decompress() {
+    async fn gzip_concatenated_members() {
         let mut compressed = gzip_compress(b"hello ");
         compressed.extend(gzip_compress(b"world"));
         let stream = raw_stream(&compressed);

@@ -505,7 +505,7 @@ def test_full_cycle_gzip(server_url: str) -> None:
         assert gzip.decompress(raw.payload.read()) == b"test data" * 100
 
 
-def test_precompressed_gzip_is_stored_verbatim(server_url: str) -> None:
+def test_precompressed_gzip(server_url: str) -> None:
     client = Client(server_url, token=TestSecretKey.get())
     session = client.session(Usecase("test-usecase"), org=42, project=1337)
 
@@ -522,7 +522,7 @@ def test_precompressed_gzip_is_stored_verbatim(server_url: str) -> None:
     assert retrieved.payload.read() == b"test data"
 
 
-def test_rejects_unsupported_compression(server_url: str) -> None:
+def test_unsupported_compression(server_url: str) -> None:
     client = Client(server_url, token=TestSecretKey.get())
     session = client.session(Usecase("test-usecase"), org=42, project=1337)
 
@@ -952,20 +952,20 @@ def test_put_stores_under_literal_key(server_url: str) -> None:
 
 
 @pytest.mark.parametrize("source_kind", ["bytes", "buffer", "stream"])
-@pytest.mark.parametrize(
-    "compression",
-    ["none", "zstd", "gzip", "precompressed-zstd", "precompressed-gzip"],
-)
+@pytest.mark.parametrize("compression", ["none", "zstd", "gzip"])
+@pytest.mark.parametrize("precompressed", [False, True])
 @pytest.mark.parametrize("threshold", [1, 2048])
 def test_automatic_resumable_upload(
-    server_url: str, source_kind: str, compression: str, threshold: int
+    server_url: str,
+    source_kind: str,
+    compression: Compression,
+    precompressed: bool,
+    threshold: int,
 ) -> None:
-    precompressed = compression.startswith("precompressed-")
-    algorithm = cast(Compression, compression.removeprefix("precompressed-"))
     session = Client(server_url, token=TestSecretKey.get()).session(
         Usecase(
             "test-usecase",
-            compression="none" if precompressed else algorithm,
+            compression="none" if precompressed else compression,
             expiration_policy=TimeToLive(timedelta(days=1)),
             resumable_threshold_bytes=threshold,
         ),
@@ -973,9 +973,9 @@ def test_automatic_resumable_upload(
     )
     contents = b"file contents\n" * 100
     encoded = contents
-    if algorithm == "zstd" and precompressed:
+    if compression == "zstd" and precompressed:
         encoded = zstandard.ZstdCompressor().compress(contents)
-    elif algorithm == "gzip" and precompressed:
+    elif compression == "gzip" and precompressed:
         encoded = gzip.compress(contents)
     with (
         BytesIO()
@@ -989,7 +989,9 @@ def test_automatic_resumable_upload(
         source.seek(len(b"skip this prefix"))
         key = session.put(
             source if source_kind in ("buffer", "stream") else encoded,
-            precompressed=algorithm if precompressed else None,
+            precompressed=compression
+            if precompressed and compression != "none"
+            else None,
             content_type="text/plain",
             metadata={"source": "file"},
             origin="203.0.113.42",
@@ -999,7 +1001,7 @@ def test_automatic_resumable_upload(
         assert not source.closed
         stored = session.head(key)
         assert stored is not None
-        assert stored.compression == (algorithm if algorithm != "none" else None)
+        assert stored.compression == (compression if compression != "none" else None)
         assert stored.content_type == "text/plain"
         assert stored.filename == "example.txt"
         assert stored.origin == "203.0.113.42"

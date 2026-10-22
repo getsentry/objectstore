@@ -543,12 +543,11 @@ fn compress_bound(compression: Compression, size: usize) -> usize {
 const GZIP_FRAMING_SIZE: usize = 18;
 
 /// Returns the worst-case size of a raw deflate stream for `size` input bytes.
-///
-/// Neither `flate2` nor `miniz_oxide` expose a bound, so this mirrors zlib's
-/// `compressBound` without its 6-byte zlib wrapper. Incompressible input is emitted
-/// as stored blocks with a 5-byte header each, which this conservatively bounds at
-/// 5 bytes per 16 KiB of input plus a constant for the final block.
 fn deflate_bound(size: usize) -> usize {
+    // Neither `flate2` nor `miniz_oxide` expose a bound, so this mirrors zlib's
+    // `compressBound` without its 6-byte zlib wrapper. Incompressible input is emitted
+    // as stored blocks with a 5-byte header each, which this conservatively bounds at
+    // 5 bytes per 16 KiB of input plus a constant for the final block.
     size + (size >> 12) + (size >> 14) + (size >> 25) + 7
 }
 
@@ -875,10 +874,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gzip_put_uses_compress_bound() {
+    async fn gzip_put_bound() {
         let size = 1_000_000;
         let op = put_with_compression(size, CompressionMode::Compress(Compression::Gzip));
-        core::assert_matches!(
+        std::assert_matches!(
             classify(op).await,
             Classified::Batchable(_, s) if s == compress_bound(Compression::Gzip, size) as u64
         );
