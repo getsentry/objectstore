@@ -134,9 +134,7 @@ pub(crate) fn maybe_decompress(
         .compression
         .is_some_and(|c| accept_encoding.contains(&c));
     match (metadata.compression, decompress && !encoding_accepted) {
-        // Multipart uploads with compression, when each part is compressed individually,
-        // will consist of multiple concatenated zstd frames or gzip members.
-        // This allows the client to handle automatic decompression for these objects transparently.
+        // Compressed payloads may contain concatenated zstd frames or gzip members.
         (Some(Compression::Zstd), true) => {
             metadata.compression = None;
             let mut decoder = ZstdDecoder::new(StreamReader::new(stream));

@@ -97,9 +97,8 @@ def compress_into(
 def decompressing_reader(stream: IO[bytes], compression: str) -> IO[bytes]:
     """Return a readable stream decoding `stream` compressed with `compression`.
 
-    Concatenated zstd frames and gzip members, as produced by multipart uploads
-    with individually compressed parts, are decoded as a single payload. The
-    returned reader is non-seekable and closes the source when closed.
+    Concatenated zstd frames and gzip members are decoded as a single payload.
+    The returned reader is non-seekable and closes the source when closed.
     """
     if compression == "zstd":
         dctx = zstandard.ZstdDecompressor()

@@ -2859,9 +2859,9 @@ mod tests {
     }
 
     /// GCS decompresses `Content-Encoding: gzip` objects on download unless the request accepts
-    /// gzip. The backend must return the payload exactly as stored.
+    /// gzip. Full and range reads must return the stored compressed bytes.
     #[tokio::test]
-    async fn test_gzip_payload_roundtrip() -> Result<()> {
+    async fn test_gzip_payload_full_and_range_reads() -> Result<()> {
         use objectstore_types::metadata::Compression;
 
         let backend = create_test_backend().await?;
@@ -2896,36 +2896,6 @@ mod tests {
             payload, compressed,
             "Payload should be returned still compressed, not transcoded"
         );
-
-        Ok(())
-    }
-
-    /// Range reads of gzip objects must apply to the stored (compressed) bytes, which requires
-    /// opting out of decompressive transcoding.
-    #[tokio::test]
-    async fn test_gzip_payload_range_read() -> Result<()> {
-        use objectstore_types::metadata::Compression;
-
-        let backend = create_test_backend().await?;
-
-        let plaintext = b"hello, world (but compressed with gzip)";
-        let compressed = gzip_encode(plaintext);
-
-        let id = make_id();
-        let metadata = Metadata {
-            content_type: "text/plain".into(),
-            compression: Some(Compression::Gzip),
-            ..Default::default()
-        };
-
-        backend
-            .put_object(
-                &id,
-                &metadata,
-                stream::single(compressed.clone()),
-                Timestamp::now(),
-            )
-            .await?;
 
         let (meta, content_range, stream) = backend
             .get_object(&id, Timestamp::now(), Some(ByteRange::Bounded(2, 9)))
