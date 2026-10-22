@@ -1,11 +1,10 @@
-# Changelog categories for the client releases. Craft reads `.github/release.yml`
-# next to each client's `.craft.yml`, so `clients/python/.github/release.yml` and
-# `clients/rust/.github/release.yml` are symlinks to this file.
+# Changelog categories for both client releases. Craft reads `.github/release.yml`
+# next to each `.craft.yml`, so `clients/{python,rust}/.github/release.yml` are
+# symlinks to this file.
 #
-# Each client has its own release and changelog, so entries are grouped by
-# change type. The `type(scope):` prefix is stripped from titles. Entries are
-# matched top to bottom; categories that share a title render as one section,
-# and `semver` drives the version bump.
+# A custom file replaces Craft's defaults entirely. Compared to them, it strips
+# the `type(scope):` prefix from entries and catches every remaining change so
+# it still counts toward the version bump.
 changelog:
   exclude:
     labels:
@@ -15,10 +14,6 @@ changelog:
       commit_patterns:
         - "^(?<type>\\w+(?:\\([^)]+\\))?!:\\s*)"
       semver: major
-    - title: Security 🔒
-      commit_patterns:
-        - "^(?<type>security(?:\\([^)]+\\))?:\\s*)"
-      semver: patch
     - title: New Features ✨
       commit_patterns:
         - "^(?<type>feat(?:\\([^)]+\\))?:\\s*)"
@@ -26,19 +21,13 @@ changelog:
     - title: Bug Fixes 🐛
       commit_patterns:
         - "^(?<type>fix(?:\\([^)]+\\))?:\\s*)"
-        - '^Revert "'
       semver: patch
-    - title: Documentation 📚
-      commit_patterns:
-        - "^(?<type>docs?(?:\\([^)]+\\))?:\\s*)"
-      semver: patch
-    # Catch-all, so every change to a client lands in its changelog and bumps
-    # the version: any other type, then titles that aren't conventional at all.
-    - title: Internal Changes 🔧
+    # Catch-all: any other conventional type, then any other title.
+    - title: Other Changes 🔧
       commit_patterns:
         - "^(?<type>\\w+(?:\\([^)]+\\))?:\\s*)"
       semver: patch
-    - title: Internal Changes 🔧
+    - title: Other Changes 🔧
       labels:
         - "*"
       semver: patch

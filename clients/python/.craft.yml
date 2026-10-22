@@ -1,6 +1,6 @@
 changelog:
   policy: auto
-  # Categories in `.github/release.yml` group entries by change type.
+  # Default is `true`, which adds a subheading per PR title scope.
   scopeGrouping: false
 preReleaseCommand: ../../scripts/bump-version-py-client.sh
 releaseBranchPrefix: release-library/py-client
