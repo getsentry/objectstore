@@ -70,3 +70,11 @@ When adding docs or moving types, verify documentation references:
 ```bash
 cargo doc --workspace --all-features --no-deps --document-private-items
 ```
+
+## Pull Requests
+
+The client changelog is generated from PR titles:
+
+- Scope client changes as `py-client` or `rs-client`, e.g. `feat(py-client): Add X`. Other titles are not listed under a client heading.
+- Split changes to both clients into one PR per client.
+- If the title doesn't describe the change well for client users, add a `### Changelog Entry` section to the PR description with the text to use instead.

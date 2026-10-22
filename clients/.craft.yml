@@ -1,4 +1,7 @@
-changelogPolicy: auto
+changelog:
+  policy: auto
+  # Categories in `.github/release.yml` are the per-client headings; no scope subheadings.
+  scopeGrouping: false
 preReleaseCommand: ../scripts/bump-version-clients.sh
 releaseBranchPrefix: release-library
 

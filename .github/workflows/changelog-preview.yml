@@ -1,0 +1,20 @@
+name: Changelog Preview
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited, labeled, unlabeled]
+    paths:
+      - clients/**
+      - objectstore-types/**
+
+permissions:
+  contents: read
+  pull-requests: write
+  statuses: write
+
+jobs:
+  changelog-preview:
+    uses: getsentry/craft/.github/workflows/changelog-preview.yml@0ff75896d43285ca376c7254e8143bac23acd429 # v2
+    with:
+      working-directory: clients
+    secrets: inherit
