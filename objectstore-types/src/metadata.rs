@@ -375,9 +375,7 @@ pub struct Metadata {
 
     /// An optional filename associated with this object (header: `x-sn-filename`).
     ///
-    /// When present, the server includes a `Content-Disposition: attachment; filename="<filename>"`
-    /// header in GET responses, prompting browsers and download tools to save the file
-    /// under this name. Non-ASCII filenames additionally get an RFC 8187 `filename*` parameter.
+    /// This filename is returned when downloading the object.
     ///
     /// This is a logical string and may contain arbitrary Unicode; it is escaped only on the
     /// wire (see [the module docs](self#escaping-free-form-values)).

@@ -785,6 +785,65 @@ def test_presigned_get_encoding_corner_cases(server_url: str, key: str) -> None:
     assert body == payload
 
 
+def test_presigned_response_options(server_url: str) -> None:
+    session = _presign_session(server_url)
+    key = "inline-example"
+    session.put(b"<html>example</html>", key=key, content_type="text/html")
+    url = session.presigned_object_url(
+        "GET",
+        key,
+        response_content_disposition="inline",
+    )
+    with urllib.request.urlopen(url) as response:
+        assert response.status == 200
+        assert response.headers["content-disposition"] == "inline"
+        assert response.headers["content-type"] == "text/html"
+        assert response.headers["content-security-policy"] == "sandbox"
+        assert response.headers["x-content-type-options"] == "nosniff"
+        assert response.read() == b"<html>example</html>"
+
+    status, _ = _fetch(url.replace("=inline", "=attachment"))
+    assert status == 401
+
+
+def test_jwt_response_options_remain_editable(server_url: str) -> None:
+    session = _presign_session(server_url)
+    session.put(b"example", key="jwt-options")
+    url = session.object_url(
+        "jwt-options",
+        token_validity=timedelta(minutes=5),
+        response_content_disposition="inline",
+    )
+    for target, expected in [
+        (url, "inline"),
+        (url.replace("=inline", "=attachment"), "attachment"),
+    ]:
+        with urllib.request.urlopen(target) as response:
+            assert response.status == 200
+            assert response.headers["content-disposition"] == expected
+
+
+def test_inline_preserves_stored_mime_type_and_compression(server_url: str) -> None:
+    session = Client(server_url, token=TestSecretKey.get()).session(
+        Usecase("test-usecase", compression="zstd"), org=42, project=1337
+    )
+    payload = b'<svg xmlns="http://www.w3.org/2000/svg"><script>example</script></svg>'
+    session.put(payload, key="svg-options", content_type="image/svg+xml")
+    url = session.object_url(
+        "svg-options",
+        token_validity=timedelta(minutes=5),
+        response_content_disposition="inline",
+    )
+    with urllib.request.urlopen(url) as response:
+        assert response.headers["content-type"] == "image/svg+xml"
+        assert response.headers["content-encoding"] == "zstd"
+        assert response.headers["content-security-policy"] == "sandbox"
+        with zstandard.ZstdDecompressor().stream_reader(
+            BytesIO(response.read())
+        ) as reader:
+            assert reader.read() == payload
+
+
 def test_object_url_read_only_token_succeeds(server_url: str) -> None:
     session = _presign_session(server_url)
     session.put(b"read only hello", key="read-only-url")

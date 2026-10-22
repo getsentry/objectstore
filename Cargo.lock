@@ -2943,6 +2943,7 @@ dependencies = [
  "tower",
  "tower-http 0.7.0",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]

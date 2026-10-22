@@ -23,6 +23,11 @@
 //! Object metadata travels in request and response headers; see
 //! [`objectstore_types::metadata`] for the mapping and the separate JSON update contract.
 //!
+//! GET and HEAD accept `response-content-disposition=inline|attachment` (default attachment).
+//! Response options apply only to successful object responses, including ranged GETs. See
+//! [`crate::extractors::response_options`] for validation. The object handlers construct
+//! download headers with browser safeguards and filename formatting.
+//!
 //! # Resumable Upload Endpoints
 //!
 //! A resumable upload transfers a single object across several requests.

@@ -194,6 +194,22 @@ with urllib.request.urlopen(url) as resp:
     content = resp.read()
 ```
 
+### Download response options
+
+Both `Session.object_url` and `Session.presigned_object_url` accept a
+`response_content_disposition` option:
+
+```python
+url = session.presigned_object_url(
+    "GET",
+    "my-key",
+    response_content_disposition="inline",
+)
+```
+
+Disposition accepts `inline` or `attachment`, defaulting to `attachment` when omitted.
+The stored filename is retained.
+
 ## Configuration
 
 In production, store the `Client` and `Usecase` at module level and reuse them.

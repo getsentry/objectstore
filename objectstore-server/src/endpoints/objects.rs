@@ -25,19 +25,19 @@
 //! strings are rejected by JSON deserialization with 422. Requests exceeding the
 //! usecase's `expiration.max`, measured from request time, return 400.
 
-use std::fmt::Write as _;
+use std::convert::Infallible;
 
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::handler::Handler;
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse, IntoResponseParts, Response, ResponseParts};
 use axum::routing;
 use axum::{Json, Router};
+use http::{HeaderValue, header};
 use objectstore_service::backend::common::{ExpiryTarget, ExpiryUpdate, SetExpiryResponse};
 use objectstore_service::error::ErrorKind;
 use objectstore_service::id::{ObjectContext, ObjectId};
-use objectstore_types::headers::ExtValue;
 use objectstore_types::metadata::{ExpiryAnchor, ExpiryExtension, Metadata, MetadataUpdate};
 use objectstore_types::range::ContentRange;
 use serde::Serialize;
@@ -47,6 +47,7 @@ use crate::endpoints::common::{ApiError, ApiResult, insert_accept_ranges};
 use crate::endpoints::resumable;
 use crate::extractors::byte_range::OptionalByteRange;
 use crate::extractors::request_time::RequestTime;
+use crate::extractors::response_options::{ContentDisposition, ResponseOptions};
 use crate::extractors::{Xt, body::MeteredBody};
 use crate::resumable::ResumableTarget;
 use crate::state::ServiceState;
@@ -176,7 +177,7 @@ async fn object_get(
     service: AuthAwareService,
     State(state): State<ServiceState>,
     Xt(id): Xt<ObjectId>,
-    _headers: HeaderMap,
+    options: ResponseOptions,
     RequestTime(access_time): RequestTime,
     OptionalByteRange(byte_range): OptionalByteRange,
 ) -> ApiResult<Response> {
@@ -230,14 +231,15 @@ async fn object_get(
         }
     };
 
-    insert_content_disposition(&mut response, &metadata);
     insert_accept_ranges(&mut response);
 
-    Ok(response)
+    let download_headers = DownloadHeaders::new(options, metadata.filename.as_deref());
+    Ok((download_headers, response).into_response())
 }
 
 async fn object_head(
     service: AuthAwareService,
+    options: ResponseOptions,
     Xt(id): Xt<ObjectId>,
     RequestTime(access_time): RequestTime,
 ) -> ApiResult<Response> {
@@ -251,9 +253,9 @@ async fn object_head(
     insert_content_length(&mut headers, &metadata);
 
     let mut response = (StatusCode::OK, headers).into_response();
-    insert_content_disposition(&mut response, &metadata);
     insert_accept_ranges(&mut response);
-    Ok(response)
+    let download_headers = DownloadHeaders::new(options, metadata.filename.as_deref());
+    Ok((download_headers, response).into_response())
 }
 
 /// Inserts a `Content-Length` header covering the complete object.
@@ -268,55 +270,6 @@ fn insert_content_length(headers: &mut HeaderMap, metadata: &Metadata) {
             http::HeaderValue::from(size as u64),
         );
     }
-}
-
-/// Serves every object as an attachment, named after its filename when it has one.
-fn insert_content_disposition(response: &mut Response, metadata: &Metadata) {
-    let value = match metadata.filename.as_deref() {
-        Some(filename) => format_content_disposition(filename),
-        None => http::HeaderValue::from_static("attachment"),
-    };
-    response
-        .headers_mut()
-        .insert(http::header::CONTENT_DISPOSITION, value);
-}
-
-/// Formats a `Content-Disposition: attachment; filename="..."` header value.
-///
-/// The filename is sanitized (`/` and `\` become `-`, dots-only names become all dashes, non-ASCII
-/// and control characters become `_`) and then escaped for the RFC 6266 quoted-string (`"` is
-/// backslash-escaped).
-///
-/// A filename that is not pure ASCII cannot be represented in that quoted-string, so it
-/// additionally gets an RFC 8187 `filename*` parameter carrying the full UTF-8 value. The
-/// quoted-string then serves as the ASCII fallback for clients that ignore `filename*`.
-fn format_content_disposition(filename: &str) -> http::HeaderValue {
-    let all_dots = filename.chars().all(|c| c == '.');
-
-    let mut result = String::from("attachment; filename=\"");
-    for c in filename.chars() {
-        let c = match c {
-            '/' | '\\' => '-',
-            '.' if all_dots => '-',
-            '"' => {
-                result.push('\\');
-                '"'
-            }
-            c if !c.is_ascii() || c.is_control() => '_',
-            c => c,
-        };
-        result.push(c);
-    }
-    result.push('"');
-
-    if !filename.is_ascii() {
-        write!(result, "; filename*={}", ExtValue(filename))
-            .expect("writing to a string cannot fail");
-    }
-
-    // INVARIANT: every character written above is visible ASCII — the quoted-string replaces
-    // non-ASCII and control characters with `_`, and the `ext-value` is percent-encoded.
-    http::HeaderValue::from_str(&result).expect("content disposition is a valid header value")
 }
 
 async fn insert_object(
@@ -354,6 +307,61 @@ async fn delete_object(
 ) -> ApiResult<impl IntoResponse> {
     service.delete_object(id, access_time).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Object presentation headers, including mandatory browser safeguards.
+///
+/// All successful downloads get `nosniff` and `no-referrer`; inline responses also get a CSP
+/// sandbox without relaxation tokens. Sandboxing is a browser safeguard, not content sanitization,
+/// and does not prevent all external resource loads. Apply these parts only to successful responses.
+#[derive(Debug)]
+struct DownloadHeaders {
+    disposition: HeaderValue,
+    inline: bool,
+}
+
+impl DownloadHeaders {
+    /// Builds success-only headers using the response options and stored filename.
+    fn new(options: ResponseOptions, filename: Option<&str>) -> Self {
+        let header = match filename {
+            Some(filename) => options.disposition.with_filename(filename),
+            None => HeaderValue::from_static(options.disposition.as_str()),
+        };
+
+        Self {
+            disposition: header,
+            inline: options.disposition == ContentDisposition::Inline,
+        }
+    }
+}
+
+impl IntoResponseParts for DownloadHeaders {
+    type Error = Infallible;
+
+    fn into_response_parts(
+        self,
+        mut response: ResponseParts,
+    ) -> Result<ResponseParts, Self::Error> {
+        let headers = response.headers_mut();
+        headers.insert(header::CONTENT_DISPOSITION, self.disposition);
+        headers.insert(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        );
+        // Inline documents can load external resources; avoid exposing URL query credentials
+        // through referrers as defense in depth alongside the sandbox.
+        headers.insert(
+            header::REFERRER_POLICY,
+            HeaderValue::from_static("no-referrer"),
+        );
+        if self.inline {
+            headers.insert(
+                header::CONTENT_SECURITY_POLICY,
+                HeaderValue::from_static("sandbox"),
+            );
+        }
+        Ok(response)
+    }
 }
 
 #[cfg(test)]
@@ -617,5 +625,21 @@ mod tests {
 
         assert!(matches!(error, ApiError::Service(_)));
         assert_eq!(error.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[test]
+    fn inline_filename_retains_escaping_and_unicode_encoding() {
+        let options = ResponseOptions {
+            disposition: ContentDisposition::Inline,
+        };
+        let download_headers = DownloadHeaders::new(options, Some("réport.pdf"));
+        let response = (download_headers, ()).into_response();
+        assert_eq!(
+            response.headers()["content-disposition"],
+            "inline; filename=\"r_port.pdf\"; filename*=UTF-8''r%C3%A9port.pdf"
+        );
+        assert_eq!(response.headers()["content-security-policy"], "sandbox");
+        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        assert_eq!(response.headers()["referrer-policy"], "no-referrer");
     }
 }

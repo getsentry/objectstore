@@ -51,6 +51,15 @@ PARAM_AUTH = "os_auth"
 USER_AGENT = f"objectstore-client/{version('objectstore-client')}"
 
 
+def _response_options_query(
+    disposition: Literal["inline", "attachment"],
+) -> str:
+    """Validate and encode the response-content-disposition query parameter."""
+    if disposition not in ("inline", "attachment"):
+        raise ValueError(f"unsupported response content disposition {disposition!r}")
+    return utils.encode_query(f"response-content-disposition={disposition}")
+
+
 class GetResponse(NamedTuple):
     metadata: Metadata
     payload: IO[bytes]
@@ -689,7 +698,12 @@ class Session:
             span.set_attribute("objectstore.decompressed", decompressed)
             return GetResponse(metadata, stream)
 
-    def object_url(self, key: str, token_validity: timedelta | None = None) -> str:
+    def object_url(
+        self,
+        key: str,
+        token_validity: timedelta | None = None,
+        response_content_disposition: Literal["inline", "attachment"] | None = None,
+    ) -> str:
         """
         Generates a GET url to the object with the given `key`.
 
@@ -701,10 +715,18 @@ class Session:
         information is embedded in the returned URL's query string, valid
         for the given duration.
 
+        ``response_content_disposition`` selects ``attachment`` (default) or ``inline``
+        for successful GET/HEAD responses, retaining the stored filename.
+
+        These options are not bound by the auth token and can be changed by recipients.
+        Use :meth:`presigned_object_url` to bind the options to a signature.
+
         Raises ``ValueError`` if ``token_validity`` is provided but no
-        ``SecretKey`` is configured on this session.
+        ``SecretKey`` is configured on this session, or if disposition is invalid.
         """
         url = self._make_url(key, full=True)
+        if response_content_disposition is not None:
+            url = f"{url}?{_response_options_query(response_content_disposition)}"
         if token_validity is None:
             return url
 
@@ -714,13 +736,15 @@ class Session:
         )
         # A JWT's compact serialization is base64url, whose alphabet is URL-safe,
         # so it can go in the query string as-is with no further encoding.
-        return f"{url}?{PARAM_AUTH}={token}"
+        separator = "&" if response_content_disposition is not None else "?"
+        return f"{url}{separator}{PARAM_AUTH}={token}"
 
     def presigned_object_url(
         self,
         method: Literal["GET", "HEAD"],
         key: str,
         duration: timedelta = timedelta(hours=1),
+        response_content_disposition: Literal["inline", "attachment"] | None = None,
     ) -> str:
         """
         Generates a pre-signed URL authorizing a single ``method`` request on the
@@ -732,11 +756,16 @@ class Session:
 
         Raises ``ValueError`` if no ``SecretKey`` is configured on this
         session's client, if ``method`` is not supported, or if ``duration``
-        is above the one-week maximum.
+        is above the one-week maximum, or if disposition is invalid.
 
         The returned URL carries a signature that allows the recipient to perform
         a request without an auth token. It can be handed to any HTTP client;
         the URL is already percent-encoded, and must be transmitted verbatim.
+
+        ``response_content_disposition`` selects ``attachment`` (default) or ``inline``
+        for successful GET/HEAD responses, retaining the stored filename.
+
+        Response options are included in the signature when supplied.
 
         Note that `HEAD` and `GET` are considered equivalent from the point of view
         of signatures, meaning that a signature for `GET` can also be used for
@@ -774,6 +803,11 @@ class Session:
                 f"&{presign.PARAM_TIMESTAMP}={timestamp}"
                 f"&{presign.PARAM_DURATION}={duration_secs}"
             )
+
+            if response_content_disposition is not None:
+                encoded_query += (
+                    f"&{_response_options_query(response_content_disposition)}"
+                )
 
             canonical = presign.build_canonical_form(
                 method, encoded_path, encoded_query
