@@ -127,7 +127,7 @@ impl ApiError {
             | ApiError::Batch(BatchError::Metadata(_))
             | ApiError::Batch(BatchError::Multipart(_)) => StatusCode::BAD_REQUEST,
             ApiError::Batch(BatchError::LimitExceeded(_)) => StatusCode::PAYLOAD_TOO_LARGE,
-            ApiError::Batch(BatchError::RateLimited) => StatusCode::TOO_MANY_REQUESTS,
+            ApiError::Batch(BatchError::RateLimited(rejection)) => rejection.status(),
             ApiError::Batch(BatchError::ResponseSerialization { .. }) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
@@ -151,7 +151,7 @@ impl ApiError {
                 ServiceErrorKind::RangeNotSatisfiable { .. } => StatusCode::RANGE_NOT_SATISFIABLE,
                 ServiceErrorKind::UploadOffsetMismatch { .. } => StatusCode::CONFLICT,
                 ServiceErrorKind::UploadSessionGone => StatusCode::GONE,
-                ServiceErrorKind::AtCapacity => StatusCode::TOO_MANY_REQUESTS,
+                ServiceErrorKind::AtCapacity => StatusCode::SERVICE_UNAVAILABLE,
                 ServiceErrorKind::Unsupported => StatusCode::NOT_IMPLEMENTED,
                 ServiceErrorKind::BackendRateLimited => StatusCode::TOO_MANY_REQUESTS,
                 ServiceErrorKind::BackendTimeout | ServiceErrorKind::BackendUnavailable => {
@@ -173,8 +173,11 @@ impl ApiError {
     /// Call this exactly once wherever an `ApiError` is serialized into a client-visible
     /// response: standalone responses ([`IntoResponse`]) and batch response parts.
     pub fn capture(&self) {
-        // Captured at the source in the service layer to prevent double-logging.
-        if matches!(self, ApiError::Service(_)) {
+        // Service errors and admission rejections are already logged at the source.
+        if matches!(
+            self,
+            ApiError::Service(_) | ApiError::Batch(BatchError::RateLimited(_))
+        ) {
             return;
         }
 

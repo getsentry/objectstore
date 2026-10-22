@@ -149,6 +149,56 @@ async fn presigned_head_succeeds() -> Result<()> {
 }
 
 #[tokio::test]
+async fn response_options_are_signed_and_case_insensitive() -> Result<()> {
+    let server = test_server().await;
+    seed_object(&server, "hello").await?;
+    let legacy_query = presign_query(&Method::GET, OBJECT_PATH, ONE_HOUR);
+    let (base, _) = legacy_query.rsplit_once("&os_sig=").unwrap();
+    let query = format!("{base}&response-content-disposition=inline&unknown=b&unknown=a");
+    let signature = CanonicalRequest::new(&Method::GET, OBJECT_PATH, Some(&query))
+        .sign(signing_key().as_bytes());
+    let signed = format!("{query}&os_sig={signature}");
+    let client = reqwest::Client::new();
+    for method in [Method::GET, Method::HEAD] {
+        for query in [
+            signed.clone(),
+            signed.replace(
+                "response-content-disposition",
+                "RESPONSE-CONTENT-DISPOSITION",
+            ),
+        ] {
+            let response = client
+                .request(method.clone(), presigned_url(&server, OBJECT_PATH, &query))
+                .send()
+                .await?;
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert_eq!(response.headers()["content-disposition"], "inline");
+            assert_eq!(response.headers()["content-security-policy"], "sandbox");
+        }
+    }
+    for query in [
+        signed.replace("=inline", "=attachment"),
+        signed.replace("&response-content-disposition=inline", ""),
+        signed.replace("&unknown=b", ""),
+        format!("{legacy_query}&response-content-disposition=inline"),
+    ] {
+        let response = client
+            .get(presigned_url(&server, OBJECT_PATH, &query))
+            .send()
+            .await?;
+        assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+        for name in [
+            "content-disposition",
+            "x-content-type-options",
+            "content-security-policy",
+        ] {
+            assert!(!response.headers().contains_key(name));
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn presigned_delete_is_rejected() -> Result<()> {
     let server = test_server().await;
     seed_object(&server, "hello").await?;

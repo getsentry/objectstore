@@ -12,13 +12,12 @@ publish = false
 [dependencies]
 anyhow = { workspace = true }
 argh = { workspace = true }
-bytes = { workspace = true }
 bytesize = { workspace = true, features = ["serde"] }
 futures = { workspace = true }
 humantime = { workspace = true }
 humantime-serde = { workspace = true }
 indicatif = { workspace = true }
-objectstore-client = { workspace = true, features = ["multipart"] }
+objectstore-client = { workspace = true }
 objectstore-metrics = { path = "../objectstore-metrics" }
 rand = { workspace = true }
 rand_distr = { workspace = true }

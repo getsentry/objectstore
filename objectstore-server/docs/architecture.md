@@ -137,7 +137,19 @@ See the [`config`] module for the full configuration schema.
 
 ## Rate Limiting
 
-Rate limiting operates at two levels:
+Rate limits protect shared capacity and enforce explicit traffic allowances.
+We distinguish two kinds of rate limits by their purpose:
+
+- **Capacity protection**: global limits and generic per-usecase/per-scope
+  percentage limits preserve capacity for other traffic. Rejections return
+  HTTP 503 Service Unavailable.
+- **Explicit traffic allowances**: configured overrides set an allowance for
+  matching usecases and/or scopes. Rejections return HTTP 429 Too Many Requests.
+
+Bandwidth is checked before throughput; throughput checks global, usecase,
+scope, then explicit rules. The first exceeded limit determines the response.
+Responses identify only capacity protection or an exceeded traffic allowance;
+the specific limit is recorded in logs and metrics.
 
 ### Throughput
 
@@ -170,9 +182,8 @@ Each granularity maintains its own bucket. The `MeteredPayloadStream` charges
 all applicable buckets (global + per-usecase + per-scope) for every chunk
 polled. For non-streamed payloads, bytes are recorded directly.
 
-Rate-limited requests receive HTTP 429. When `report_only` is enabled, all
-accounting and metrics remain active, but requests exceeding the limit are
-admitted instead of rejected.
+When bandwidth `report_only` is enabled, its accounting and metrics remain
+active, but bandwidth limits do not reject requests.
 
 ### Web Concurrency Limit
 
@@ -203,7 +214,7 @@ Beyond rate limiting and the web concurrency limit, the
 [`StorageService`](objectstore_service::StorageService) enforces a second
 layer of backpressure through a concurrency limit on in-flight backend
 operations, configured via `service.max_concurrency` and related options.
-When exceeded, requests receive HTTP 429. See the [service architecture
+When exceeded, requests receive HTTP 503. See the [service architecture
 docs](objectstore_service) for details.
 
 ## KEDA Metrics

@@ -116,95 +116,36 @@ Arbitrary key-value pairs can be attached to objects and retrieved on download.
 session.put(b"payload", metadata={"source": "upload-service"})
 ```
 
-### Multipart Upload API
-
-For large objects, use multipart uploads to upload parts independently and then
-assemble them into a final object.
-
-**Important:** unlike single-object uploads, multipart uploads do **not** auto-compress.
-`compression` on `initiate_multipart_upload` behaves like `precompressed` above: it only
-records the algorithm, and the caller must pre-compress each part accordingly.
-
-```python
-from concurrent.futures import ThreadPoolExecutor
-
-import zstandard
-
-from objectstore_client.multipart import MultipartCompleteError
-
-upload = session.initiate_multipart_upload(
-    key="my-large-object",
-    compression="zstd",
-    metadata={"source": "upload-service"},
-)
-
-compressor = zstandard.ZstdCompressor()
-chunks = [b"part1", b"part2", b"part3", b"part4"]
-
-def upload_part(part_number: int, data: bytes):
-    compressed = compressor.compress(data)
-    return upload.put_part(
-        compressed, part_number=part_number, content_length=len(compressed)
-    )
-
-with ThreadPoolExecutor(max_workers=4) as executor:
-    futures = [
-        executor.submit(upload_part, i + 1, chunk)
-        for i, chunk in enumerate(chunks)
-    ]
-    parts = [f.result() for f in futures]
-
-try:
-    key = upload.complete(parts)
-except MultipartCompleteError:
-    upload.abort()
-    raise
-```
-
-To resume an in-progress multipart upload after a process restart, persist the
-`key` and `upload_id`, then reconstruct the upload handle later:
-
-```python
-saved_key = upload.key
-saved_upload_id = upload.upload_id
-
-resumed = session.resume_multipart_upload(saved_key, saved_upload_id)
-existing_parts = resumed.list_parts()
-
-# Upload missing parts...
-
-key = resumed.complete(new_parts + existing_parts)
-```
-
 ### Authentication
 
 If your Objectstore instance enforces authorization, you must configure authentication
 via the `token` parameter on `Client`. It accepts either:
 
-- A **`SecretKey`** — for internal services that have access to an EdDSA keypair.
-  The key signs a fresh JWT for each request, scoped to the specific usecase
-  and scope being accessed, and can also sign pre-signed URLs.
+- A **`TokenGenerator`** — for internal services that have access to an EdDSA keypair.
+  It wraps a `SecretKey` and signs a fresh JWT for each request, scoped to the
+  specific usecase and scope being accessed. Its key can also sign pre-signed URLs.
+  The generator's `expiry_seconds` and `permissions` are the defaults for every
+  token it signs; per-token overrides can only narrow them.
 - A **`str`** — a pre-signed JWT, used as-is for every request.
   Use this for external services that receive a token from another source.
 
 ```python
 from objectstore_client import Client, Usecase
-from objectstore_client.auth import SecretKey
+from objectstore_client.auth import SecretKey, TokenGenerator
+
+key = SecretKey(kid="my-service", secret_key="<private key>")
 
 # Option 1: Internal service with a keypair
-client = Client(
-    "http://localhost:8888",
-    token=SecretKey(kid="my-service", secret_key="<private key>"),
-)
+client = Client("http://localhost:8888", token=TokenGenerator(key))
 
 # Option 2: External service with a pre-signed JWT
-# Use SecretKey.token_for_scope() to obtain a static token from an
+# Use TokenGenerator.token_for_scope() to obtain a static token from an
 # internal service, then pass it to the external consumer:
 from objectstore_client.scope import Scope
 
-token = SecretKey(
-    kid="my-service", secret_key="<private key>",
-).token_for_scope("my_app", Scope(org=42, project=1337))
+token = TokenGenerator(key, expiry_seconds=300).token_for_scope(
+    "my_app", Scope(org=42, project=1337)
+)
 
 client = Client("http://localhost:8888", token=token)
 ```
@@ -214,7 +155,7 @@ client = Client("http://localhost:8888", token=token)
 `Session.object_url` returns a GET URL for an object. By default the URL carries
 no auth, so the recipient needs their own key to generate a token for it. Pass
 `token_validity` to embed a read-only token in the URL instead, valid for the
-given duration (requires `SecretKey` authentication - see above section).
+given duration (requires `TokenGenerator` authentication - see above section).
 
 ```python
 from datetime import timedelta
@@ -237,8 +178,8 @@ Pre-signed URLS currently only support `GET` and `HEAD` (a pre-signed URL for
 `GET` authorizes `HEAD` too, and viceversa), so for uploads you should use
 scoped JWTs, as described above.
 
-`Session.presigned_object_url` signs the URL with the session's `SecretKey`,
-so it requires a `SecretKey` and raises `ValueError` otherwise.
+`Session.presigned_object_url` signs the URL with the `SecretKey` of the session's
+`TokenGenerator`, so it requires a `TokenGenerator` and raises `ValueError` otherwise.
 Only `GET` and `HEAD` may be pre-signed, the granted permissions are those
 configured server-side for the signing key, and the
 validity may not exceed one week.
@@ -254,6 +195,22 @@ with urllib.request.urlopen(url) as resp:
     content = resp.read()
 ```
 
+### Download response options
+
+Both `Session.object_url` and `Session.presigned_object_url` accept a
+`response_content_disposition` option:
+
+```python
+url = session.presigned_object_url(
+    "GET",
+    "my-key",
+    response_content_disposition="inline",
+)
+```
+
+Disposition accepts `inline` or `attachment`, defaulting to `attachment` when omitted.
+The stored filename is retained.
+
 ## Configuration
 
 In production, store the `Client` and `Usecase` at module level and reuse them.
@@ -264,7 +221,6 @@ from objectstore_client import Client, Usecase
 
 client = Client(
     "http://localhost:8888",
-    propagate_traces=False,  # default
     retries=3,               # default: 3 connect retries, no read retries
     timeout_ms=None,         # default: no read timeout (connect: 100ms)
     connection_kwargs={},    # default: empty (override urllib3.HTTPConnectionPool kwargs)

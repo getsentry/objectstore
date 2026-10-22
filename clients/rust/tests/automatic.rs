@@ -136,7 +136,7 @@ impl Server {
             .build()
             .unwrap()
             .session(
-                Usecase::new("testing")
+                Usecase::from_static("testing")
                     .with_compression(None)
                     .with_resumable_threshold_bytes(threshold)
                     .for_organization(123),
@@ -164,7 +164,7 @@ impl Drop for Server {
 #[tokio::test]
 async fn threshold_inheritance_overrides_and_empty_payloads() {
     assert_eq!(
-        Usecase::new("testing").resumable_threshold_bytes(),
+        Usecase::from_static("testing").resumable_threshold_bytes(),
         Some(256 * 1024 * 1024)
     );
     for (threshold, override_threshold, data, resumable) in [
@@ -288,7 +288,7 @@ async fn compression_spooling_metadata_and_creation_fallback() {
         let client = server.client().spool_dir(dir.path()).build().unwrap();
         let session = client
             .session(
-                Usecase::new("testing")
+                Usecase::from_static("testing")
                     .with_resumable_threshold_bytes(1024)
                     .for_organization(123),
             )
@@ -349,7 +349,7 @@ async fn missing_spool_directory_falls_back_and_precompressed_input_needs_no_spo
         .unwrap();
     let session = client
         .session(
-            Usecase::new("testing")
+            Usecase::from_static("testing")
                 .with_resumable_threshold_bytes(0)
                 .for_organization(123),
         )
@@ -450,7 +450,7 @@ async fn recovery_probes_and_progress_resets_the_budget() {
         .unwrap();
     let session = client
         .session(
-            Usecase::new("testing")
+            Usecase::from_static("testing")
                 .with_compression(None)
                 .with_resumable_threshold_bytes(0)
                 .for_organization(123),
@@ -613,7 +613,7 @@ fn upload_futures_are_send() {
     let session = Client::builder("http://localhost")
         .build()
         .unwrap()
-        .session(Usecase::new("testing").for_organization(123))
+        .session(Usecase::from_static("testing").for_organization(123))
         .unwrap();
     assert_send(session.put("data").send());
     assert_send(session.put_path("data").send());

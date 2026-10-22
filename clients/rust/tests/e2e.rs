@@ -66,7 +66,7 @@ async fn stores_uncompressed() {
         .token(test_token_generator())
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_organization(12345)).unwrap();
 
     let body = "oh hai!";
@@ -98,7 +98,7 @@ async fn uses_zstd_by_default() {
         .token(test_token_generator())
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_organization(12345)).unwrap();
 
     let body = "oh hai!";
@@ -137,7 +137,7 @@ async fn stores_precompressed_payload_verbatim() {
         .token(test_token_generator())
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_organization(12345)).unwrap();
 
     let compressed = zstd::bulk::compress(b"oh hai!", 0).unwrap();
@@ -177,7 +177,7 @@ async fn deletes_stores_stuff() {
         .token(test_token_generator())
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
     let body = "oh hai!";
@@ -197,7 +197,7 @@ async fn stores_under_given_key() {
         .token(test_token_generator())
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
     let body = "oh hai!";
@@ -215,7 +215,7 @@ async fn roundtrips_unicode_metadata() {
         .token(test_token_generator())
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
     let filename = "réport-📄.pdf";
@@ -263,7 +263,7 @@ async fn stores_structured_keys() {
         .token(test_token_generator())
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
     let body = "oh hai!";
@@ -284,7 +284,7 @@ async fn overwrites_existing_key() {
         .token(test_token_generator())
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
     let stored_id = session.put("initial body").send().await.unwrap().key;
@@ -306,7 +306,7 @@ async fn not_found_with_wrong_scope() {
         .token(test_token_generator())
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
 
     // First we have to place an object with one scope
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
@@ -326,7 +326,7 @@ async fn stores_with_origin() {
         .token(test_token_generator())
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_organization(12345)).unwrap();
 
     let stored_id = session
@@ -350,7 +350,7 @@ async fn stores_without_origin() {
         .token(test_token_generator())
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_organization(12345)).unwrap();
 
     let stored_id = session
@@ -375,7 +375,7 @@ async fn fails_with_insufficient_auth_token_perms() {
         .token(token_generator)
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
     let put_result = session.put("initial body").send().await;
@@ -412,7 +412,7 @@ async fn create_token_rejects_escalation() {
         .token(test_token_generator().permissions(&[Permission::ObjectRead]))
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_organization(12345)).unwrap();
 
     let result = session
@@ -448,7 +448,7 @@ async fn create_token_rejects_static_token() {
         .token(token)
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_organization(12345)).unwrap();
 
     // A static, pre-signed token cannot be re-signed with custom permissions or expiry.
@@ -464,7 +464,7 @@ async fn create_token_rejects_static_token() {
 #[tokio::test]
 async fn create_token_without_provider() {
     let client = Client::builder("http://127.0.0.1:8888/").build().unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_organization(12345)).unwrap();
 
     // Without a token provider there is no request to configure, and no token to return.
@@ -482,7 +482,7 @@ async fn stores_with_static_token() {
         .token(token)
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_organization(12345)).unwrap();
 
     let body = "hello with static token!";
@@ -501,7 +501,7 @@ async fn batch_operations() {
         .token(test_token_generator())
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
     // First batch: 4 PUT operations
@@ -618,7 +618,7 @@ async fn batch_insert_without_key() {
         .token(test_token_generator())
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
     // Insert without specifying a key — the server should generate one
@@ -660,7 +660,7 @@ async fn batch_partial_failures() {
         .token(read_only_token)
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
     let results: Vec<_> = session
@@ -736,7 +736,7 @@ async fn batch_put_files() {
         .token(test_token_generator())
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
     let dir = tempfile::tempdir().unwrap();
@@ -806,7 +806,7 @@ async fn put_path_does_not_exhaust_file_descriptors() {
         .build()
         .unwrap();
     let session = client
-        .session(Usecase::new("usecase").for_project(12345, 1337))
+        .session(Usecase::from_static("usecase").for_project(12345, 1337))
         .unwrap();
 
     let dir = tempfile::tempdir().unwrap();
@@ -831,7 +831,7 @@ async fn put_file_with_compression() {
         .token(test_token_generator())
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_organization(12345)).unwrap();
 
     let dir = tempfile::tempdir().unwrap();
@@ -882,7 +882,7 @@ async fn head_returns_metadata() {
         .token(test_token_generator())
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
     let stored_id = session
@@ -911,7 +911,7 @@ async fn round_trips_expiration_policy_beyond_a_year() {
         .token(test_token_generator())
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
     // Serializes as "400d 1h 18m 31s"
@@ -1016,7 +1016,7 @@ async fn batch_head_operations() {
         .token(test_token_generator())
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
     session

@@ -2823,7 +2823,6 @@ dependencies = [
  "anyhow",
  "async-compression",
  "axum",
- "base64",
  "bytes",
  "futures-util",
  "http-body-util",
@@ -2946,6 +2945,7 @@ dependencies = [
  "tower",
  "tower-http 0.7.0",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
@@ -4631,7 +4631,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "argh",
- "bytes",
  "bytesize",
  "futures",
  "humantime",

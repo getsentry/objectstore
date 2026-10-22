@@ -31,10 +31,9 @@ from objectstore_client._resumable import (
     UploadIncomplete,
     UploadOffsetMismatch,
 )
-from objectstore_client.auth import Permission, SecretKey
+from objectstore_client.auth import Permission, SecretKey, TokenGenerator
 from objectstore_client.errors import RequestError
 from objectstore_client.metadata import TimeToLive
-from objectstore_client.multipart import CompletePart, MultipartCompleteError
 from objectstore_client.scope import Scope
 
 TEST_EDDSA_KID: str = "test_kid"
@@ -59,21 +58,21 @@ class UnrewindableStream(BytesIO):
         raise OSError("stream does not expose a stable position")
 
 
-class TestSecretKey:
-    _instance: SecretKey | None = None
+class TestTokenGenerator:
+    _instance: TokenGenerator | None = None
 
     @classmethod
     def create(
         cls, expiry_seconds: int = 60, permissions: list[Permission] = Permission.max()
-    ) -> SecretKey:
+    ) -> TokenGenerator:
         with open(TEST_EDDSA_PRIVKEY_PATH) as f:
-            return SecretKey(TEST_EDDSA_KID, f.read(), expiry_seconds, permissions)
+            key = SecretKey(TEST_EDDSA_KID, f.read())
+        return TokenGenerator(key, expiry_seconds, permissions)
 
     @classmethod
-    def get(cls) -> SecretKey:
+    def get(cls) -> TokenGenerator:
         if not cls._instance:
-            with open(TEST_EDDSA_PRIVKEY_PATH) as f:
-                cls._instance = SecretKey(TEST_EDDSA_KID, f.read())
+            cls._instance = cls.create()
         return cls._instance
 
 
@@ -161,7 +160,7 @@ def server_url() -> Generator[str]:
 def test_full_cycle(server_url: str) -> None:
     client = Client(
         server_url,
-        token=TestSecretKey.get(),
+        token=TestTokenGenerator.get(),
     )
     test_usecase = Usecase(
         "test-usecase",
@@ -191,7 +190,7 @@ def test_full_cycle(server_url: str) -> None:
 
 
 def test_resumable_upload(server_url: str) -> None:
-    session = Client(server_url, token=TestSecretKey.get()).session(
+    session = Client(server_url, token=TestTokenGenerator.get()).session(
         Usecase("test-usecase", expiration_policy=TimeToLive(timedelta(days=1))),
         org=42,
         project=1337,
@@ -237,7 +236,7 @@ def test_resumable_upload(server_url: str) -> None:
 
 
 def test_resumable_upload_precompressed(server_url: str) -> None:
-    session = Client(server_url, token=TestSecretKey.get()).session(
+    session = Client(server_url, token=TestTokenGenerator.get()).session(
         Usecase("test-usecase", compression="none"), org=42, project=1337
     )
     payload = b"abcdef"
@@ -259,7 +258,7 @@ def test_resumable_upload_precompressed(server_url: str) -> None:
 
 
 def test_resumable_upload_cancel(server_url: str) -> None:
-    session = Client(server_url, token=TestSecretKey.get()).session(
+    session = Client(server_url, token=TestTokenGenerator.get()).session(
         Usecase("test-usecase"), org=42, project=1337
     )
     upload = session._create_upload(6)
@@ -275,7 +274,7 @@ def test_resumable_upload_cancel(server_url: str) -> None:
 def test_head(server_url: str) -> None:
     client = Client(
         server_url,
-        token=TestSecretKey.get(),
+        token=TestTokenGenerator.get(),
     )
     test_usecase = Usecase(
         "test-usecase",
@@ -302,7 +301,7 @@ def test_head(server_url: str) -> None:
 def test_full_cycle_with_origin(server_url: str) -> None:
     client = Client(
         server_url,
-        token=TestSecretKey.get(),
+        token=TestTokenGenerator.get(),
     )
     test_usecase = Usecase(
         "test-usecase",
@@ -324,7 +323,7 @@ def test_full_cycle_with_origin(server_url: str) -> None:
 def test_full_cycle_with_unicode_metadata(server_url: str) -> None:
     client = Client(
         server_url,
-        token=TestSecretKey.get(),
+        token=TestTokenGenerator.get(),
     )
     test_usecase = Usecase(
         "test-usecase",
@@ -360,7 +359,7 @@ def test_full_cycle_with_unicode_metadata(server_url: str) -> None:
 def test_round_trips_expiration_policy_beyond_a_year(server_url: str) -> None:
     client = Client(
         server_url,
-        token=TestSecretKey.get(),
+        token=TestTokenGenerator.get(),
     )
 
     # Serializes as "400d 1h 18m 31s"
@@ -385,7 +384,7 @@ def test_round_trips_expiration_policy_beyond_a_year(server_url: str) -> None:
 
 
 def test_extend_expiry(server_url: str) -> None:
-    client = Client(server_url, token=TestSecretKey.get())
+    client = Client(server_url, token=TestTokenGenerator.get())
     policy = TimeToLive(timedelta(days=1))
     session = client.session(Usecase("test-usecase", expiration_policy=policy), org=42)
     key = session.put(b"payload")
@@ -404,7 +403,7 @@ def test_extend_expiry(server_url: str) -> None:
 
 
 def test_extend_expiry_missing_object(server_url: str) -> None:
-    client = Client(server_url, token=TestSecretKey.get())
+    client = Client(server_url, token=TestTokenGenerator.get())
     session = client.session(Usecase("test-usecase"), org=42)
     with pytest.raises(ObjectNotFound) as error:
         session.extend_expiry("missing", from_now=timedelta(days=1))
@@ -412,7 +411,7 @@ def test_extend_expiry_missing_object(server_url: str) -> None:
 
 
 def test_extend_expiry_non_expiring_object(server_url: str) -> None:
-    client = Client(server_url, token=TestSecretKey.get())
+    client = Client(server_url, token=TestTokenGenerator.get())
     session = client.session(Usecase("test-usecase"), org=42)
     key = session.put(b"payload")
     with pytest.raises(ExpiryExtensionRejected) as error:
@@ -423,7 +422,7 @@ def test_extend_expiry_non_expiring_object(server_url: str) -> None:
 def test_full_cycle_uncompressed(server_url: str) -> None:
     client = Client(
         server_url,
-        token=TestSecretKey.get(),
+        token=TestTokenGenerator.get(),
     )
     test_usecase = Usecase(
         "test-usecase",
@@ -455,7 +454,7 @@ def test_full_cycle_uncompressed(server_url: str) -> None:
 def test_precompressed_is_stored_verbatim(server_url: str) -> None:
     client = Client(
         server_url,
-        token=TestSecretKey.get(),
+        token=TestTokenGenerator.get(),
     )
     test_usecase = Usecase("test-usecase")
     session = client.session(test_usecase, org=42, project=1337)
@@ -479,7 +478,7 @@ def test_precompressed_is_stored_verbatim(server_url: str) -> None:
 
 
 def test_precompressed_rejects_conflicting_arguments(server_url: str) -> None:
-    client = Client(server_url, token=TestSecretKey.get())
+    client = Client(server_url, token=TestTokenGenerator.get())
     session = client.session(Usecase("test-usecase"), org=42, project=1337)
 
     with pytest.raises(ValueError):
@@ -492,26 +491,10 @@ def test_precompressed_rejects_conflicting_arguments(server_url: str) -> None:
         session.put(b"test data", precompressed="brotli")  # type: ignore[arg-type]
 
 
-def test_compression_argument_is_deprecated(server_url: str) -> None:
-    client = Client(server_url, token=TestSecretKey.get())
-    session = client.session(Usecase("test-usecase"), org=42, project=1337)
-
-    with pytest.deprecated_call():
-        object_key = session.put(b"test data", compression="none")
-
-    retrieved = session.get(object_key)
-    assert retrieved is not None
-    assert retrieved.metadata.compression is None
-    assert retrieved.payload.read() == b"test data"
-
-    with pytest.warns(DeprecationWarning), pytest.raises(ValueError):
-        session.put(b"test data", compress="none", compression="none")
-
-
 def test_full_cycle_structured_key(server_url: str) -> None:
     client = Client(
         server_url,
-        token=TestSecretKey.get(),
+        token=TestTokenGenerator.get(),
     )
     test_usecase = Usecase(
         "test-usecase",
@@ -530,7 +513,7 @@ def test_full_cycle_structured_key(server_url: str) -> None:
 def test_not_found_with_different_scope(server_url: str) -> None:
     client = Client(
         server_url,
-        token=TestSecretKey.get(),
+        token=TestTokenGenerator.get(),
     )
     test_usecase = Usecase(
         "test-usecase",
@@ -547,7 +530,7 @@ def test_not_found_with_different_scope(server_url: str) -> None:
 
 
 def test_full_cycle_with_static_token(server_url: str) -> None:
-    token_generator = TestSecretKey.get()
+    token_generator = TestTokenGenerator.get()
     token = token_generator.token_for_scope("test-usecase", Scope(org=42, project=1337))
 
     client = Client(server_url, token=token)
@@ -571,7 +554,7 @@ def test_full_cycle_with_static_token(server_url: str) -> None:
 
 
 def test_fails_with_insufficient_auth_perms(server_url: str) -> None:
-    client = Client(server_url, token=TestSecretKey.create(permissions=[]))
+    client = Client(server_url, token=TestTokenGenerator.create(permissions=[]))
     test_usecase = Usecase(
         "test-usecase",
         expiration_policy=TimeToLive(timedelta(days=1)),
@@ -595,7 +578,7 @@ def test_read_timeout() -> None:
     client = Client(
         url,
         timeout_ms=500,
-        token=TestSecretKey.get(),
+        token=TestTokenGenerator.get(),
     )
     test_usecase = Usecase(
         "test-usecase",
@@ -620,7 +603,7 @@ def test_connect_timeout() -> None:
     # Do NOT set timeout_ms to ensure we exercise default timeouts
     client = Client(
         url,
-        token=TestSecretKey.get(),
+        token=TestTokenGenerator.get(),
     )
     test_usecase = Usecase(
         "test-usecase",
@@ -642,314 +625,6 @@ def test_connect_timeout() -> None:
         session.put(b"test data", compress="zstd")
 
 
-def test_multipart_full_cycle_uncompressed(server_url: str) -> None:
-    client = Client(server_url, token=TestSecretKey.get())
-    usecase = Usecase(
-        "test-usecase",
-        compression="none",
-        expiration_policy=TimeToLive(timedelta(days=1)),
-    )
-    session = client.session(usecase, org=42, project=1337)
-
-    upload = session.initiate_multipart_upload(key="mp-uncompressed")
-    assert upload.key == "mp-uncompressed"
-    assert upload.upload_id
-
-    part1 = upload.put_part(b"hello ", part_number=1, content_length=6)
-    part2 = upload.put_part(b"world!", part_number=2, content_length=6)
-
-    final_key = upload.complete([part1, part2])
-    assert final_key == "mp-uncompressed"
-
-    retrieved = session.get(final_key, decompress=False)
-    assert retrieved is not None
-    assert retrieved.payload.read() == b"hello world!"
-
-
-def test_multipart_full_cycle_compressed(server_url: str) -> None:
-    client = Client(server_url, token=TestSecretKey.get())
-    usecase = Usecase(
-        "test-usecase",
-        compression="none",
-        expiration_policy=TimeToLive(timedelta(days=1)),
-    )
-    session = client.session(usecase, org=42, project=1337)
-
-    upload = session.initiate_multipart_upload(
-        key="mp-compressed",
-        compression="zstd",
-    )
-
-    cctx = zstandard.ZstdCompressor()
-    compressed_part1 = cctx.compress(b"hello ")
-    compressed_part2 = cctx.compress(b"world!")
-
-    part1 = upload.put_part(
-        compressed_part1, part_number=1, content_length=len(compressed_part1)
-    )
-    part2 = upload.put_part(
-        compressed_part2, part_number=2, content_length=len(compressed_part2)
-    )
-
-    final_key = upload.complete([part1, part2])
-
-    # Verify raw compressed round-trip
-    retrieved = session.get(final_key, decompress=False)
-    assert retrieved is not None
-    assert retrieved.metadata.compression == "zstd"
-    raw = retrieved.payload.read()
-    assert raw == compressed_part1 + compressed_part2
-
-    # Verify transparent decompression
-    retrieved = session.get(final_key)
-    assert retrieved is not None
-    assert retrieved.metadata.compression is None
-    assert retrieved.payload.read() == b"hello world!"
-
-
-def test_multipart_streaming_part_upload_uncompressed(server_url: str) -> None:
-    client = Client(server_url, token=TestSecretKey.get())
-    usecase = Usecase(
-        "test-usecase",
-        compression="none",
-        expiration_policy=TimeToLive(timedelta(days=1)),
-    )
-    session = client.session(usecase, org=42, project=1337)
-
-    upload = session.initiate_multipart_upload(key="mp-streaming-uncompressed")
-
-    part1_payload = b"hello "
-    part2_payload = b"world!"
-    part1 = upload.put_part(
-        UnrewindableStream(part1_payload),
-        part_number=1,
-        content_length=len(part1_payload),
-    )
-    part2 = upload.put_part(
-        UnrewindableStream(part2_payload),
-        part_number=2,
-        content_length=len(part2_payload),
-    )
-
-    final_key = upload.complete([part1, part2])
-
-    retrieved = session.get(final_key)
-    assert retrieved is not None
-    assert retrieved.payload.read() == b"hello world!"
-
-
-def test_multipart_streaming_part_upload_compressed(server_url: str) -> None:
-    client = Client(server_url, token=TestSecretKey.get())
-    usecase = Usecase(
-        "test-usecase",
-        compression="none",
-        expiration_policy=TimeToLive(timedelta(days=1)),
-    )
-    session = client.session(usecase, org=42, project=1337)
-
-    upload = session.initiate_multipart_upload(
-        key="mp-streaming-compressed",
-        compression="zstd",
-    )
-
-    cctx = zstandard.ZstdCompressor()
-    compressed_part1 = cctx.compress(b"hello ")
-    compressed_part2 = cctx.compress(b"world!")
-
-    part1 = upload.put_part(
-        UnrewindableStream(compressed_part1),
-        part_number=1,
-        content_length=len(compressed_part1),
-    )
-    part2 = upload.put_part(
-        UnrewindableStream(compressed_part2),
-        part_number=2,
-        content_length=len(compressed_part2),
-    )
-
-    final_key = upload.complete([part1, part2])
-
-    retrieved = session.get(final_key, decompress=False)
-    assert retrieved is not None
-    assert retrieved.metadata.compression == "zstd"
-    assert retrieved.payload.read() == compressed_part1 + compressed_part2
-
-    retrieved = session.get(final_key)
-    assert retrieved is not None
-    assert retrieved.metadata.compression is None
-    assert retrieved.payload.read() == b"hello world!"
-
-
-def test_multipart_server_generated_key(server_url: str) -> None:
-    client = Client(server_url, token=TestSecretKey.get())
-    usecase = Usecase(
-        "test-usecase",
-        compression="none",
-        expiration_policy=TimeToLive(timedelta(days=1)),
-    )
-    session = client.session(usecase, org=42, project=1337)
-
-    upload = session.initiate_multipart_upload()
-    assert upload.key
-
-    part = upload.put_part(b"data", part_number=1, content_length=4)
-    final_key = upload.complete([part])
-    assert final_key
-
-    retrieved = session.get(final_key)
-    assert retrieved is not None
-    assert retrieved.payload.read() == b"data"
-
-
-def test_multipart_list_parts(server_url: str) -> None:
-    client = Client(server_url, token=TestSecretKey.get())
-    usecase = Usecase(
-        "test-usecase",
-        compression="none",
-        expiration_policy=TimeToLive(timedelta(days=1)),
-    )
-    session = client.session(usecase, org=42, project=1337)
-
-    upload = session.initiate_multipart_upload(key="mp-list-parts")
-
-    upload.put_part(b"part-two", part_number=2, content_length=8)
-    upload.put_part(b"part-one", part_number=1, content_length=8)
-
-    parts = upload.list_parts()
-    assert len(parts) == 2
-
-    p1 = next(p for p in parts if p.part_number == 1)
-    p2 = next(p for p in parts if p.part_number == 2)
-    assert p1.size == 8
-    assert p2.size == 8
-
-    upload.abort()
-
-
-def test_multipart_abort(server_url: str) -> None:
-    client = Client(server_url, token=TestSecretKey.get())
-    usecase = Usecase(
-        "test-usecase",
-        compression="none",
-        expiration_policy=TimeToLive(timedelta(days=1)),
-    )
-    session = client.session(usecase, org=42, project=1337)
-
-    upload = session.initiate_multipart_upload(key="mp-abort")
-    upload.put_part(b"some data", part_number=1, content_length=9)
-    upload.abort()
-
-
-def test_multipart_metadata_preserved(server_url: str) -> None:
-    client = Client(server_url, token=TestSecretKey.get())
-    usecase = Usecase(
-        "test-usecase",
-        compression="none",
-        expiration_policy=TimeToLive(timedelta(days=1)),
-    )
-    session = client.session(usecase, org=42, project=1337)
-
-    upload = session.initiate_multipart_upload(
-        key="mp-metadata",
-        content_type="text/plain",
-        origin="203.0.113.42",
-        filename="archive.tar.gz",
-        metadata={"my-key": "my-value"},
-    )
-
-    part = upload.put_part(b"payload", part_number=1, content_length=7)
-    final_key = upload.complete([part])
-
-    retrieved = session.get(final_key)
-    assert retrieved is not None
-    assert retrieved.metadata.content_type == "text/plain"
-    assert retrieved.metadata.origin == "203.0.113.42"
-    assert retrieved.metadata.filename == "archive.tar.gz"
-    assert retrieved.metadata.custom.get("my-key") == "my-value"
-
-
-def test_multipart_complete_with_bad_etag(server_url: str) -> None:
-    client = Client(server_url, token=TestSecretKey.get())
-    usecase = Usecase(
-        "test-usecase",
-        compression="none",
-        expiration_policy=TimeToLive(timedelta(days=1)),
-    )
-    session = client.session(usecase, org=42, project=1337)
-
-    upload = session.initiate_multipart_upload(key="mp-bad-etag")
-    upload.put_part(b"real data", part_number=1, content_length=9)
-
-    with pytest.raises(MultipartCompleteError) as exc_info:
-        upload.complete([CompletePart(part_number=1, etag="bogus-etag")])
-
-    assert exc_info.value.code
-    assert exc_info.value.status == 200
-
-
-def test_multipart_resume(server_url: str) -> None:
-    client = Client(server_url, token=TestSecretKey.get())
-    usecase = Usecase(
-        "test-usecase",
-        compression="none",
-        expiration_policy=TimeToLive(timedelta(days=1)),
-    )
-    session = client.session(usecase, org=42, project=1337)
-
-    upload = session.initiate_multipart_upload(key="mp-resume")
-    saved_key = upload.key
-    saved_upload_id = upload.upload_id
-
-    upload.put_part(b"first", part_number=1, content_length=5)
-
-    # Simulate resuming from saved state
-    resumed = session.resume_multipart_upload(saved_key, saved_upload_id)
-    assert resumed.key == saved_key
-    assert resumed.upload_id == saved_upload_id
-
-    resumed.put_part(b"second", part_number=2, content_length=6)
-
-    existing = resumed.list_parts()
-    assert len(existing) == 2
-
-    final_key = resumed.complete(existing)
-
-    retrieved = session.get(final_key)
-    assert retrieved is not None
-    assert retrieved.payload.read() == b"firstsecond"
-
-
-def test_multipart_concurrent_part_uploads(server_url: str) -> None:
-    from concurrent.futures import ThreadPoolExecutor
-
-    client = Client(server_url, token=TestSecretKey.get())
-    usecase = Usecase(
-        "test-usecase",
-        compression="none",
-        expiration_policy=TimeToLive(timedelta(days=1)),
-    )
-    session = client.session(usecase, org=42, project=1337)
-
-    upload = session.initiate_multipart_upload(key="mp-concurrent")
-
-    chunks = [f"chunk-{i}".encode() for i in range(8)]
-
-    def put_part(part_number: int, data: bytes) -> CompletePart:
-        return upload.put_part(data, part_number=part_number, content_length=len(data))
-
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        futures = [
-            executor.submit(put_part, i + 1, chunk) for i, chunk in enumerate(chunks)
-        ]
-        parts = [f.result() for f in futures]
-
-    final_key = upload.complete(parts)
-
-    retrieved = session.get(final_key)
-    assert retrieved is not None
-    assert retrieved.payload.read() == b"".join(chunks)
-
-
 def _fetch(url: str, method: str = "GET") -> tuple[int, bytes]:
     """Fetches ``url`` with plain urllib (no auth header), returning (status, body).
 
@@ -965,7 +640,7 @@ def _fetch(url: str, method: str = "GET") -> tuple[int, bytes]:
 
 
 def _presign_session(server_url: str) -> Session:
-    client = Client(server_url, token=TestSecretKey.get())
+    client = Client(server_url, token=TestTokenGenerator.get())
     # Store uncompressed so a raw (non-decompressing) urllib GET of the
     # pre-signed URL returns the original bytes verbatim.
     usecase = Usecase(
@@ -1017,14 +692,14 @@ def test_presigned_case_insensitive_method(server_url: str) -> None:
 
 def test_presigned_requires_token_generator(server_url: str) -> None:
     # A static token string cannot sign pre-signed URLs.
-    token = TestSecretKey.get().token_for_scope(
+    token = TestTokenGenerator.get().token_for_scope(
         "test-usecase", Scope(org=42, project=1337)
     )
     client = Client(server_url, token=token)
     usecase = Usecase("test-usecase")
     session = client.session(usecase, org=42, project=1337)
 
-    with pytest.raises(ValueError, match="no secret key"):
+    with pytest.raises(ValueError, match="no token generator"):
         session.presigned_object_url("GET", "whatever", duration=timedelta(hours=1))
 
 
@@ -1094,6 +769,65 @@ def test_presigned_get_encoding_corner_cases(server_url: str, key: str) -> None:
     assert body == payload
 
 
+def test_presigned_response_options(server_url: str) -> None:
+    session = _presign_session(server_url)
+    key = "inline-example"
+    session.put(b"<html>example</html>", key=key, content_type="text/html")
+    url = session.presigned_object_url(
+        "GET",
+        key,
+        response_content_disposition="inline",
+    )
+    with urllib.request.urlopen(url) as response:
+        assert response.status == 200
+        assert response.headers["content-disposition"] == "inline"
+        assert response.headers["content-type"] == "text/html"
+        assert response.headers["content-security-policy"] == "sandbox"
+        assert response.headers["x-content-type-options"] == "nosniff"
+        assert response.read() == b"<html>example</html>"
+
+    status, _ = _fetch(url.replace("=inline", "=attachment"))
+    assert status == 401
+
+
+def test_jwt_response_options_remain_editable(server_url: str) -> None:
+    session = _presign_session(server_url)
+    session.put(b"example", key="jwt-options")
+    url = session.object_url(
+        "jwt-options",
+        token_validity=timedelta(minutes=5),
+        response_content_disposition="inline",
+    )
+    for target, expected in [
+        (url, "inline"),
+        (url.replace("=inline", "=attachment"), "attachment"),
+    ]:
+        with urllib.request.urlopen(target) as response:
+            assert response.status == 200
+            assert response.headers["content-disposition"] == expected
+
+
+def test_inline_preserves_stored_mime_type_and_compression(server_url: str) -> None:
+    session = Client(server_url, token=TestTokenGenerator.get()).session(
+        Usecase("test-usecase", compression="zstd"), org=42, project=1337
+    )
+    payload = b'<svg xmlns="http://www.w3.org/2000/svg"><script>example</script></svg>'
+    session.put(payload, key="svg-options", content_type="image/svg+xml")
+    url = session.object_url(
+        "svg-options",
+        token_validity=timedelta(minutes=5),
+        response_content_disposition="inline",
+    )
+    with urllib.request.urlopen(url) as response:
+        assert response.headers["content-type"] == "image/svg+xml"
+        assert response.headers["content-encoding"] == "zstd"
+        assert response.headers["content-security-policy"] == "sandbox"
+        with zstandard.ZstdDecompressor().stream_reader(
+            BytesIO(response.read())
+        ) as reader:
+            assert reader.read() == payload
+
+
 def test_object_url_read_only_token_succeeds(server_url: str) -> None:
     session = _presign_session(server_url)
     session.put(b"read only hello", key="read-only-url")
@@ -1125,15 +859,15 @@ def test_object_url_without_token_is_unauthorized(server_url: str) -> None:
     assert status == 400
 
 
-def test_object_url_read_only_token_requires_secret_key(server_url: str) -> None:
+def test_object_url_read_only_token_requires_token_generator(server_url: str) -> None:
     # A static token string cannot mint a re-scoped read-only token.
-    token = TestSecretKey.get().token_for_scope(
+    token = TestTokenGenerator.get().token_for_scope(
         "test-usecase", Scope(org=42, project=1337)
     )
     client = Client(server_url, token=token)
     session = client.session(Usecase("test-usecase"), org=42, project=1337)
 
-    with pytest.raises(ValueError, match="no secret key"):
+    with pytest.raises(ValueError, match="no token generator"):
         session.object_url("whatever", token_validity=timedelta(minutes=5))
 
 
@@ -1166,7 +900,7 @@ def test_put_stores_under_literal_key(server_url: str) -> None:
 def test_automatic_resumable_upload(
     server_url: str, source_kind: str, compression: str, threshold: int
 ) -> None:
-    session = Client(server_url, token=TestSecretKey.get()).session(
+    session = Client(server_url, token=TestTokenGenerator.get()).session(
         Usecase(
             "test-usecase",
             compression="zstd" if compression == "zstd" else "none",
@@ -1222,7 +956,7 @@ def test_automatic_resumable_upload(
 def test_resumable_creation_fallback(
     server_url: str, monkeypatch: pytest.MonkeyPatch, error: RequestError | None
 ) -> None:
-    session = Client(server_url, token=TestSecretKey.get()).session(
+    session = Client(server_url, token=TestTokenGenerator.get()).session(
         Usecase("test-usecase", resumable_threshold_bytes=1)
     )
     create = Mock(return_value=None, side_effect=error)
@@ -1239,7 +973,7 @@ def test_resumable_creation_fallback(
 
 @pytest.mark.parametrize("compress", [False, True])
 def test_nonseekable_upload(server_url: str, compress: bool) -> None:
-    session = Client(server_url, token=TestSecretKey.get()).session(
+    session = Client(server_url, token=TestTokenGenerator.get()).session(
         Usecase("test-usecase", resumable_threshold_bytes=1)
     )
     with UnrewindableStream(b"payload") as source:

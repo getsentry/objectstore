@@ -11,8 +11,6 @@ mod get;
 mod head;
 mod key;
 mod many;
-#[cfg(feature = "multipart")]
-mod multipart;
 mod put;
 mod response;
 mod resumable;
@@ -30,8 +28,6 @@ pub use get::*;
 pub use head::*;
 pub use key::*;
 pub use many::*;
-#[cfg(feature = "multipart")]
-pub use multipart::*;
 pub use put::*;
 #[cfg(feature = "resumable-upload-api")]
 pub use resumable::*;

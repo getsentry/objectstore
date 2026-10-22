@@ -239,12 +239,6 @@ impl PutBuilder {
         self
     }
 
-    /// Deprecated in favor of [`compress`](Self::compress).
-    #[deprecated(since = "0.3.0", note = "renamed to `compress`")]
-    pub fn compression(self, compression: impl Into<Option<Compression>>) -> Self {
-        self.compress(compression)
-    }
-
     /// Declares that the payload is already compressed with the given algorithm.
     ///
     /// The payload is uploaded verbatim, and the algorithm is recorded in the object's metadata
