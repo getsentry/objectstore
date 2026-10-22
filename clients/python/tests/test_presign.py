@@ -6,7 +6,7 @@ import os
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
 from objectstore_client import presign, utils
-from objectstore_client.auth import SecretKey
+from objectstore_client.auth import TokenGenerator
 
 TEST_EDDSA_PRIVKEY_PATH = os.path.join(os.path.dirname(__file__), "ed25519.private.pem")
 TEST_EDDSA_PUBKEY_PATH = os.path.join(os.path.dirname(__file__), "ed25519.public.pem")
@@ -59,7 +59,7 @@ def test_sign_canonical_form_roundtrips_with_public_key() -> None:
         public_key = load_pem_public_key(f.read())
     assert isinstance(public_key, Ed25519PublicKey)
 
-    key = SecretKey("test_kid", secret_key_pem)
+    key = TokenGenerator("test_kid", secret_key_pem)
 
     canonical = presign.build_canonical_form(
         "GET",

@@ -18,7 +18,7 @@ import zstandard
 from urllib3.connectionpool import HTTPConnectionPool
 
 from objectstore_client import _resumable, presign, utils
-from objectstore_client.auth import Permission, SecretKey, TokenProvider
+from objectstore_client.auth import Permission, TokenGenerator, TokenProvider
 from objectstore_client.errors import (
     ExpiryExtensionRejected,
     ObjectNotFound,
@@ -171,9 +171,9 @@ class Client:
             timeouts). By default, requests carry a ``User-Agent`` header of
             ``objectstore-client/{version}``; pass a ``headers`` mapping with a
             ``User-Agent`` key here to override it.
-        token: A ``SecretKey`` that signs a fresh JWT for each request
+        token: A ``TokenGenerator`` that signs a fresh JWT for each request
             using an EdDSA keypair, or a static pre-signed JWT string used
-            as-is for every request. Use a ``SecretKey`` for internal
+            as-is for every request. Use a ``TokenGenerator`` for internal
             services that have access to the signing key, and a string for
             external services that receive a token from another source.
         spool_dir: Directory that temporary files are created in when preparing
@@ -310,10 +310,10 @@ class Session:
         When ``expiry_seconds`` is ``None``, the generator's default
         expiry is used.
 
-        Raises ``ValueError`` if no ``SecretKey`` is configured
+        Raises ``ValueError`` if no ``TokenGenerator`` is configured
         or if any requested permission is not granted to the key.
         """
-        if not isinstance(self._token, SecretKey):
+        if not isinstance(self._token, TokenGenerator):
             raise ValueError("no secret key configured on this session")
 
         resolved_expiry = (
@@ -328,7 +328,7 @@ class Session:
             self._scope,
             expiry_seconds=resolved_expiry,
         ) as span:
-            token = self._token.token_for_scope(
+            token = self._token.sign_for_scope(
                 self._usecase.name,
                 self._scope,
                 permissions,
@@ -341,8 +341,8 @@ class Session:
 
     def _auth_token(self) -> str | None:
         """Returns a token for internal auth headers."""
-        if isinstance(self._token, SecretKey):
-            return self._token.token_for_scope(self._usecase.name, self._scope)
+        if isinstance(self._token, TokenGenerator):
+            return self._token.sign_for_scope(self._usecase.name, self._scope)
         elif isinstance(self._token, str):
             return self._token
         return None
@@ -702,7 +702,7 @@ class Session:
         for the given duration.
 
         Raises ``ValueError`` if ``token_validity`` is provided but no
-        ``SecretKey`` is configured on this session.
+        ``TokenGenerator`` is configured on this session.
         """
         url = self._make_url(key, full=True)
         if token_validity is None:
@@ -730,7 +730,7 @@ class Session:
             Experimental: pre-signed URLs are an experimental feature and this
             API may change in a future release.
 
-        Raises ``ValueError`` if no ``SecretKey`` is configured on this
+        Raises ``ValueError`` if no ``TokenGenerator`` is configured on this
         session's client, if ``method`` is not supported, or if ``duration``
         is above the one-week maximum.
 
@@ -748,7 +748,7 @@ class Session:
                 f"expected one of {presign.SUPPORTED_METHODS}"
             )
 
-        if not isinstance(self._token, SecretKey):
+        if not isinstance(self._token, TokenGenerator):
             raise ValueError("no secret key configured on this session")
 
         if duration > presign.MAX_PRESIGN_DURATION:

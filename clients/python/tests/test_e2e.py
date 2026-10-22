@@ -31,7 +31,7 @@ from objectstore_client._resumable import (
     UploadIncomplete,
     UploadOffsetMismatch,
 )
-from objectstore_client.auth import Permission, SecretKey
+from objectstore_client.auth import Permission, TokenGenerator
 from objectstore_client.errors import RequestError
 from objectstore_client.metadata import TimeToLive
 from objectstore_client.scope import Scope
@@ -58,21 +58,21 @@ class UnrewindableStream(BytesIO):
         raise OSError("stream does not expose a stable position")
 
 
-class TestSecretKey:
-    _instance: SecretKey | None = None
+class TestTokenGenerator:
+    _instance: TokenGenerator | None = None
 
     @classmethod
     def create(
         cls, expiry_seconds: int = 60, permissions: list[Permission] = Permission.max()
-    ) -> SecretKey:
+    ) -> TokenGenerator:
         with open(TEST_EDDSA_PRIVKEY_PATH) as f:
-            return SecretKey(TEST_EDDSA_KID, f.read(), expiry_seconds, permissions)
+            return TokenGenerator(TEST_EDDSA_KID, f.read(), expiry_seconds, permissions)
 
     @classmethod
-    def get(cls) -> SecretKey:
+    def get(cls) -> TokenGenerator:
         if not cls._instance:
             with open(TEST_EDDSA_PRIVKEY_PATH) as f:
-                cls._instance = SecretKey(TEST_EDDSA_KID, f.read())
+                cls._instance = TokenGenerator(TEST_EDDSA_KID, f.read())
         return cls._instance
 
 
@@ -160,7 +160,7 @@ def server_url() -> Generator[str]:
 def test_full_cycle(server_url: str) -> None:
     client = Client(
         server_url,
-        token=TestSecretKey.get(),
+        token=TestTokenGenerator.get(),
     )
     test_usecase = Usecase(
         "test-usecase",
@@ -190,7 +190,7 @@ def test_full_cycle(server_url: str) -> None:
 
 
 def test_resumable_upload(server_url: str) -> None:
-    session = Client(server_url, token=TestSecretKey.get()).session(
+    session = Client(server_url, token=TestTokenGenerator.get()).session(
         Usecase("test-usecase", expiration_policy=TimeToLive(timedelta(days=1))),
         org=42,
         project=1337,
@@ -236,7 +236,7 @@ def test_resumable_upload(server_url: str) -> None:
 
 
 def test_resumable_upload_precompressed(server_url: str) -> None:
-    session = Client(server_url, token=TestSecretKey.get()).session(
+    session = Client(server_url, token=TestTokenGenerator.get()).session(
         Usecase("test-usecase", compression="none"), org=42, project=1337
     )
     payload = b"abcdef"
@@ -258,7 +258,7 @@ def test_resumable_upload_precompressed(server_url: str) -> None:
 
 
 def test_resumable_upload_cancel(server_url: str) -> None:
-    session = Client(server_url, token=TestSecretKey.get()).session(
+    session = Client(server_url, token=TestTokenGenerator.get()).session(
         Usecase("test-usecase"), org=42, project=1337
     )
     upload = session._create_upload(6)
@@ -274,7 +274,7 @@ def test_resumable_upload_cancel(server_url: str) -> None:
 def test_head(server_url: str) -> None:
     client = Client(
         server_url,
-        token=TestSecretKey.get(),
+        token=TestTokenGenerator.get(),
     )
     test_usecase = Usecase(
         "test-usecase",
@@ -301,7 +301,7 @@ def test_head(server_url: str) -> None:
 def test_full_cycle_with_origin(server_url: str) -> None:
     client = Client(
         server_url,
-        token=TestSecretKey.get(),
+        token=TestTokenGenerator.get(),
     )
     test_usecase = Usecase(
         "test-usecase",
@@ -323,7 +323,7 @@ def test_full_cycle_with_origin(server_url: str) -> None:
 def test_full_cycle_with_unicode_metadata(server_url: str) -> None:
     client = Client(
         server_url,
-        token=TestSecretKey.get(),
+        token=TestTokenGenerator.get(),
     )
     test_usecase = Usecase(
         "test-usecase",
@@ -359,7 +359,7 @@ def test_full_cycle_with_unicode_metadata(server_url: str) -> None:
 def test_round_trips_expiration_policy_beyond_a_year(server_url: str) -> None:
     client = Client(
         server_url,
-        token=TestSecretKey.get(),
+        token=TestTokenGenerator.get(),
     )
 
     # Serializes as "400d 1h 18m 31s"
@@ -384,7 +384,7 @@ def test_round_trips_expiration_policy_beyond_a_year(server_url: str) -> None:
 
 
 def test_extend_expiry(server_url: str) -> None:
-    client = Client(server_url, token=TestSecretKey.get())
+    client = Client(server_url, token=TestTokenGenerator.get())
     policy = TimeToLive(timedelta(days=1))
     session = client.session(Usecase("test-usecase", expiration_policy=policy), org=42)
     key = session.put(b"payload")
@@ -403,7 +403,7 @@ def test_extend_expiry(server_url: str) -> None:
 
 
 def test_extend_expiry_missing_object(server_url: str) -> None:
-    client = Client(server_url, token=TestSecretKey.get())
+    client = Client(server_url, token=TestTokenGenerator.get())
     session = client.session(Usecase("test-usecase"), org=42)
     with pytest.raises(ObjectNotFound) as error:
         session.extend_expiry("missing", from_now=timedelta(days=1))
@@ -411,7 +411,7 @@ def test_extend_expiry_missing_object(server_url: str) -> None:
 
 
 def test_extend_expiry_non_expiring_object(server_url: str) -> None:
-    client = Client(server_url, token=TestSecretKey.get())
+    client = Client(server_url, token=TestTokenGenerator.get())
     session = client.session(Usecase("test-usecase"), org=42)
     key = session.put(b"payload")
     with pytest.raises(ExpiryExtensionRejected) as error:
@@ -422,7 +422,7 @@ def test_extend_expiry_non_expiring_object(server_url: str) -> None:
 def test_full_cycle_uncompressed(server_url: str) -> None:
     client = Client(
         server_url,
-        token=TestSecretKey.get(),
+        token=TestTokenGenerator.get(),
     )
     test_usecase = Usecase(
         "test-usecase",
@@ -454,7 +454,7 @@ def test_full_cycle_uncompressed(server_url: str) -> None:
 def test_precompressed_is_stored_verbatim(server_url: str) -> None:
     client = Client(
         server_url,
-        token=TestSecretKey.get(),
+        token=TestTokenGenerator.get(),
     )
     test_usecase = Usecase("test-usecase")
     session = client.session(test_usecase, org=42, project=1337)
@@ -478,7 +478,7 @@ def test_precompressed_is_stored_verbatim(server_url: str) -> None:
 
 
 def test_precompressed_rejects_conflicting_arguments(server_url: str) -> None:
-    client = Client(server_url, token=TestSecretKey.get())
+    client = Client(server_url, token=TestTokenGenerator.get())
     session = client.session(Usecase("test-usecase"), org=42, project=1337)
 
     with pytest.raises(ValueError):
@@ -492,7 +492,7 @@ def test_precompressed_rejects_conflicting_arguments(server_url: str) -> None:
 
 
 def test_compression_argument_is_deprecated(server_url: str) -> None:
-    client = Client(server_url, token=TestSecretKey.get())
+    client = Client(server_url, token=TestTokenGenerator.get())
     session = client.session(Usecase("test-usecase"), org=42, project=1337)
 
     with pytest.deprecated_call():
@@ -510,7 +510,7 @@ def test_compression_argument_is_deprecated(server_url: str) -> None:
 def test_full_cycle_structured_key(server_url: str) -> None:
     client = Client(
         server_url,
-        token=TestSecretKey.get(),
+        token=TestTokenGenerator.get(),
     )
     test_usecase = Usecase(
         "test-usecase",
@@ -529,7 +529,7 @@ def test_full_cycle_structured_key(server_url: str) -> None:
 def test_not_found_with_different_scope(server_url: str) -> None:
     client = Client(
         server_url,
-        token=TestSecretKey.get(),
+        token=TestTokenGenerator.get(),
     )
     test_usecase = Usecase(
         "test-usecase",
@@ -546,8 +546,8 @@ def test_not_found_with_different_scope(server_url: str) -> None:
 
 
 def test_full_cycle_with_static_token(server_url: str) -> None:
-    token_generator = TestSecretKey.get()
-    token = token_generator.token_for_scope("test-usecase", Scope(org=42, project=1337))
+    token_generator = TestTokenGenerator.get()
+    token = token_generator.sign_for_scope("test-usecase", Scope(org=42, project=1337))
 
     client = Client(server_url, token=token)
     test_usecase = Usecase(
@@ -570,7 +570,7 @@ def test_full_cycle_with_static_token(server_url: str) -> None:
 
 
 def test_fails_with_insufficient_auth_perms(server_url: str) -> None:
-    client = Client(server_url, token=TestSecretKey.create(permissions=[]))
+    client = Client(server_url, token=TestTokenGenerator.create(permissions=[]))
     test_usecase = Usecase(
         "test-usecase",
         expiration_policy=TimeToLive(timedelta(days=1)),
@@ -594,7 +594,7 @@ def test_read_timeout() -> None:
     client = Client(
         url,
         timeout_ms=500,
-        token=TestSecretKey.get(),
+        token=TestTokenGenerator.get(),
     )
     test_usecase = Usecase(
         "test-usecase",
@@ -619,7 +619,7 @@ def test_connect_timeout() -> None:
     # Do NOT set timeout_ms to ensure we exercise default timeouts
     client = Client(
         url,
-        token=TestSecretKey.get(),
+        token=TestTokenGenerator.get(),
     )
     test_usecase = Usecase(
         "test-usecase",
@@ -656,7 +656,7 @@ def _fetch(url: str, method: str = "GET") -> tuple[int, bytes]:
 
 
 def _presign_session(server_url: str) -> Session:
-    client = Client(server_url, token=TestSecretKey.get())
+    client = Client(server_url, token=TestTokenGenerator.get())
     # Store uncompressed so a raw (non-decompressing) urllib GET of the
     # pre-signed URL returns the original bytes verbatim.
     usecase = Usecase(
@@ -708,7 +708,7 @@ def test_presigned_case_insensitive_method(server_url: str) -> None:
 
 def test_presigned_requires_token_generator(server_url: str) -> None:
     # A static token string cannot sign pre-signed URLs.
-    token = TestSecretKey.get().token_for_scope(
+    token = TestTokenGenerator.get().sign_for_scope(
         "test-usecase", Scope(org=42, project=1337)
     )
     client = Client(server_url, token=token)
@@ -818,7 +818,7 @@ def test_object_url_without_token_is_unauthorized(server_url: str) -> None:
 
 def test_object_url_read_only_token_requires_secret_key(server_url: str) -> None:
     # A static token string cannot mint a re-scoped read-only token.
-    token = TestSecretKey.get().token_for_scope(
+    token = TestTokenGenerator.get().sign_for_scope(
         "test-usecase", Scope(org=42, project=1337)
     )
     client = Client(server_url, token=token)
@@ -857,7 +857,7 @@ def test_put_stores_under_literal_key(server_url: str) -> None:
 def test_automatic_resumable_upload(
     server_url: str, source_kind: str, compression: str, threshold: int
 ) -> None:
-    session = Client(server_url, token=TestSecretKey.get()).session(
+    session = Client(server_url, token=TestTokenGenerator.get()).session(
         Usecase(
             "test-usecase",
             compression="zstd" if compression == "zstd" else "none",
@@ -913,7 +913,7 @@ def test_automatic_resumable_upload(
 def test_resumable_creation_fallback(
     server_url: str, monkeypatch: pytest.MonkeyPatch, error: RequestError | None
 ) -> None:
-    session = Client(server_url, token=TestSecretKey.get()).session(
+    session = Client(server_url, token=TestTokenGenerator.get()).session(
         Usecase("test-usecase", resumable_threshold_bytes=1)
     )
     create = Mock(return_value=None, side_effect=error)
@@ -930,7 +930,7 @@ def test_resumable_creation_fallback(
 
 @pytest.mark.parametrize("compress", [False, True])
 def test_nonseekable_upload(server_url: str, compress: bool) -> None:
-    session = Client(server_url, token=TestSecretKey.get()).session(
+    session = Client(server_url, token=TestTokenGenerator.get()).session(
         Usecase("test-usecase", resumable_threshold_bytes=1)
     )
     with UnrewindableStream(b"payload") as source:

@@ -121,7 +121,7 @@ session.put(b"payload", metadata={"source": "upload-service"})
 If your Objectstore instance enforces authorization, you must configure authentication
 via the `token` parameter on `Client`. It accepts either:
 
-- A **`SecretKey`** — for internal services that have access to an EdDSA keypair.
+- A **`TokenGenerator`** — for internal services that have access to an EdDSA keypair.
   The key signs a fresh JWT for each request, scoped to the specific usecase
   and scope being accessed, and can also sign pre-signed URLs.
 - A **`str`** — a pre-signed JWT, used as-is for every request.
@@ -129,22 +129,22 @@ via the `token` parameter on `Client`. It accepts either:
 
 ```python
 from objectstore_client import Client, Usecase
-from objectstore_client.auth import SecretKey
+from objectstore_client.auth import TokenGenerator
 
 # Option 1: Internal service with a keypair
 client = Client(
     "http://localhost:8888",
-    token=SecretKey(kid="my-service", secret_key="<private key>"),
+    token=TokenGenerator(kid="my-service", secret_key="<private key>"),
 )
 
 # Option 2: External service with a pre-signed JWT
-# Use SecretKey.token_for_scope() to obtain a static token from an
+# Use TokenGenerator.sign_for_scope() to obtain a static token from an
 # internal service, then pass it to the external consumer:
 from objectstore_client.scope import Scope
 
-token = SecretKey(
+token = TokenGenerator(
     kid="my-service", secret_key="<private key>",
-).token_for_scope("my_app", Scope(org=42, project=1337))
+).sign_for_scope("my_app", Scope(org=42, project=1337))
 
 client = Client("http://localhost:8888", token=token)
 ```
@@ -154,7 +154,7 @@ client = Client("http://localhost:8888", token=token)
 `Session.object_url` returns a GET URL for an object. By default the URL carries
 no auth, so the recipient needs their own key to generate a token for it. Pass
 `token_validity` to embed a read-only token in the URL instead, valid for the
-given duration (requires `SecretKey` authentication - see above section).
+given duration (requires `TokenGenerator` authentication - see above section).
 
 ```python
 from datetime import timedelta
@@ -177,8 +177,8 @@ Pre-signed URLS currently only support `GET` and `HEAD` (a pre-signed URL for
 `GET` authorizes `HEAD` too, and viceversa), so for uploads you should use
 scoped JWTs, as described above.
 
-`Session.presigned_object_url` signs the URL with the session's `SecretKey`,
-so it requires a `SecretKey` and raises `ValueError` otherwise.
+`Session.presigned_object_url` signs the URL with the session's `TokenGenerator`,
+so it requires a `TokenGenerator` and raises `ValueError` otherwise.
 Only `GET` and `HEAD` may be pre-signed, the granted permissions are those
 configured server-side for the signing key, and the
 validity may not exceed one week.

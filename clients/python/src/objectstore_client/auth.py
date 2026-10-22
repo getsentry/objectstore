@@ -24,12 +24,12 @@ class Permission(StrEnum):
         return list(cls.__members__.values())
 
 
-class SecretKey:
+class TokenGenerator:
     """
     An EdDSA keypair used to authenticate with Objectstore.
 
     Can generate JWTs for request-level auth and sign canonical forms for
-    pre-signed URLs. Pass a ``SecretKey`` directly to ``Client(token=...)``
+    pre-signed URLs. Pass a ``TokenGenerator`` directly to ``Client(token=...)``
     and it will sign a fresh JWT for each request.
     """
 
@@ -45,7 +45,7 @@ class SecretKey:
         self.expiry_seconds = expiry_seconds
         self.permissions = permissions if permissions is not None else Permission.max()
 
-    def token_for_scope(
+    def sign_for_scope(
         self,
         usecase: str,
         scope: Scope,
@@ -91,9 +91,6 @@ class SecretKey:
 
         return jwt.encode(claims, self.secret_key, algorithm="EdDSA", headers=headers)
 
-    # Deprecated: use token_for_scope() instead.
-    sign_for_scope = token_for_scope
-
     def signature_for_canonical_form(self, canonical_form: str) -> str:
         """Signs a canonical request form with the Ed25519 private key.
 
@@ -107,12 +104,9 @@ class SecretKey:
         return base64.urlsafe_b64encode(signature).rstrip(b"=").decode()
 
 
-TokenProvider = SecretKey | str
+TokenProvider = TokenGenerator | str
 """Authentication provider for Objectstore requests.
 
-Can be either a :class:`SecretKey` that signs a fresh JWT per request,
+Can be either a :class:`TokenGenerator` that signs a fresh JWT per request,
 or a static pre-signed JWT string.
 """
-
-# Deprecated: use SecretKey instead.
-TokenGenerator = SecretKey
