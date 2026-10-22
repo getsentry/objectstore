@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import warnings
 from collections.abc import Mapping, Sequence
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
