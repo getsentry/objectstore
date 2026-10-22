@@ -158,7 +158,7 @@ impl ClientBuilder {
 /// normalized.
 #[derive(Debug, Clone)]
 pub struct Usecase {
-    name: Arc<UsecaseName>,
+    name: UsecaseName,
     compression: Option<Compression>,
     expiration_policy: ExpirationPolicy,
 }
@@ -174,7 +174,7 @@ impl Usecase {
     /// [`Usecase`].
     pub fn new(name: &str) -> Result<Self, InvalidUsecaseName> {
         Ok(Self {
-            name: Arc::new(UsecaseName::new(name)?),
+            name: UsecaseName::new(name)?,
             compression: Some(Compression::Zstd),
             expiration_policy: ExpirationPolicy::default(),
         })
@@ -186,9 +186,14 @@ impl Usecase {
     ///
     /// # Panics
     ///
-    /// Panics if the name violates the naming rules on [`Usecase`].
-    pub fn from_static(name: &'static str) -> Self {
-        Self::new(name).expect("invalid usecase name")
+    /// Panics if the name violates the naming rules on [`Usecase`]. In a const
+    /// context, this panic is reported as a compile error.
+    pub const fn from_static(name: &'static str) -> Self {
+        Self {
+            name: UsecaseName::from_static(name),
+            compression: Some(Compression::Zstd),
+            expiration_policy: ExpirationPolicy::Manual,
+        }
     }
 
     /// Returns the name of this usecase.
@@ -595,6 +600,14 @@ mod tests {
             Usecase::new("testing/org=999/injected"),
             Err(InvalidUsecaseName::InvalidChar('/'))
         ));
+    }
+
+    #[test]
+    fn test_usecase_from_static_const() {
+        const USECASE: Usecase = Usecase::from_static("testing");
+        assert_eq!(USECASE.name(), "testing");
+        assert_eq!(USECASE.compression(), Some(Compression::Zstd));
+        assert_eq!(USECASE.expiration_policy(), ExpirationPolicy::default());
     }
 
     #[test]
