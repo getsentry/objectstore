@@ -11,7 +11,7 @@ use objectstore_client::{Client, Usecase, Result};
 
 async fn example() -> Result<()> {
     let client = Client::new("http://localhost:8888/")?;
-    let session = Usecase::new("attachments")
+    let session = Usecase::from_static("attachments")
         .for_project(42, 1337)
         .session(&client)?;
 
@@ -35,7 +35,7 @@ async fn example() -> Result<()> {
 
 A [`Usecase`] represents a server-side namespace with its own configuration defaults.
 Its name must follow the naming rules documented on [`Usecase`]. Use
-[`Usecase::new`] for statically defined names and [`Usecase::try_new`] for dynamic names.
+[`Usecase::from_static`] for statically defined names and [`Usecase::new`] for dynamic names.
 Within a Usecase, [`Scope`]s provide further isolation — typically keyed by organization
 and project IDs. A [`Session`] ties a Client to a specific Usecase + Scope for operations.
 
@@ -45,12 +45,12 @@ method [`Usecase::for_project`] pushes `org` then `project` in the recommended o
 
 ```rust,ignore
 // Scope with org and project (recommended first components)
-let session = Usecase::new("attachments")
+let session = Usecase::from_static("attachments")
     .for_project(42, 1337)
     .session(&client)?;
 
 // Additional components are appended after org/project
-let session = Usecase::new("attachments")
+let session = Usecase::from_static("attachments")
     .for_project(42, 1337)
     .push("app_slug", "email_app")
     .session(&client)?;
@@ -71,7 +71,7 @@ use std::time::Duration;
 use objectstore_client::ExpirationPolicy;
 
 // Set default expiration on the Usecase
-Usecase::new("attachments")
+Usecase::from_static("attachments")
     .with_expiration_policy(ExpirationPolicy::TimeToIdle(Duration::from_secs(30 * 86400)));
 
 // Override per-upload
@@ -222,7 +222,7 @@ use objectstore_client::{Client, Usecase, OperationResult, Result};
 
 async fn example_batch() -> Result<()> {
     let client = Client::new("http://localhost:8888/")?;
-    let session = Usecase::new("attachments")
+    let session = Usecase::from_static("attachments")
         .for_project(42, 1337)
         .session(&client)?;
 
@@ -295,7 +295,7 @@ let client = Client::builder("http://localhost:8888/")
 
 // Option 2: External service with a pre-signed JWT
 // Use TokenGenerator::create_token() to obtain a static token from an authority
-let scope = Usecase::new("my_app").for_project(42, 1337);
+let scope = Usecase::from_static("my_app").for_project(42, 1337);
 let generator = TokenGenerator::new(SecretKey {
     secret_key: "<private key>".into(),
     kid: "my-service".into(),
@@ -332,7 +332,7 @@ static CLIENT: LazyLock<Client> = LazyLock::new(|| {
 });
 
 static ATTACHMENTS: LazyLock<Usecase> = LazyLock::new(|| {
-    Usecase::new("attachments")
+    Usecase::from_static("attachments")
 });
 
 async fn example() -> Result<()> {
