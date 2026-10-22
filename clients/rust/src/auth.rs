@@ -153,12 +153,6 @@ impl TokenGenerator {
         self
     }
 
-    /// Deprecated. Use [`create_token`](Self::create_token) instead.
-    #[deprecated(note = "Use `create_token(scope).sign()` instead")]
-    pub fn sign(&self, scope: &Scope) -> crate::Result<String> {
-        self.create_token(scope).sign()
-    }
-
     /// Create a token for the given [`Scope`].
     ///
     /// Use this to produce a static token that can be handed to an external service
