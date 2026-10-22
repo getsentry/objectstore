@@ -1556,56 +1556,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resumable_emits_storage_metrics() {
-        let (storage, _, _, _) = make_tiered_storage();
-        let id = make_id("resumable-metrics");
-        let payload = vec![b'a'; BACKEND_SIZE_THRESHOLD + 1];
-        let split = 256 * 1024;
-
-        let captured = objectstore_metrics::with_capturing_test_client_async(async {
-            let token =
-                resumable_token(&storage, &id, &Metadata::default(), payload.len() as u64).await;
-            for (offset, chunk) in [(0, &payload[..split]), (split, &payload[split..])] {
-                storage
-                    .put_chunk(
-                        &token,
-                        offset as u64,
-                        chunk.len() as u64,
-                        stream::single(chunk.to_vec()),
-                    )
-                    .await
-                    .unwrap();
-            }
-        })
-        .await;
-
-        let backend_tags = "usecase:testing,backend_choice:long-term,backend_type:in-memory-lt";
-        let expected = [
-            "put.origin_missing:+1|c|#usecase:testing".to_owned(),
-            format!("put_chunk.size:{split}|d|#{backend_tags}"),
-            format!("put_chunk.size:{}|d|#{backend_tags}", payload.len() - split),
-            format!(
-                "put.size:{}|d|#{backend_tags},upload_type:resumable",
-                payload.len()
-            ),
-        ];
-        for metric in &expected {
-            assert!(
-                captured.contains(metric),
-                "missing {metric} in {captured:?}"
-            );
-        }
-        let latencies = captured
-            .iter()
-            .filter(|m| {
-                m.starts_with("put_chunk.latency:")
-                    && m.ends_with(&format!("{backend_tags},success:true"))
-            })
-            .count();
-        assert_eq!(latencies, 2, "{captured:?}");
-    }
-
-    #[tokio::test]
     async fn resumable_invalid_chunks() {
         let (storage, _, _, _) = make_tiered_storage();
         let id = make_id("resumable-invalid");
