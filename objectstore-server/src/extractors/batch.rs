@@ -23,6 +23,7 @@ use thiserror::Error;
 
 use crate::batch::{HEADER_BATCH_OPERATION_KEY, HEADER_BATCH_OPERATION_KIND};
 use crate::extractors::request_time::RequestTime;
+use crate::rate_limits::LimitExceeded;
 
 /// Errors that can occur when processing or executing batch operations.
 #[derive(Debug, Error)]
@@ -44,8 +45,8 @@ pub enum BatchError {
     LimitExceeded(String),
 
     /// Operation rejected due to rate limiting.
-    #[error("rate limited")]
-    RateLimited,
+    #[error("{0}")]
+    RateLimited(LimitExceeded),
 
     /// Errors encountered when serializing batch response parts.
     #[error("response part serialization error: {context}")]

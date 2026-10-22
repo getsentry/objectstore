@@ -624,7 +624,7 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(error, ApiError::Service(_)));
-        assert_eq!(error.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[test]
