@@ -21,10 +21,6 @@ async fn test_web_concurrency_limit() -> Result<()> {
     // with 503, giving us a fully deterministic test without needing concurrent requests.
     let server = TestServer::with_config(Config {
         http: Http { max_requests: 0 },
-        auth: AuthZ {
-            enforce: false,
-            ..Default::default()
-        },
         ..Default::default()
     })
     .await;
@@ -42,21 +38,16 @@ async fn test_web_concurrency_limit() -> Result<()> {
         "expected 503 for regular request at limit"
     );
 
-    // Health endpoint bypasses the concurrency limit.
-    let response = client.get(server.url("/health")).send().await?;
-    assert_eq!(
-        response.status(),
-        reqwest::StatusCode::OK,
-        "/health must not be subject to the concurrency limit"
-    );
-
-    // Ready endpoint bypasses the concurrency limit.
-    let response = client.get(server.url("/ready")).send().await?;
-    assert_eq!(
-        response.status(),
-        reqwest::StatusCode::OK,
-        "/ready must not be subject to the concurrency limit"
-    );
+    // Health endpoints need no auth and bypass the concurrency limit.
+    for path in ["/health", "/ready"] {
+        let response = client.get(server.url(path)).send().await?;
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::OK,
+            "{path} must not be subject to the concurrency limit"
+        );
+        assert_eq!(response.text().await?, "OK", "{path}");
+    }
 
     Ok(())
 }

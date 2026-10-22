@@ -12,8 +12,11 @@ use anyhow::Result;
 use argh::FromArgs;
 
 use crate::config::Config;
-use crate::endpoints::health::SHUTDOWN_MARKER_PATH;
 use crate::{healthcheck, observability, web};
+
+// Retained for compatibility with deployments that still invoke `down`.
+// Health checks no longer inspect this marker.
+const SHUTDOWN_MARKER_PATH: &str = "/tmp/objectstore.down";
 
 /// Objectstore API webserver.
 #[derive(Debug, FromArgs)]
@@ -62,7 +65,7 @@ struct SleepCommand {
     seconds: u64,
 }
 
-/// mark the server as not ready
+/// create the legacy shutdown marker and optionally sleep
 #[derive(Debug, FromArgs)]
 #[argh(subcommand, name = "down")]
 struct DownCommand {

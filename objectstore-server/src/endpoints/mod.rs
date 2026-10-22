@@ -118,7 +118,7 @@
 //! | Method | Path | Description |
 //! |--------|------|-------------|
 //! | `GET` | `/health` | Liveness probe (always returns 200) |
-//! | `GET` | `/ready` | Readiness probe (returns 503 when `/tmp/objectstore.down` exists, enabling graceful drain) |
+//! | `GET` | `/ready` | Readiness probe (remains healthy during shutdown) |
 //! | `GET` | `/keda` | Prometheus text-format gauges for KEDA autoscaling (see [KEDA Metrics](crate#keda-metrics)) |
 //!
 //! # Code Usage

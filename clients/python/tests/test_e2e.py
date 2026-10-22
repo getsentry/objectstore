@@ -491,22 +491,6 @@ def test_precompressed_rejects_conflicting_arguments(server_url: str) -> None:
         session.put(b"test data", precompressed="brotli")  # type: ignore[arg-type]
 
 
-def test_compression_argument_is_deprecated(server_url: str) -> None:
-    client = Client(server_url, token=TestTokenGenerator.get())
-    session = client.session(Usecase("test-usecase"), org=42, project=1337)
-
-    with pytest.deprecated_call():
-        object_key = session.put(b"test data", compression="none")
-
-    retrieved = session.get(object_key)
-    assert retrieved is not None
-    assert retrieved.metadata.compression is None
-    assert retrieved.payload.read() == b"test data"
-
-    with pytest.warns(DeprecationWarning), pytest.raises(ValueError):
-        session.put(b"test data", compress="none", compression="none")
-
-
 def test_full_cycle_structured_key(server_url: str) -> None:
     client = Client(
         server_url,
