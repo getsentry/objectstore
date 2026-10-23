@@ -72,7 +72,7 @@ use secrecy::{CloneableSecret, SecretBox, SerializableSecret, zeroize::Zeroize};
 use serde::{Deserialize, Serialize};
 
 pub use objectstore_log::{LevelFilter, LogFormat, LoggingConfig};
-pub use objectstore_service::backend::{MultipartUploadStorageConfig, StorageConfig};
+pub use objectstore_service::backend::StorageConfig;
 
 use crate::killswitches::Killswitches;
 use crate::rate_limits::RateLimits;
@@ -926,7 +926,7 @@ impl Config {
 mod tests {
     use std::io::Write;
 
-    use objectstore_service::backend::{HighVolumeStorageConfig, MultipartUploadStorageConfig};
+    use objectstore_service::backend::HighVolumeStorageConfig;
     use secrecy::ExposeSecret;
 
     use crate::killswitches::Killswitch;
@@ -1125,7 +1125,7 @@ mod tests {
             let HighVolumeStorageConfig::BigTable(hv) = &c.high_volume;
             assert_eq!(hv.project_id, "my-project");
             assert_eq!(hv.rpc_timeout, Duration::from_secs(2));
-            let MultipartUploadStorageConfig::Gcs(lt) = &c.long_term else {
+            let StorageConfig::Gcs(lt) = c.long_term.as_ref() else {
                 panic!("expected gcs long_term");
             };
             assert_eq!(lt.bucket, "my-objectstore-bucket");
@@ -1156,7 +1156,7 @@ mod tests {
             assert_eq!(hv.instance_name, "my-instance");
             assert_eq!(hv.table_name, "my-table");
             assert_eq!(hv.rpc_timeout, Duration::from_millis(750));
-            let MultipartUploadStorageConfig::FileSystem(lt) = &c.long_term else {
+            let StorageConfig::FileSystem(lt) = c.long_term.as_ref() else {
                 panic!("expected filesystem long_term");
             };
             assert_eq!(lt.path, Path::new("/data/lt"));
