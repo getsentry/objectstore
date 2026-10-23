@@ -151,6 +151,11 @@ scope, then explicit rules. The first exceeded limit determines the response.
 Responses identify only capacity protection or an exceeded traffic allowance;
 the specific limit is recorded in logs and metrics.
 
+Rejected requests, including those rejected by the web concurrency limit and
+service backpressure below, carry `x-envoy-ratelimited: true`. Envoy does not retry responses with
+this header, even if the route retries on `gateway-error`. Outlier detection
+still counts the 503 responses.
+
 ### Throughput
 
 Throughput limits use **token bucket** rate limiting with configurable burst.

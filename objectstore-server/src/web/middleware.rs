@@ -41,7 +41,9 @@ pub async fn limit_web_concurrency(
         let service = request.extract_parts::<DownstreamService>().await.unwrap();
         objectstore_metrics::count!("web.concurrency.rejected", service = service.to_string());
         objectstore_log::warn!("Request rejected: web concurrency limit reached");
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        let mut response = StatusCode::SERVICE_UNAVAILABLE.into_response();
+        endpoints::common::insert_no_retry(&mut response);
+        return response;
     }
 
     next.run(request).await

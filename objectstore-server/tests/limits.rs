@@ -15,6 +15,17 @@ use objectstore_server::rate_limits::{
 use objectstore_server::usecases::{ExpirationConfig, PolicyConfig, UseCaseConfig, UseCases};
 use objectstore_test::server::TestServer;
 
+/// Asserts that a rejection tells Envoy not to retry it.
+fn assert_no_retry(response: &reqwest::Response) {
+    assert_eq!(
+        response
+            .headers()
+            .get(objectstore_server::endpoints::common::HEADER_ENVOY_RATELIMITED)
+            .expect("rejection must prevent Envoy retries"),
+        "true"
+    );
+}
+
 #[tokio::test]
 async fn test_web_concurrency_limit() -> Result<()> {
     // Setting max_requests = 0 means every non-exempt request is rejected immediately
@@ -37,6 +48,7 @@ async fn test_web_concurrency_limit() -> Result<()> {
         reqwest::StatusCode::SERVICE_UNAVAILABLE,
         "expected 503 for regular request at limit"
     );
+    assert_no_retry(&response);
 
     // Health endpoints need no auth and bypass the concurrency limit.
     for path in ["/health", "/ready"] {
@@ -134,6 +146,7 @@ async fn test_throughput_global_rps_limit() -> Result<()> {
         .send()
         .await?;
     assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    assert_no_retry(&response);
     assert_eq!(response.text().await?, "service at capacity");
 
     // Refill bucket
@@ -305,6 +318,7 @@ async fn test_throughput_rule() -> Result<()> {
         .send()
         .await?;
     assert_eq!(response.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+    assert_no_retry(&response);
     assert_eq!(response.text().await?, "rate limit exceeded");
 
     // Different usecase should not be affected by rule

@@ -9,6 +9,7 @@ use objectstore_types::scope::{EMPTY_SCOPES, Scope, Scopes};
 use objectstore_types::usecase::Usecase;
 use serde::{Deserialize, de};
 
+use crate::endpoints::common::insert_no_retry;
 use crate::extractors::Xt;
 use crate::extractors::downstream_service::DownstreamService;
 use crate::rate_limits::LimitExceeded;
@@ -31,7 +32,9 @@ impl IntoResponse for ObjectRejection {
             )
                 .into_response(),
             ObjectRejection::RateLimited(error) => {
-                (error.status(), error.to_string()).into_response()
+                let mut response = (error.status(), error.to_string()).into_response();
+                insert_no_retry(&mut response);
+                response
             }
         }
     }

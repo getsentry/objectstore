@@ -191,7 +191,11 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         self.capture();
         let body = ApiErrorResponse::from_error(&self);
-        (self.status(), Json(body)).into_response()
+        let mut response = (self.status(), Json(body)).into_response();
+        if matches!(&self, ApiError::Service(e) if e.kind() == ServiceErrorKind::AtCapacity) {
+            insert_no_retry(&mut response);
+        }
+        response
     }
 }
 
@@ -209,6 +213,24 @@ impl From<objectstore_types::metadata::Error> for ApiError {
 
 /// Result type for API operations.
 pub type ApiResult<T> = Result<T, ApiError>;
+
+/// Response header that prevents Envoy from retrying a response.
+///
+/// Envoy does not retry a response with this header, even if the route retries on
+/// `gateway-error` or `5xx`. Only the `envoy-ratelimited` retry condition retries it. Outlier
+/// detection still counts the response. See the [Envoy router
+/// documentation](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/router_filter#x-envoy-ratelimited).
+pub const HEADER_ENVOY_RATELIMITED: &str = "x-envoy-ratelimited";
+
+/// Marks a capacity or rate limit rejection so that Envoy does not retry it.
+///
+/// Retries of these rejections add load to an instance that is already at capacity. Clients
+/// that want to retry should back off first.
+pub fn insert_no_retry(response: &mut Response) {
+    response
+        .headers_mut()
+        .insert(HEADER_ENVOY_RATELIMITED, HeaderValue::from_static("true"));
+}
 
 /// Inserts `Accept-Ranges: bytes` into the response headers.
 pub fn insert_accept_ranges(response: &mut Response) {
