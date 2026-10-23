@@ -479,7 +479,7 @@ dependencies = [
 [[package]]
 name = "bigtable_rs"
 version = "0.4.1"
-source = "git+https://github.com/getsentry/bigtable_rs.git?rev=56c310a5c8518d52ae7c7db53825beb078e326b5#56c310a5c8518d52ae7c7db53825beb078e326b5"
+source = "git+https://github.com/getsentry/bigtable_rs.git?rev=072cb5871766b39c08c9a4d1f43c8d3895eeb96e#072cb5871766b39c08c9a4d1f43c8d3895eeb96e"
 dependencies = [
  "futures-util",
  "gcp_auth",
