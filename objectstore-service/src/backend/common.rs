@@ -92,15 +92,41 @@ pub struct ExpiryUpdate {
     pub target: ExpiryTarget,
     /// Maximum remaining lifetime. `None` means no limit.
     pub max: Option<Duration>,
+    /// Also updates an object whose deadline has already passed but which still exists.
+    ///
+    /// The tiered backend sets this when committing a resumable upload: the long-term blob's
+    /// deadline was resolved when the session was created and may pass before the upload
+    /// completes, while the blob only becomes reachable once the commit extends it.
+    ///
+    /// Only long-term backends with resumable uploads honor this; others return
+    /// [`ErrorKind::Unsupported`]. Defaults to `false`.
+    pub include_expired: bool,
 }
 
 impl From<ExpiryTarget> for ExpiryUpdate {
     fn from(target: ExpiryTarget) -> Self {
-        Self { target, max: None }
+        Self {
+            target,
+            max: None,
+            include_expired: false,
+        }
     }
 }
 
 impl ExpiryUpdate {
+    /// Returns [`ErrorKind::Unsupported`] if this update sets [`include_expired`](Self::include_expired).
+    ///
+    /// For backends that only update unexpired objects.
+    pub(super) fn ensure_unexpired_only(&self) -> Result<()> {
+        if self.include_expired {
+            return Err(Error::new(
+                ErrorKind::Unsupported,
+                "expiry updates of expired objects are not supported",
+            ));
+        }
+        Ok(())
+    }
+
     /// Resolves and validates the requested deadline using the stored object metadata.
     ///
     /// Returns `None` if the creation-time anchor is required but unavailable.
@@ -236,7 +262,8 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     ///
     /// Returns [`SetExpiryResponse::Satisfied`] when extended or already satisfied,
     /// [`SetExpiryResponse::NotFound`] when observed absent or expired, or
-    /// [`SetExpiryResponse::Rejected`] when ineligible or conflicting.
+    /// [`SetExpiryResponse::Rejected`] when ineligible or conflicting. With
+    /// [`ExpiryUpdate::include_expired`], expired objects that still exist are updated instead.
     /// Limit violations return [`ErrorKind::InvalidMetadata`]; backend failures also
     /// return errors. Limits are checked before reporting an already-satisfied request.
     async fn set_expiry(
@@ -779,8 +806,8 @@ mod tests {
             ExpiryTarget::FromCreation(Duration::from_hours(3)),
         ] {
             let update = ExpiryUpdate {
-                target,
                 max: Some(Duration::from_hours(1)),
+                ..target.into()
             };
             assert_eq!(
                 update

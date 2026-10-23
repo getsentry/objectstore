@@ -135,15 +135,17 @@ impl InMemoryBackend {
     /// Applies `extend` to `id`'s entry, calling [`ChangeStream::begin_update`] first.
     ///
     /// Like a conditional write, this is rejected if the entry changed in the meantime.
+    /// Expired entries are only passed to `extend` if `include_expired` is set.
     async fn update_expiry(
         &self,
         id: &ObjectId,
         access_time: Timestamp,
+        include_expired: bool,
         extend: impl Fn(&mut StoreEntry) -> Result<ExpiryOutcome> + Send + Sync,
     ) -> Result<SetExpiryResponse> {
         let try_extend = |store: &Store| -> Result<(ExpiryOutcome, Option<StoreEntry>)> {
             match store.get(id) {
-                Some(entry) if !entry.is_expired(access_time) => {
+                Some(entry) if include_expired || !entry.is_expired(access_time) => {
                     let mut updated = entry.clone();
                     let outcome = extend(&mut updated)?;
                     Ok((outcome, Some(updated)))
@@ -268,10 +270,17 @@ impl super::common::Backend for InMemoryBackend {
         target: ExpiryUpdate,
         access_time: Timestamp,
     ) -> Result<SetExpiryResponse> {
-        self.update_expiry(id, access_time, |entry| match entry {
-            StoreEntry::Object(metadata, _) => extend_object_expiry(metadata, target, access_time),
-            StoreEntry::Tombstone(_) => Ok(ExpiryOutcome::Rejected),
-        })
+        self.update_expiry(
+            id,
+            access_time,
+            target.include_expired,
+            |entry| match entry {
+                StoreEntry::Object(metadata, _) => {
+                    extend_object_expiry(metadata, target, access_time)
+                }
+                StoreEntry::Tombstone(_) => Ok(ExpiryOutcome::Rejected),
+            },
+        )
         .await
     }
 
@@ -546,7 +555,8 @@ impl HighVolumeBackend for InMemoryBackend {
         access_time: Timestamp,
     ) -> Result<SetExpiryResponse> {
         let TieredUpdate::SetExpiry(expiry_target) = update;
-        self.update_expiry(id, access_time, |entry| match (entry, current) {
+        expiry_target.ensure_unexpired_only()?;
+        self.update_expiry(id, access_time, false, |entry| match (entry, current) {
             (StoreEntry::Object(metadata, _), None) => {
                 extend_object_expiry(metadata, expiry_target, access_time)
             }
@@ -902,6 +912,8 @@ fn extend_object_expiry(
 
 /// Resolves `target` and extends an active expiry time where valid.
 ///
+/// Expired deadlines are only extended if [`ExpiryUpdate::include_expired`] is set.
+///
 /// Eligibility is checked before target resolution.
 fn extend_expiry(
     field: &mut Option<Timestamp>,
@@ -913,7 +925,7 @@ fn extend_expiry(
         return Ok(ExpiryOutcome::Rejected); // entries without a deadline cannot be extended
     };
 
-    if time_expires < access_time {
+    if time_expires < access_time && !target.include_expired {
         return Ok(ExpiryOutcome::NotFound); // already expired
     }
 
@@ -1245,7 +1257,7 @@ mod tests {
 
                 let restricted = ExpiryUpdate {
                     max: Some(Duration::ZERO),
-                    target,
+                    ..target.into()
                 };
                 assert_eq!(
                     backend
@@ -1257,7 +1269,7 @@ mod tests {
                 );
                 let target = ExpiryUpdate {
                     max: Some(Duration::from_hours(100)),
-                    target,
+                    ..target.into()
                 };
                 assert_eq!(
                     backend.set_expiry(&id, target, access_time).await.unwrap(),
@@ -1329,6 +1341,44 @@ mod tests {
                 assert_eq!(metadata, original);
             }
         }
+    }
+
+    #[tokio::test]
+    async fn set_expiry_include_expired() {
+        let backend = InMemoryBackend::new("test");
+        let id = make_id();
+        let now = Timestamp::now();
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
+            time_created: Some(now - Duration::from_hours(3)),
+            time_expires: Some(now - Duration::from_hours(2)),
+            ..Default::default()
+        };
+        backend
+            .put_object(&id, &metadata, stream::single("payload"), now)
+            .await
+            .unwrap();
+
+        let target = ExpiryTarget::At(now + Duration::from_hours(1));
+        assert_eq!(
+            backend.set_expiry(&id, target.into(), now).await.unwrap(),
+            SetExpiryResponse::NotFound
+        );
+
+        let update = ExpiryUpdate {
+            include_expired: true,
+            ..target.into()
+        };
+        assert_eq!(
+            backend.set_expiry(&id, update, now).await.unwrap(),
+            SetExpiryResponse::Satisfied(now + Duration::from_hours(1))
+        );
+        let (stored, _) = backend.get(&id).expect_object();
+        assert_eq!(stored.time_expires, Some(now + Duration::from_hours(1)));
+        assert_eq!(
+            stored.expiration_policy,
+            ExpirationPolicy::TimeToLive(Duration::from_hours(4))
+        );
     }
 
     #[tokio::test]
