@@ -469,6 +469,7 @@ impl<T: TokenProvider> Backend for S3CompatibleBackend<T> {
         target: ExpiryUpdate,
         access_time: Timestamp,
     ) -> Result<SetExpiryResponse> {
+        target.ensure_unexpired_only()?;
         let Some((mut metadata, _, response)) = self
             .request_object(Method::HEAD, id, access_time, None)
             .await?

@@ -339,6 +339,9 @@ Not all backends support resumable uploads. A backend returns no session when it
 particular upload; this is a routine outcome rather than an error. Acceptance can depend on the
 declared size, the metadata, or whether resuming is possible in principle.
 
+A time-based expiration policy declared at session creation counts from the upload's completion,
+not from session creation, so a slow upload does not shorten the object's lifetime.
+
 The offset returned by every chunk response is authoritative. Session creation reports each
 upload's granularity in bytes, or zero when it imposes none. For a positive granularity, a backend
 may accept the full request body but persist only the largest aligned prefix, so a client must not

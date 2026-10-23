@@ -252,7 +252,12 @@ impl Backend for LocalFsBackend {
         let _guard = self.locks.acquire(id).await?;
 
         let path = self.path(id);
-        let Some(object) = ObjectFile::try_open(&path, access_time).await? else {
+        let object = if target.include_expired {
+            ObjectFile::try_open_unfiltered(&path).await?
+        } else {
+            ObjectFile::try_open(&path, access_time).await?
+        };
+        let Some(object) = object else {
             return Ok(SetExpiryResponse::NotFound);
         };
         let ObjectFile {
@@ -995,8 +1000,23 @@ where
 }
 
 impl ObjectFile {
-    /// Opens an object file, returning `None` when it does not exist.
+    /// Opens an object file, returning `None` when it does not exist or has expired.
     async fn try_open(path: &Path, access_time: Timestamp) -> Result<Option<Self>> {
+        let object = Self::try_open_unfiltered(path).await?;
+        if object
+            .as_ref()
+            .is_some_and(|object| object.metadata.is_expired(access_time))
+        {
+            objectstore_log::debug!("Object found but past expiry");
+            return Ok(None);
+        }
+        Ok(object)
+    }
+
+    /// Opens an object file, returning `None` only when it does not exist.
+    ///
+    /// Unlike [`try_open`](Self::try_open), this also returns objects past their expiry.
+    async fn try_open_unfiltered(path: &Path) -> Result<Option<Self>> {
         let file = match OpenOptions::new().read(true).open(path).await {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -1005,11 +1025,6 @@ impl ObjectFile {
 
         let mut reader = BufReader::new(file);
         let (mut metadata, preamble_len) = read_metadata_preamble(&mut reader).await?;
-
-        if metadata.is_expired(access_time) {
-            objectstore_log::debug!("Object found but past expiry");
-            return Ok(None);
-        }
 
         let preamble_len = preamble_len as u64;
         let file_len = reader
@@ -1576,6 +1591,41 @@ mod tests {
         assert_eq!(stream::read_to_vec(payload).await.unwrap(), b"original");
 
         assert_eq!(draft_count(&backend, &id), 0);
+    }
+
+    #[tokio::test]
+    async fn set_expiry_include_expired() {
+        let (_tempdir, backend) = make_backend();
+        let id = make_id();
+        let now = Timestamp::now();
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
+            time_created: Some(now - Duration::from_hours(3)),
+            time_expires: Some(now - Duration::from_hours(2)),
+            ..Default::default()
+        };
+        backend
+            .put_object(&id, &metadata, stream::single("payload"), now)
+            .await
+            .unwrap();
+
+        let target = ExpiryTarget::At(now + Duration::from_hours(1));
+        assert_eq!(
+            backend.set_expiry(&id, target.into(), now).await.unwrap(),
+            SetExpiryResponse::NotFound
+        );
+
+        let update = ExpiryUpdate {
+            include_expired: true,
+            ..target.into()
+        };
+        assert_eq!(
+            backend.set_expiry(&id, update, now).await.unwrap(),
+            SetExpiryResponse::Satisfied(now + Duration::from_hours(1))
+        );
+        let (stored, _, payload) = backend.get_object(&id, now, None).await.unwrap().unwrap();
+        assert_eq!(stored.time_expires, Some(now + Duration::from_hours(1)));
+        assert_eq!(stream::read_to_vec(payload).await.unwrap(), b"payload");
     }
 
     #[tokio::test]

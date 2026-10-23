@@ -1298,6 +1298,7 @@ impl HighVolumeBackend for BigTableBackend {
         access_time: Timestamp,
     ) -> Result<SetExpiryResponse> {
         let TieredUpdate::SetExpiry(expiry_target) = update;
+        expiry_target.ensure_unexpired_only()?;
         let path = id.as_storage_path().to_string().into_bytes();
 
         // Inline extension needs metadata and payload from the same read so a

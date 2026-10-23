@@ -107,6 +107,12 @@
 //! as the source of truth for whether the upload logically exists.
 //! This marker is consumed upon cancellation or the first submission of a final chunk, making
 //! finalization one-shot.
+//!
+//! Time-based expiration counts from the commit. When the session is created, the long-term blob
+//! gets the deadline resolved from the request, which may pass while the upload is ongoing. Before
+//! committing the tombstone, the final chunk moves the blob's deadline to the commit time plus the
+//! policy's duration, using [`ExpiryUpdate::include_expired`] since the blob may already be past
+//! its initial deadline. The tombstone then carries the confirmed deadline.
 
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -117,7 +123,7 @@ use base64::Engine as _;
 use bytes::Bytes;
 use futures_util::StreamExt;
 use objectstore_metrics::TimerGuard;
-use objectstore_types::metadata::Metadata;
+use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use objectstore_types::range::ByteRange;
 use objectstore_types::resumable::UploadProgress;
 use objectstore_types::time::Timestamp;
@@ -304,6 +310,42 @@ impl TieredStorage {
         Ok(())
     }
 
+    /// Moves a completed resumable upload's deadline to the commit time plus `expires_in`.
+    ///
+    /// The blob still carries the deadline resolved at session creation, which may already have
+    /// passed, so the update includes expired blobs. Returns the deadline the redirect tombstone
+    /// must carry, or `None` without a time-based policy.
+    ///
+    /// Fails if the long-term backend does not confirm the deadline, so the caller never commits a
+    /// tombstone without a matching blob deadline.
+    async fn commit_upload_expiry(
+        &self,
+        revision: &ObjectId,
+        expires_in: Option<Duration>,
+    ) -> Result<Option<Timestamp>> {
+        let Some(expires_in) = expires_in else {
+            return Ok(None);
+        };
+
+        let now = Timestamp::now();
+        let update = ExpiryUpdate {
+            include_expired: true,
+            ..ExpiryTarget::At(now.saturating_add(expires_in)).into()
+        };
+        match self
+            .inner
+            .long_term
+            .set_expiry(revision, update, now)
+            .await?
+        {
+            SetExpiryResponse::Satisfied(deadline) => Ok(Some(deadline)),
+            SetExpiryResponse::NotFound | SetExpiryResponse::Rejected => Err(Error::new(
+                ErrorKind::BackendFailure,
+                "long-term backend did not confirm the expiry of a completed resumable upload",
+            )),
+        }
+    }
+
     /// Returns the name of the backend corresponding to the given routing choice.
     fn backend_type(&self, choice: &BackendChoice) -> &'static str {
         match choice {
@@ -445,7 +487,11 @@ type LongTermBackendToken = BackendToken;
 struct TieredResumableToken {
     inner: LongTermBackendToken,
     revision: String,
-    time_expires: Option<Timestamp>,
+    /// Expiration policy requested for the object, applied again from the commit time.
+    ///
+    /// Required, so tokens issued before this field existed fail to decode instead of
+    /// committing without an expiry.
+    expiration_policy: ExpirationPolicy,
 }
 
 impl TieredResumableToken {
@@ -527,7 +573,7 @@ impl Backend for TieredStorage {
         let token = TieredResumableToken {
             revision: revision.key,
             inner,
-            time_expires: metadata.time_expires,
+            expiration_policy: metadata.expiration_policy,
         };
         Ok(Some(serde_json::to_string(&token).context(
             ErrorKind::Internal,
@@ -550,7 +596,7 @@ impl Backend for TieredStorage {
             backend_type = self.backend_type(&BackendChoice::LongTerm),
         );
         let tiered = TieredResumableToken::decode(&session.backend_token)?;
-        let time_expires = tiered.time_expires;
+        let expires_in = tiered.expiration_policy.expires_in();
         let inner_session = tiered.into_inner_session(session);
         let id = &session.object_id;
         let revision = &inner_session.object_id;
@@ -634,6 +680,10 @@ impl Backend for TieredStorage {
             return Err(ErrorKind::UploadSessionGone.into());
         }
         guard.advance(ChangePhase::Written);
+
+        // The blob must carry the final deadline before the tombstone makes it reachable. On
+        // failure, the guard reclaims the unreferenced blob.
+        let time_expires = self.commit_upload_expiry(revision, expires_in).await?;
 
         let written = self
             .inner
@@ -826,6 +876,9 @@ impl Backend for TieredStorage {
         target: ExpiryUpdate,
         access_time: Timestamp,
     ) -> Result<SetExpiryResponse> {
+        // Only resumable commits update expired blobs, and they call the long-term backend
+        // directly. Logical objects stay unreachable once expired.
+        target.ensure_unexpired_only()?;
         match self
             .inner
             .high_volume
@@ -1439,8 +1492,8 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn resumable_bigtable_and_gcs() -> anyhow::Result<()> {
+    /// Builds tiered storage over the Bigtable and GCS emulators.
+    async fn make_bigtable_and_gcs_storage() -> anyhow::Result<TieredStorage> {
         let streams = ChangeStreamFactory::default();
         let lt = GcsBackend::new(
             GcsConfig {
@@ -1465,7 +1518,16 @@ mod tests {
             &streams,
         )
         .await?;
-        let storage = TieredStorage::new(Box::new(hv), Box::new(lt), Box::new(NoopChangeLog));
+        Ok(TieredStorage::new(
+            Box::new(hv),
+            Box::new(lt),
+            Box::new(NoopChangeLog),
+        ))
+    }
+
+    #[tokio::test]
+    async fn resumable_bigtable_and_gcs() -> anyhow::Result<()> {
+        let storage = make_bigtable_and_gcs_storage().await?;
         let id = make_id(&format!("tiered-resumable-{}", uuid::Uuid::now_v7()));
         let payload = vec![b'a'; BACKEND_SIZE_THRESHOLD + 1];
         let token =
@@ -1620,6 +1682,170 @@ mod tests {
         assert!(!hv.contains(&id));
     }
 
+    /// TTL metadata as resolved by a session created at `created`.
+    fn ttl_metadata(created: Timestamp, ttl: Duration) -> Metadata {
+        Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(ttl),
+            time_created: Some(created),
+            time_expires: Some(created + ttl),
+            ..Default::default()
+        }
+    }
+
+    /// Uploads `payload` in a single final chunk and returns the upload's revision.
+    async fn upload_resumable(
+        storage: &TieredStorage,
+        id: &ObjectId,
+        metadata: &Metadata,
+        payload: &[u8],
+    ) -> Result<ObjectId> {
+        let token = resumable_token(storage, id, metadata, payload.len() as u64).await;
+        let progress = storage
+            .put_chunk(
+                &token,
+                0,
+                payload.len() as u64,
+                stream::single(payload.to_vec()),
+            )
+            .await?;
+        assert_eq!(progress, UploadProgress::Complete);
+        Ok(upload_revision(&token))
+    }
+
+    #[tokio::test]
+    async fn resumable_expiry_counts_from_commit() {
+        let (storage, hv, lt, _) = make_tiered_storage();
+        let id = make_id("resumable-expiry");
+        let payload = vec![b'a'; BACKEND_SIZE_THRESHOLD + 1];
+        // The session started long enough ago that its initial deadline has passed.
+        let metadata = ttl_metadata(
+            Timestamp::now() - Duration::from_hours(3),
+            Duration::from_hours(1),
+        );
+
+        let before = Timestamp::now();
+        let revision = upload_resumable(&storage, &id, &metadata, &payload)
+            .await
+            .unwrap();
+        let after = Timestamp::now();
+
+        let deadline = hv.get(&id).expect_tombstone().time_expires.unwrap();
+        assert!(deadline >= before + Duration::from_hours(1));
+        assert!(deadline <= after + Duration::from_hours(1));
+        let (blob, _) = lt.get(&revision).expect_object();
+        assert_eq!(blob.time_expires, Some(deadline));
+        // The session's creation time is kept, so the TTL covers the upload time too.
+        assert_eq!(blob.time_created, metadata.time_created);
+        assert_eq!(
+            blob.expiration_policy,
+            ExpirationPolicy::TimeToLive(Duration::from_hours(4))
+        );
+
+        let (metadata, _, body) = storage
+            .get_object(&id, Timestamp::now(), None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(metadata.time_expires, Some(deadline));
+        assert_eq!(stream::read_to_vec(body).await.unwrap(), payload);
+    }
+
+    #[tokio::test]
+    async fn resumable_manual_expiry_commits_without_deadline() {
+        let (storage, hv, lt, _) = make_tiered_storage();
+        let id = make_id("resumable-manual");
+        let payload = vec![b'a'; BACKEND_SIZE_THRESHOLD + 1];
+
+        let revision = upload_resumable(&storage, &id, &Metadata::default(), &payload)
+            .await
+            .unwrap();
+
+        assert_eq!(hv.get(&id).expect_tombstone().time_expires, None);
+        assert_eq!(lt.get(&revision).expect_object().0.time_expires, None);
+    }
+
+    #[tokio::test]
+    async fn resumable_expiry_counts_from_commit_bigtable_and_gcs() -> anyhow::Result<()> {
+        let storage = make_bigtable_and_gcs_storage().await?;
+        let id = make_id(&format!("tiered-resumable-expiry-{}", uuid::Uuid::now_v7()));
+        let payload = vec![b'a'; BACKEND_SIZE_THRESHOLD + 1];
+        let metadata = ttl_metadata(
+            Timestamp::now() - Duration::from_hours(3),
+            Duration::from_hours(1),
+        );
+
+        let before = Timestamp::now();
+        let revision = upload_resumable(&storage, &id, &metadata, &payload).await?;
+        let after = Timestamp::now();
+
+        let metadata = storage
+            .get_metadata(&id, Timestamp::now())
+            .await?
+            .expect("committed upload is readable");
+        let deadline = metadata.time_expires.unwrap();
+        assert!(deadline >= before + Duration::from_hours(1));
+        assert!(deadline <= after + Duration::from_hours(1));
+        // GCS reports the finalize time as creation time, so the TTL stays as requested.
+        assert_eq!(
+            metadata.expiration_policy,
+            ExpirationPolicy::TimeToLive(Duration::from_hours(1))
+        );
+
+        let blob = storage
+            .inner
+            .long_term
+            .get_metadata(&revision, Timestamp::now())
+            .await?
+            .unwrap();
+        assert_eq!(blob.time_expires, Some(deadline));
+        Ok(())
+    }
+
+    #[test]
+    fn resumable_token_requires_expiration_policy() {
+        let legacy = r#"{"inner":"token","revision":"key/rev","time_expires":null}"#;
+        assert_eq!(
+            TieredResumableToken::decode(&legacy.to_owned())
+                .unwrap_err()
+                .kind(),
+            ErrorKind::UnknownUploadSession
+        );
+    }
+
+    #[tokio::test]
+    async fn resumable_commit_requires_confirmed_expiry() {
+        let (storage, hv, _, events) = tiered_with_expiry_hooks(false, true);
+        let id = make_id("resumable-expiry-rejected");
+        let payload = vec![b'a'; BACKEND_SIZE_THRESHOLD + 1];
+        let metadata = ttl_metadata(Timestamp::now(), Duration::from_hours(1));
+
+        let error = upload_resumable(&storage, &id, &metadata, &payload)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::BackendFailure);
+        assert_eq!(events.lock().unwrap().as_slice(), &["lt"]);
+        assert!(
+            !hv.inner.contains(&id),
+            "no tombstone without a confirmed deadline"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_expiry_rejects_include_expired() {
+        let (storage, _, _, _) = make_tiered_storage();
+        let id = make_id("tiered-include-expired");
+        let update = ExpiryUpdate {
+            include_expired: true,
+            ..ExpiryTarget::At(Timestamp::now() + Duration::from_hours(1)).into()
+        };
+
+        let error = storage
+            .set_expiry(&id, update, Timestamp::now())
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported);
+    }
+
     #[derive(Clone, Debug)]
     struct ExpiryHook {
         label: &'static str,
@@ -1750,8 +1976,8 @@ mod tests {
             .await
             .unwrap();
         let update = ExpiryUpdate {
-            target: ExpiryTarget::FromCreation(Duration::from_hours(1)),
             max: Some(Duration::ZERO),
+            ..ExpiryTarget::FromCreation(Duration::from_hours(1)).into()
         };
         assert_eq!(
             storage

@@ -651,12 +651,30 @@ impl GcsBackend {
     }
 
     /// Fetches GCS object metadata without modifying the object.
-    #[tracing::instrument(level = "debug", fields(%object_url), skip(self))]
+    ///
+    /// Returns `None` for missing objects and for objects past their expiry.
     async fn get_gcs_metadata(
         &self,
         object_url: &Url,
         access_time: Timestamp,
     ) -> Result<Option<GcsObject>> {
+        let metadata_opt = self.get_gcs_metadata_unfiltered(object_url).await?;
+
+        // Filter already expired objects but leave them to garbage collection
+        if metadata_opt
+            .as_ref()
+            .is_some_and(|metadata| metadata.is_expired(access_time))
+        {
+            objectstore_log::debug!("Object found but past expiry");
+            return Ok(None);
+        }
+
+        Ok(metadata_opt)
+    }
+
+    /// Fetches GCS object metadata, including objects past their expiry.
+    #[tracing::instrument(level = "debug", fields(%object_url), skip(self))]
+    async fn get_gcs_metadata_unfiltered(&self, object_url: &Url) -> Result<Option<GcsObject>> {
         let metadata_opt = self
             .with_retry("get_metadata", || async {
                 let resp = self
@@ -682,18 +700,11 @@ impl GcsBackend {
             })
             .await?;
 
-        let Some(gcs_metadata) = metadata_opt else {
+        if metadata_opt.is_none() {
             objectstore_log::debug!("Object not found");
-            return Ok(None);
-        };
-
-        // Filter already expired objects but leave them to garbage collection
-        if gcs_metadata.is_expired(access_time) {
-            objectstore_log::debug!("Object found but past expiry");
-            return Ok(None);
         }
 
-        Ok(Some(gcs_metadata))
+        Ok(metadata_opt)
     }
 
     /// Moves an object's `customTime` and optionally updates its metadata in the same PATCH.
@@ -1082,7 +1093,12 @@ impl Backend for GcsBackend {
         access_time: Timestamp,
     ) -> Result<SetExpiryResponse> {
         let object_url = self.object_url(id)?;
-        let Some(object) = self.get_gcs_metadata(&object_url, access_time).await? else {
+        let object = if target.include_expired {
+            self.get_gcs_metadata_unfiltered(&object_url).await?
+        } else {
+            self.get_gcs_metadata(&object_url, access_time).await?
+        };
+        let Some(object) = object else {
             return Ok(SetExpiryResponse::NotFound);
         };
         let Some(current_expiry) = object.custom_time else {
@@ -2644,6 +2660,42 @@ mod tests {
         let result = backend.get_metadata(&id, Timestamp::now()).await?;
         assert!(result.is_none());
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_set_expiry_include_expired() -> Result<()> {
+        let backend = create_test_backend().await?;
+        let id = make_id();
+        let now = Timestamp::now();
+        let metadata = Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
+            time_expires: Some(now - Duration::from_hours(2)),
+            ..Default::default()
+        };
+        backend
+            .put_object(&id, &metadata, stream::single("payload"), now)
+            .await?;
+
+        let target = ExpiryTarget::At(now + Duration::from_hours(1));
+        assert_eq!(
+            backend.set_expiry(&id, target.into(), now).await?,
+            SetExpiryResponse::NotFound
+        );
+
+        let update = ExpiryUpdate {
+            include_expired: true,
+            ..target.into()
+        };
+        assert_eq!(
+            backend.set_expiry(&id, update, now).await?,
+            SetExpiryResponse::Satisfied(now + Duration::from_hours(1))
+        );
+        let stored = backend
+            .get_metadata(&id, now)
+            .await?
+            .expect("extended object is readable");
+        assert_eq!(stored.time_expires, Some(now + Duration::from_hours(1)));
         Ok(())
     }
 

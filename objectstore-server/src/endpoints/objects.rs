@@ -131,7 +131,10 @@ async fn object_patch(
     };
 
     let max = state.config.usecases.get_max_expiry(id.usecase());
-    let update = ExpiryUpdate { target, max };
+    let update = ExpiryUpdate {
+        max,
+        ..target.into()
+    };
 
     match service.set_expiry(id, update, access_time).await? {
         SetExpiryResponse::Satisfied(_) => Ok(StatusCode::NO_CONTENT),
