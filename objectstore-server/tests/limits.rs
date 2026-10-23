@@ -20,7 +20,7 @@ fn assert_no_retry(response: &reqwest::Response) {
     assert_eq!(
         response
             .headers()
-            .get(objectstore_server::endpoints::common::HEADER_ENVOY_RATELIMITED)
+            .get(objectstore_server::rate_limits::HEADER_ENVOY_RATELIMITED)
             .expect("rejection must prevent Envoy retries"),
         "true"
     );
@@ -49,6 +49,7 @@ async fn test_web_concurrency_limit() -> Result<()> {
         "expected 503 for regular request at limit"
     );
     assert_no_retry(&response);
+    assert_eq!(response.text().await?, "service at capacity");
 
     // Health endpoints need no auth and bypass the concurrency limit.
     for path in ["/health", "/ready"] {
@@ -60,6 +61,33 @@ async fn test_web_concurrency_limit() -> Result<()> {
         );
         assert_eq!(response.text().await?, "OK", "{path}");
     }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_service_concurrency_limit() -> Result<()> {
+    // With max_concurrency = 0, every operation fails to acquire a service permit.
+    let server = TestServer::with_config(Config {
+        service: Service {
+            max_concurrency: 0,
+            ..Default::default()
+        },
+        auth: AuthZ {
+            enforce: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .await;
+
+    let response = reqwest::Client::new()
+        .get(server.url("/v1/objects/test/org=1/key"))
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    assert_no_retry(&response);
+    assert_eq!(response.text().await?, "service at capacity");
 
     Ok(())
 }
