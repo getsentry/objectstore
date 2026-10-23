@@ -151,6 +151,13 @@ session.put("payload")
     .send().await?;
 ```
 
+### Automatic Resumable Uploads
+
+Large uploads automatically use resumable uploads and resend only what the server hasn't
+stored after a failed write. No feature flag is required.
+
+See [`PutBuilder`] for eligibility, configuration, and recovery behavior.
+
 ### Resumable Upload API
 
 > **Feature flag required:** Enable `resumable-upload-api` to use this API.
@@ -176,7 +183,8 @@ If a non-final chunk is larger than the granularity but its size is not a multip
 server may persist only its aligned prefix.
 
 ```rust,no_run
-#![cfg(feature = "resumable-upload-api")]
+# #[cfg(feature = "resumable-upload-api")]
+# mod example {
 
 use bytes::Bytes;
 use anyhow::{Context as _, Result};
@@ -189,7 +197,7 @@ async fn upload_large_object(session: &Session, object: Bytes) -> Result<()> {
         .content_type("application/octet-stream")
         .send()
         .await?
-        // Fall back to a regular [`Session:;put`].
+        // Fall back to a regular Session::put.
         .context("resumable upload declined for this object")?;
 
     let mut offset = 0;
@@ -208,6 +216,8 @@ async fn upload_large_object(session: &Session, object: Bytes) -> Result<()> {
         };
     }
 }
+# }
+# fn main() {}
 ```
 
 ### Many API

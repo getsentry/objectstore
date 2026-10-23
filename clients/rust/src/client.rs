@@ -1,4 +1,5 @@
 use std::io;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,6 +22,7 @@ struct ClientBuilderInner {
     propagate_traces: bool,
     reqwest_builder: reqwest::ClientBuilder,
     token: Option<TokenProvider>,
+    spool_dir: Option<PathBuf>,
 }
 
 impl ClientBuilderInner {
@@ -71,6 +73,7 @@ impl ClientBuilder {
             propagate_traces: false,
             reqwest_builder,
             token: None,
+            spool_dir: None,
         }))
     }
 
@@ -124,6 +127,16 @@ impl ClientBuilder {
         Self(Ok(inner))
     }
 
+    /// Sets the directory for temporary files used to prepare compressed resumable uploads.
+    ///
+    /// By default, the system temporary directory is used. The directory must already exist.
+    /// If a temporary file cannot be created, uploads fall back to direct streaming.
+    pub fn spool_dir(self, path: impl Into<PathBuf>) -> Self {
+        let Ok(mut inner) = self.0 else { return self };
+        inner.spool_dir = Some(path.into());
+        Self(Ok(inner))
+    }
+
     /// Returns a [`Client`] that uses this [`ClientBuilder`] configuration.
     ///
     /// # Errors
@@ -141,6 +154,7 @@ impl ClientBuilder {
                 service_url: inner.service_url,
                 propagate_traces: inner.propagate_traces,
                 token: inner.token,
+                spool_dir: inner.spool_dir,
             }),
         })
     }
@@ -161,6 +175,7 @@ pub struct Usecase {
     name: Arc<UsecaseName>,
     compression: Option<Compression>,
     expiration_policy: ExpirationPolicy,
+    resumable_threshold_bytes: Option<u64>,
 }
 
 impl Usecase {
@@ -177,6 +192,7 @@ impl Usecase {
             name: Arc::new(UsecaseName::new(name)?),
             compression: Some(Compression::Zstd),
             expiration_policy: ExpirationPolicy::default(),
+            resumable_threshold_bytes: Some(256 * 1024 * 1024),
         })
     }
 
@@ -232,6 +248,21 @@ impl Usecase {
             expiration_policy,
             ..self
         }
+    }
+
+    /// Returns the minimum remaining input size for automatic resumable uploads.
+    pub fn resumable_threshold_bytes(&self) -> Option<u64> {
+        self.resumable_threshold_bytes
+    }
+
+    /// Sets the minimum remaining input size for automatic resumable uploads.
+    ///
+    /// Defaults to 256 MiB. Pass [`None`] to disable automatic resumables or zero to include
+    /// every supported payload. Individual uploads can override this using
+    /// [`crate::PutBuilder::resumable_threshold_bytes`]. See [`crate::PutBuilder`] for eligibility.
+    pub fn with_resumable_threshold_bytes(mut self, threshold: impl Into<Option<u64>>) -> Self {
+        self.resumable_threshold_bytes = threshold.into();
+        self
     }
 
     /// Creates a new custom [`Scope`].
@@ -325,6 +356,7 @@ impl Scope {
 
 #[derive(Debug)]
 pub(crate) struct ClientInner {
+    pub(crate) spool_dir: Option<PathBuf>,
     reqwest: reqwest::Client,
     service_url: Url,
     propagate_traces: bool,

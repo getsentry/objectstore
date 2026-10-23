@@ -3,14 +3,15 @@
 //! Enable the `resumable-upload-api` feature to use this API.
 //! It maps directly to the server operations and is intended for advanced use cases that need
 //! low-level protocol calls.
-//! A future release of `objectstore-client` will use this API under the hood for eligible
-//! `Session::put` calls, so users can benefit from this feature without the need to interact with
-//! this API directly.
+//! Eligible uploads use this protocol automatically, without requiring the feature flag.
 
+#[cfg(feature = "resumable-upload-api")]
 use std::borrow::Cow;
+#[cfg(feature = "resumable-upload-api")]
 use std::collections::BTreeMap;
 use std::fmt;
 
+#[cfg(feature = "resumable-upload-api")]
 use bytes::Bytes;
 use objectstore_types::metadata::Metadata;
 use objectstore_types::resumable::{
@@ -19,13 +20,17 @@ use objectstore_types::resumable::{
 };
 use reqwest::{Body, Method, Response, StatusCode};
 use serde::Serialize;
+#[cfg(feature = "resumable-upload-api")]
 use tokio::io::AsyncRead;
+#[cfg(feature = "resumable-upload-api")]
 use tokio_util::io::ReaderStream;
 
 pub use objectstore_types::resumable::{SessionToken, UploadProgress};
 
 use crate::response::ResponseExt as _;
-use crate::{ClientStream, Compression, Error, ExpirationPolicy, ObjectKey, Session};
+use crate::{ClientStream, Error, ObjectKey, Session};
+#[cfg(feature = "resumable-upload-api")]
+use crate::{Compression, ExpirationPolicy};
 
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -56,6 +61,7 @@ pub struct ResumableUpload {
     granularity: Option<u64>,
 }
 
+#[cfg(feature = "resumable-upload-api")]
 impl Session {
     /// Starts building a resumable upload for an object with `object_length` bytes.
     ///
@@ -102,6 +108,7 @@ impl ResumableUpload {
     }
 
     /// Returns the session token bound to this upload.
+    #[cfg(feature = "resumable-upload-api")]
     pub fn token(&self) -> &SessionToken {
         &self.token
     }
@@ -110,6 +117,7 @@ impl ResumableUpload {
     ///
     /// The granularity is the persistence unit for non-final chunks: chunks shorter than one
     /// unit are rejected, and larger chunks may persist only an aligned prefix.
+    #[cfg(feature = "resumable-upload-api")]
     pub fn granularity(&self) -> Option<u64> {
         self.granularity
     }
@@ -129,6 +137,7 @@ impl ResumableUpload {
     ///
     /// The returned progress contains the authoritative server offset, which should be used for
     /// subsequent requests.
+    #[cfg(feature = "resumable-upload-api")]
     pub fn put(&self, offset: u64, chunk: impl Into<Bytes>) -> PutChunkBuilder {
         let chunk = chunk.into();
         self.put_body(offset, chunk.len() as u64, chunk.into())
@@ -146,6 +155,7 @@ impl ResumableUpload {
     ///
     /// The reader must produce exactly `length` bytes. If this upload records compression,
     /// those bytes must come from the object after it has been compressed in full.
+    #[cfg(feature = "resumable-upload-api")]
     pub fn put_read<R>(&self, offset: u64, length: u64, reader: R) -> PutChunkBuilder
     where
         R: AsyncRead + Send + Sync + 'static,
@@ -201,15 +211,16 @@ impl ResumableUpload {
     }
 }
 
-/// A builder for [`Session::create_upload`].
+/// A builder for creating a resumable upload.
 #[derive(Debug)]
 pub struct CreateResumableUploadBuilder {
-    session: Session,
-    total_length: u64,
-    key: Option<ObjectKey>,
-    metadata: Metadata,
+    pub(crate) session: Session,
+    pub(crate) total_length: u64,
+    pub(crate) key: Option<ObjectKey>,
+    pub(crate) metadata: Metadata,
 }
 
+#[cfg(feature = "resumable-upload-api")]
 impl CreateResumableUploadBuilder {
     /// Sets an explicit object key instead of asking the server to generate one.
     pub fn key(mut self, key: impl Into<ObjectKey>) -> Self {
@@ -264,7 +275,9 @@ impl CreateResumableUploadBuilder {
         self.metadata.custom.insert(key.into(), value.into());
         self
     }
+}
 
+impl CreateResumableUploadBuilder {
     /// Creates the resumable upload and returns a handle bound to it.
     ///
     /// Returns `None` when the server declines resumable uploads for this object.
@@ -336,8 +349,7 @@ impl UploadProgressBuilder {
     }
 }
 
-/// A builder for [`ResumableUpload::put`], [`ResumableUpload::put_stream`], or
-/// [`ResumableUpload::put_read`].
+/// A builder for writing a resumable upload chunk.
 pub struct PutChunkBuilder {
     upload: ResumableUpload,
     offset: u64,
