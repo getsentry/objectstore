@@ -64,11 +64,14 @@ impl Services {
         tokio::spawn(track_allocator_metrics(config.runtime.metrics_interval));
 
         // Absent config means no transport, and therefore no reporting.
+        #[cfg(feature = "storage-cogs")]
         let streams = config
             .storage_cogs
             .as_ref()
             .map(ChangeStreamFactory::new)
             .unwrap_or_default();
+        #[cfg(not(feature = "storage-cogs"))]
+        let streams = ChangeStreamFactory::default();
         let cipher = match config.service.cipher()? {
             Some(cipher) => cipher,
             None => {
