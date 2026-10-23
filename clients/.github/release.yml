@@ -1,34 +1,30 @@
-# Changelog categories for client releases, read by Craft from `clients/`.
+# Changelog categories for both client releases. Craft reads `.github/release.yml`
+# next to each `.craft.yml`, so `clients/{python,rust}/.github/release.yml` are
+# symlinks to this file.
 #
-# PR titles must use the `py-client` or `rs-client` scope to be listed, e.g.
-# `feat(py-client): Add X`. Entries are matched top to bottom; categories that
-# share a title render as one section, and `semver` drives the version bump.
+# A custom file replaces Craft's defaults entirely. Compared to them, it strips
+# the `type(scope):` prefix from entries and catches every remaining change so
+# it still counts toward the version bump.
 changelog:
   exclude:
     labels:
       - skip-changelog
   categories:
-    - title: Python Client
+    - title: Breaking Changes 🛠
       commit_patterns:
-        - "^(?<type>\\w+\\(py-client\\)!:\\s*)"
+        - "^(?<type>\\w+(?:\\([^)]+\\))?!:\\s*)"
       semver: major
-    - title: Rust Client
+    - title: New Features ✨
       commit_patterns:
-        - "^(?<type>\\w+\\(rs-client\\)!:\\s*)"
-      semver: major
-    - title: Python Client
-      commit_patterns:
-        - "^(?<type>feat\\(py-client\\):\\s*)"
+        - "^(?<type>feat(?:\\([^)]+\\))?:\\s*)"
       semver: minor
-    - title: Rust Client
+    - title: Bug Fixes 🐛
       commit_patterns:
-        - "^(?<type>feat\\(rs-client\\):\\s*)"
-      semver: minor
-    - title: Python Client
-      commit_patterns:
-        - "^(?<type>\\w+\\(py-client\\):\\s*)"
+        - "^(?<type>fix(?:\\([^)]+\\))?:\\s*)"
       semver: patch
-    - title: Rust Client
+    # Catch-all: any other conventional type, then any other title.
+    - title: Other Changes 🔧
       commit_patterns:
-        - "^(?<type>\\w+\\(rs-client\\):\\s*)"
+        - "^(?<type>\\w+(?:\\([^)]+\\))?:\\s*)"
+        - ".*"
       semver: patch

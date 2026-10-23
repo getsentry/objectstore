@@ -1,0 +1,14 @@
+changelog:
+  policy: auto
+  # Default is `true`, which adds a subheading per PR title scope.
+  scopeGrouping: false
+preReleaseCommand: ../../scripts/bump-version-rs-client.sh
+releaseBranchPrefix: release-library/rs-client
+# The crates target publishes from source, so there are no build artifacts.
+artifactProvider:
+  name: none
+
+targets:
+  - name: github
+    tagPrefix: rs-client@
+  - name: crates
