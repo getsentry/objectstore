@@ -46,7 +46,7 @@ pub(super) enum ReplayBody {
 }
 
 pub(super) async fn prepare(
-    mut body: PutBody,
+    body: PutBody,
     compression: Option<CompressionMode>,
     threshold: Option<u64>,
     spool_dir: Option<PathBuf>,
@@ -54,14 +54,24 @@ pub(super) async fn prepare(
     let Some(threshold) = threshold else {
         return Ok(PreparedBody::Direct(body));
     };
-    if let PutBody::Path(path) = body {
-        body = PutBody::File(File::open(path).await?);
-    }
-    let Some(mut length) = body.len().await else {
-        return Ok(PreparedBody::Direct(body));
+    let body = match body {
+        PutBody::Path(path) => PutBody::File(File::open(path).await?),
+        body => body,
     };
-    if length < threshold {
-        return Ok(PreparedBody::Direct(body));
+    let mut replay = match body {
+        PutBody::Buffer(bytes) => ReplayBody::Buffer(bytes),
+        PutBody::File(mut file) => match regular_file_span(&mut file).await {
+            Some((start, length)) => ReplayBody::File {
+                file,
+                start,
+                length,
+            },
+            None => return Ok(PreparedBody::Direct(PutBody::File(file))),
+        },
+        body => return Ok(PreparedBody::Direct(body)),
+    };
+    if replay.len() < threshold {
+        return Ok(PreparedBody::Direct(replay.into_put_body()));
     }
 
     if let Some(CompressionMode::Compress(crate::Compression::Zstd)) = compression {
@@ -73,33 +83,47 @@ pub(super) async fn prepare(
         .map_err(io::Error::other)?;
         let Ok(temporary) = temporary else {
             // Creation has not consumed input, so direct streaming is still possible.
-            return Ok(PreparedBody::Direct(body));
+            return Ok(PreparedBody::Direct(replay.into_put_body()));
         };
         let mut temporary = File::from_std(temporary);
-        let reader: Box<dyn AsyncRead + Send + Sync + Unpin> = match body {
-            PutBody::Buffer(bytes) => Box::new(io::Cursor::new(bytes)),
-            PutBody::File(file) => Box::new(file),
-            _ => unreachable!("only buffers and opened regular files have a known size"),
+        let reader: Box<dyn AsyncRead + Send + Sync + Unpin> = match replay {
+            ReplayBody::Buffer(bytes) => Box::new(io::Cursor::new(bytes)),
+            ReplayBody::File { file, .. } => Box::new(file),
         };
         let mut encoder = super::ZstdEncoder::new(super::BufReader::new(reader));
-        length = tokio::io::copy(&mut encoder, &mut temporary).await?;
+        let length = tokio::io::copy(&mut encoder, &mut temporary).await?;
         temporary.flush().await?;
         temporary.rewind().await?;
-        body = PutBody::File(temporary);
+        replay = ReplayBody::File {
+            file: temporary,
+            start: 0,
+            length,
+        };
     }
 
-    Ok(PreparedBody::Replay(match body {
-        PutBody::Buffer(bytes) => ReplayBody::Buffer(bytes),
-        PutBody::File(mut file) => ReplayBody::File {
-            start: file.stream_position().await?,
-            file,
-            length,
-        },
-        _ => unreachable!("only buffers and opened regular files have a known size"),
-    }))
+    Ok(PreparedBody::Replay(replay))
+}
+
+/// Returns the current position and remaining length of a regular file.
+async fn regular_file_span(file: &mut File) -> Option<(u64, u64)> {
+    file.flush().await.ok()?;
+    let metadata = file.metadata().await.ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    let start = file.stream_position().await.ok()?;
+    Some((start, metadata.len().saturating_sub(start)))
 }
 
 impl ReplayBody {
+    /// Returns the unprepared input for a direct upload, positioned where it started.
+    fn into_put_body(self) -> PutBody {
+        match self {
+            Self::Buffer(bytes) => PutBody::Buffer(bytes),
+            Self::File { file, .. } => PutBody::File(file),
+        }
+    }
+
     pub(super) fn len(&self) -> u64 {
         match self {
             Self::Buffer(bytes) => bytes.len() as u64,

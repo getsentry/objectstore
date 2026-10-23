@@ -10,7 +10,7 @@ use objectstore_types::metadata::Metadata;
 use reqwest::Body;
 use serde::Deserialize;
 use tokio::fs::File;
-use tokio::io::{AsyncRead, AsyncSeekExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncRead, BufReader};
 use tokio_util::io::{ReaderStream, StreamReader};
 
 pub use objectstore_types::metadata::{Compression, ExpirationPolicy};
@@ -33,32 +33,6 @@ pub(crate) enum PutBody {
     Stream(ClientStream),
     File(File),
     Path(PathBuf),
-}
-
-impl PutBody {
-    /// Returns the remaining byte length, or `None` when it cannot be determined.
-    pub(crate) async fn len(&mut self) -> Option<u64> {
-        match self {
-            Self::Buffer(bytes) => Some(bytes.len() as u64),
-            Self::File(file) => {
-                file.flush().await.ok()?;
-                let metadata = file.metadata().await.ok()?;
-                if !metadata.is_file() {
-                    return None;
-                }
-                Some(
-                    metadata
-                        .len()
-                        .saturating_sub(file.stream_position().await.ok()?),
-                )
-            }
-            Self::Path(path) => {
-                let metadata = tokio::fs::metadata(path).await.ok()?;
-                metadata.is_file().then_some(metadata.len())
-            }
-            Self::Stream(_) => None,
-        }
-    }
 }
 
 impl fmt::Debug for PutBody {
@@ -187,8 +161,7 @@ impl PutBuilder {
     /// Sets the minimum remaining input size for automatic resumable uploads.
     ///
     /// Inherits [`crate::Usecase::resumable_threshold_bytes`] unless overridden. Pass [`None`]
-    /// to disable or zero to include every supported payload. Uploads queued through
-    /// [`Session::many`] ignore this setting. See [`PutBuilder`] for preparation and recovery.
+    /// to disable or zero to include every supported payload. See [`PutBuilder`] for eligibility.
     ///
     /// ```no_run
     /// # async fn example(session: objectstore_client::Session) -> objectstore_client::Result<()> {

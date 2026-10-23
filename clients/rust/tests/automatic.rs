@@ -1,4 +1,4 @@
-//! Automatic upload tests deliberately run without `resumable-upload-api` too.
+//! Automatic upload tests do not require the `resumable-upload-api` feature.
 
 use std::collections::VecDeque;
 use std::io::{self, SeekFrom, Write};
