@@ -11,9 +11,8 @@ All object operations live under the `/v1/` prefix. Objects are addressed by a
 usecase, a set of scopes, and a key; scopes are encoded in the URL path using
 Matrix URI syntax (`org=123;project=456`).
 
-Four families of routes exist: object operations, resumable uploads, multipart
-uploads (being replaced by resumable uploads), and internal probes that stay
-available when the server is under load.
+The server exposes object operations, batch operations, resumable uploads, and
+internal probes that stay available when the server is under load.
 
 See the [`endpoints`] module for the routing table and the request and response
 shape of every route.

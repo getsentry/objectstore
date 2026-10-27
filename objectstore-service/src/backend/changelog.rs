@@ -22,14 +22,14 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use objectstore_types::time::Timestamp;
 use sentry::{Hub, SentryFutureExt};
 use tokio_util::task::TaskTracker;
 use tokio_util::task::task_tracker::TaskTrackerToken;
 
-use crate::backend::common::{HighVolumeBackend, MultipartUploadBackend, TieredMetadata};
+use crate::backend::common::{Backend, HighVolumeBackend, TieredMetadata};
 use crate::error::Result;
 use crate::id::ObjectId;
 
@@ -78,10 +78,6 @@ pub struct Change {
     ///
     /// Needs cleanup on success (the CAS committed and the old blob is unreferenced).
     pub old: Option<ObjectId>,
-    /// Earliest time at which this entry becomes eligible for cleanup.
-    ///
-    /// [`ChangeLog::scan`] filters out the entry, unless the deadline has passed.
-    pub cleanup_after: Option<SystemTime>,
 }
 
 /// Manager for multi-step storage changes, including backends and durable log.
@@ -94,7 +90,7 @@ pub struct ChangeManager {
     /// The backend for small objects (≤ 1 MiB).
     pub(crate) high_volume: Box<dyn HighVolumeBackend>,
     /// The backend for large objects (> 1 MiB).
-    pub(crate) long_term: Box<dyn MultipartUploadBackend>,
+    pub(crate) long_term: Box<dyn Backend>,
     /// Durable write-ahead log for multi-step changes.
     pub(crate) changelog: Box<dyn ChangeLog>,
     /// Tracks outstanding background cleanup operations for graceful shutdown.
@@ -105,7 +101,7 @@ impl ChangeManager {
     /// Creates a new `ChangeManager` with the given backends and changelog.
     pub fn new(
         high_volume: Box<dyn HighVolumeBackend>,
-        long_term: Box<dyn MultipartUploadBackend>,
+        long_term: Box<dyn Backend>,
         changelog: Box<dyn ChangeLog>,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -134,33 +130,7 @@ impl ChangeManager {
             id,
             change,
             phase: ChangePhase::Recorded,
-            manager: self.clone(),
-            _token: token,
-        };
-
-        Ok(ChangeGuard {
-            state: Some(state),
-            hub: Hub::current(),
-        })
-    }
-
-    /// Records the change to the log and returns a guard in the `Assembling` state.
-    ///
-    /// Behaves like [`Self::record`], except that the guard is created in the `Assembling` state.
-    /// Unlike other states, this guard does nothing on drop, leaving the burden of cleaning up to
-    /// the [`ChangeLog`].
-    #[tracing::instrument(level = "debug", fields(id = ?change.id, new = ?change.new, old = ?change.old), skip_all)]
-    pub async fn record_assembling(self: Arc<Self>, change: Change) -> Result<ChangeGuard> {
-        let token = self.tracker.token();
-
-        let id = ChangeId::new();
-        self.changelog.record(&id, &change).await?;
-
-        let state = ChangeState {
-            id,
-            change,
-            phase: ChangePhase::Assembling,
-            manager: self.clone(),
+            manager: self,
             _token: token,
         };
 
@@ -263,28 +233,12 @@ impl ChangeLog for InMemoryChangeLog {
     }
 
     async fn scan(&self) -> Result<Vec<(ChangeId, Change)>> {
-        let now = SystemTime::now();
         let entries = self.entries.lock().expect("lock poisoned");
         let result = entries
             .iter()
-            .filter(|(_, change)| match change.cleanup_after {
-                None => true,
-                Some(deadline) => now >= deadline,
-            })
             .map(|(id, change)| (id.clone(), change.clone()))
             .collect();
         Ok(result)
-    }
-}
-
-#[cfg(test)]
-impl InMemoryChangeLog {
-    /// Sets [`Change::cleanup_after`] to the past for all entries, forcing them to be returned by a subsequent [`ChangeLog::scan`].
-    pub fn expire_all(&self) {
-        let mut entries = self.entries.lock().expect("lock poisoned");
-        for change in entries.values_mut() {
-            change.cleanup_after = Some(SystemTime::UNIX_EPOCH);
-        }
     }
 }
 
@@ -318,12 +272,6 @@ pub enum ChangePhase {
     Recovered,
     /// The change is recorded in the log and LT upload has started.
     Recorded,
-    /// The LT blob originated from a multipart upload and is being assembled.
-    ///
-    /// Multipart upload completion can fail, and we want the client to be able to retry it
-    /// without the change cleanup process racing to delete the LT blob.
-    /// Therefore, cleanup of changes in this phase is deferred.
-    Assembling,
     /// LT upload has succeeded and the tombstone is being updated.
     Written,
     /// The tombstone update failed due to a conflict.
@@ -370,7 +318,7 @@ impl ChangeState {
             ChangePhase::Written => self.read_tombstone().await,
             ChangePhase::Lost => self.change.old.clone(),
             ChangePhase::Updated => self.change.new.clone(),
-            ChangePhase::Assembling | ChangePhase::Completed => return, // unreachable
+            ChangePhase::Completed => return, // unreachable
         };
 
         if current != self.change.old
@@ -439,21 +387,12 @@ impl ChangeState {
 
 impl Drop for ChangeState {
     fn drop(&mut self) {
-        match self.phase {
-            ChangePhase::Completed => {}
-            ChangePhase::Assembling => {
-                objectstore_log::warn!(
-                    change = ?self.change,
-                    "Operation dropped in Assembling state, cleanup deferred to ChangeLog recovery"
-                );
-            }
-            _ => {
-                objectstore_log::error!(
-                    change = ?self.change,
-                    phase = ?self.phase,
-                    "Operation dropped without completing cleanup"
-                );
-            }
+        if self.phase != ChangePhase::Completed {
+            objectstore_log::error!(
+                change = ?self.change,
+                phase = ?self.phase,
+                "Operation dropped without completing cleanup"
+            );
         }
     }
 }
@@ -489,7 +428,6 @@ impl fmt::Debug for ChangeGuard {
 impl Drop for ChangeGuard {
     fn drop(&mut self) {
         if let Some(state) = self.state.take()
-            && state.phase != ChangePhase::Assembling
             && state.phase != ChangePhase::Completed
             && let Ok(handle) = tokio::runtime::Handle::try_current()
         {
@@ -526,7 +464,6 @@ mod tests {
             id: make_id("object-key"),
             new: Some(make_id("object-key/rev1")),
             old: None,
-            cleanup_after: None,
         };
 
         log.record(&id, &change).await.unwrap();
@@ -544,7 +481,6 @@ mod tests {
             id: make_id("object-key"),
             new: None,
             old: Some(make_id("object-key/rev1")),
-            cleanup_after: None,
         };
 
         log.record(&id, &change).await.unwrap();
@@ -583,7 +519,6 @@ mod tests {
                 id: make_id("crash-test"),
                 new: Some(make_id("crash-test/rev")),
                 old: None,
-                cleanup_after: None,
             }))
             .unwrap()
             // Runtime drops here while `guard` is still alive outside it.
@@ -596,56 +531,5 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let entries = rt.block_on(log.scan()).unwrap();
         assert_eq!(entries.len(), 1, "log entry must persist");
-    }
-
-    #[tokio::test]
-    async fn scan_filters_by_cleanup_after() {
-        let log = InMemoryChangeLog::default();
-
-        let ready_id = ChangeId::new();
-        log.record(
-            &ready_id,
-            &Change {
-                id: make_id("ready"),
-                new: Some(make_id("ready/rev")),
-                old: None,
-                cleanup_after: None,
-            },
-        )
-        .await
-        .unwrap();
-
-        let expired_id = ChangeId::new();
-        log.record(
-            &expired_id,
-            &Change {
-                id: make_id("expired"),
-                new: Some(make_id("expired/rev")),
-                old: None,
-                cleanup_after: Some(SystemTime::now() - Duration::from_secs(1)),
-            },
-        )
-        .await
-        .unwrap();
-
-        let deferred_id = ChangeId::new();
-        log.record(
-            &deferred_id,
-            &Change {
-                id: make_id("deferred"),
-                new: Some(make_id("deferred/rev")),
-                old: None,
-                cleanup_after: Some(SystemTime::now() + Duration::from_hours(24)),
-            },
-        )
-        .await
-        .unwrap();
-
-        let entries = log.scan().await.unwrap();
-        assert_eq!(entries.len(), 2);
-
-        let ids: Vec<_> = entries.iter().map(|(id, _)| id).collect();
-        assert!(ids.contains(&&ready_id));
-        assert!(ids.contains(&&expired_id));
     }
 }

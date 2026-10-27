@@ -9,7 +9,6 @@ pub mod auth;
 pub mod duration;
 pub mod headers;
 pub mod metadata;
-pub mod multipart;
 pub mod presign;
 pub mod range;
 pub mod resumable;

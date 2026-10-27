@@ -462,7 +462,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "argh",
- "bytes",
  "bytesize",
  "objectstore-service",
  "objectstore-types",
@@ -2955,7 +2954,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "base64",
  "bigtable_rs",
  "blake3",
  "bytes",
@@ -2964,7 +2962,6 @@ dependencies = [
  "futures",
  "futures-util",
  "gcp_auth",
- "humantime",
  "humantime-serde",
  "objectstore-inventory-tracker",
  "objectstore-log",
@@ -3029,7 +3026,6 @@ dependencies = [
  "ed25519-dalek",
  "http 1.4.2",
  "humantime",
- "humantime-serde",
  "insta",
  "mediatype",
  "percent-encoding",

@@ -14,7 +14,6 @@ base64 = { workspace = true }
 ed25519-dalek = { workspace = true }
 http = { workspace = true }
 humantime = { workspace = true }
-humantime-serde = { workspace = true }
 mediatype = { workspace = true }
 percent-encoding = { workspace = true }
 serde = { workspace = true }

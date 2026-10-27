@@ -48,16 +48,12 @@ use objectstore_types::resumable::UploadProgress;
 
 use crate::backend::common::{
     Backend, DeleteResponse, ExpiryUpdate, GetResponse, HighVolumeBackend, MetadataResponse,
-    MultipartUploadBackend, PutResponse, SetExpiryResponse, TieredGet, TieredMetadata,
-    TieredUpdate, TieredWrite, Tombstone,
+    PutResponse, SetExpiryResponse, TieredGet, TieredMetadata, TieredUpdate, TieredWrite,
+    Tombstone,
 };
 use crate::backend::in_memory::InMemoryBackend;
 use crate::error::Result;
 use crate::id::ObjectId;
-use crate::multipart::{
-    AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
-    ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
-};
 use crate::resumable::{BackendToken, Session};
 use crate::stream::ClientStream;
 
@@ -247,80 +243,6 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
             .await
     }
 
-    // --- MultipartUploadBackend methods ---
-
-    /// Intercepts [`MultipartUploadBackend::initiate_multipart`]. Default delegates to `inner`.
-    async fn initiate_multipart(
-        &self,
-        inner: &InMemoryBackend,
-        id: &ObjectId,
-        metadata: &Metadata,
-    ) -> Result<InitiateMultipartResponse> {
-        inner.initiate_multipart(id, metadata).await
-    }
-
-    /// Intercepts [`MultipartUploadBackend::upload_part`]. Default delegates to `inner`.
-    #[allow(clippy::too_many_arguments)]
-    async fn upload_part(
-        &self,
-        inner: &InMemoryBackend,
-        id: &ObjectId,
-        upload_id: &UploadId,
-        part_number: PartNumber,
-        content_length: u64,
-        content_md5: Option<&str>,
-        body: ClientStream,
-    ) -> Result<UploadPartResponse> {
-        inner
-            .upload_part(
-                id,
-                upload_id,
-                part_number,
-                content_length,
-                content_md5,
-                body,
-            )
-            .await
-    }
-
-    /// Intercepts [`MultipartUploadBackend::list_parts`]. Default delegates to `inner`.
-    async fn list_parts(
-        &self,
-        inner: &InMemoryBackend,
-        id: &ObjectId,
-        upload_id: &UploadId,
-        max_parts: Option<u32>,
-        part_number_marker: Option<PartNumber>,
-    ) -> Result<ListPartsResponse> {
-        inner
-            .list_parts(id, upload_id, max_parts, part_number_marker)
-            .await
-    }
-
-    /// Intercepts [`MultipartUploadBackend::abort_multipart`]. Default delegates to `inner`.
-    async fn abort_multipart(
-        &self,
-        inner: &InMemoryBackend,
-        id: &ObjectId,
-        upload_id: &UploadId,
-    ) -> Result<AbortMultipartResponse> {
-        inner.abort_multipart(id, upload_id).await
-    }
-
-    /// Intercepts [`MultipartUploadBackend::complete_multipart`]. Default delegates to `inner`.
-    async fn complete_multipart(
-        &self,
-        inner: &InMemoryBackend,
-        id: &ObjectId,
-        upload_id: &UploadId,
-        parts: Vec<CompletedPart>,
-        access_time: Timestamp,
-    ) -> Result<CompleteMultipartResponse> {
-        inner
-            .complete_multipart(id, upload_id, parts, access_time)
-            .await
-    }
-
     // --- Resumable upload methods ---
 
     /// Intercepts [`Backend::create_upload_session`]. Default delegates to `inner`.
@@ -409,10 +331,6 @@ impl<H: Hooks> Backend for TestBackend<H> {
 
     fn upload_granularity(&self) -> u64 {
         self.hooks.upload_granularity(&self.inner)
-    }
-
-    fn as_multipart_upload_backend(&self) -> Result<&dyn MultipartUploadBackend> {
-        Ok(self)
     }
 
     async fn put_object(
@@ -589,73 +507,6 @@ impl<H: Hooks> HighVolumeBackend for TestBackend<H> {
     ) -> Result<SetExpiryResponse> {
         self.hooks
             .compare_and_update(&self.inner, id, current, update, access_time)
-            .await
-    }
-}
-
-#[async_trait::async_trait]
-impl<H: Hooks> MultipartUploadBackend for TestBackend<H> {
-    async fn initiate_multipart(
-        &self,
-        id: &ObjectId,
-        metadata: &Metadata,
-    ) -> Result<InitiateMultipartResponse> {
-        self.hooks
-            .initiate_multipart(&self.inner, id, metadata)
-            .await
-    }
-
-    async fn upload_part(
-        &self,
-        id: &ObjectId,
-        upload_id: &UploadId,
-        part_number: PartNumber,
-        content_length: u64,
-        content_md5: Option<&str>,
-        body: ClientStream,
-    ) -> Result<UploadPartResponse> {
-        self.hooks
-            .upload_part(
-                &self.inner,
-                id,
-                upload_id,
-                part_number,
-                content_length,
-                content_md5,
-                body,
-            )
-            .await
-    }
-
-    async fn list_parts(
-        &self,
-        id: &ObjectId,
-        upload_id: &UploadId,
-        max_parts: Option<u32>,
-        part_number_marker: Option<PartNumber>,
-    ) -> Result<ListPartsResponse> {
-        self.hooks
-            .list_parts(&self.inner, id, upload_id, max_parts, part_number_marker)
-            .await
-    }
-
-    async fn abort_multipart(
-        &self,
-        id: &ObjectId,
-        upload_id: &UploadId,
-    ) -> Result<AbortMultipartResponse> {
-        self.hooks.abort_multipart(&self.inner, id, upload_id).await
-    }
-
-    async fn complete_multipart(
-        &self,
-        id: &ObjectId,
-        upload_id: &UploadId,
-        parts: Vec<CompletedPart>,
-        access_time: Timestamp,
-    ) -> Result<CompleteMultipartResponse> {
-        self.hooks
-            .complete_multipart(&self.inner, id, upload_id, parts, access_time)
             .await
     }
 }

@@ -143,7 +143,6 @@ impl ApiError {
 
             ApiError::Service(error) => match error.kind() {
                 ServiceErrorKind::InvalidMetadata
-                | ServiceErrorKind::InvalidUploadId
                 | ServiceErrorKind::InvalidUploadSessionToken
                 | ServiceErrorKind::ClientStream
                 | ServiceErrorKind::ChunkExceedsUploadLength { .. }
