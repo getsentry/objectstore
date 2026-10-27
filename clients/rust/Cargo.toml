@@ -14,7 +14,7 @@ publish = true
 features = ["resumable-upload-api"]
 
 [dependencies]
-async-compression = { workspace = true, features = ["tokio", "zstd"] }
+async-compression = { workspace = true, features = ["gzip", "tokio", "zstd"] }
 bytes = { workspace = true }
 futures-util = { workspace = true }
 infer = { workspace = true }
@@ -33,6 +33,7 @@ zstd-safe = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }
+flate2 = { workspace = true }
 futures-util = { workspace = true }
 http-body-util = { workspace = true }
 jsonwebtoken = { workspace = true }

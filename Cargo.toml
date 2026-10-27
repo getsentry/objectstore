@@ -52,6 +52,7 @@ console = "0.16.3"
 ed25519-dalek = { version = "2.2.0" }
 elegant-departure = "0.3.2"
 figment = "0.10.19"
+flate2 = "1.1.9"
 futures = "0.3.32"
 futures-util = "0.3.32"
 gcp_auth = "0.12.6"
