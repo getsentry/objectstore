@@ -5,7 +5,8 @@ on:
     branches:
       - main
       - release/**
-      - release-library/**
+      - release-py/**
+      - release-rust/**
 
   pull_request:
 
@@ -244,7 +245,7 @@ jobs:
         if: github.ref == 'refs/heads/main'
 
   validate_gocd:
-    if: ${{ !startsWith(github.ref, 'refs/heads/release/') && !startsWith(github.ref, 'refs/heads/release-library/') }}
+    if: ${{ !startsWith(github.ref, 'refs/heads/release/') && !startsWith(github.ref, 'refs/heads/release-py/') && !startsWith(github.ref, 'refs/heads/release-rust/') }}
     name: Validate GoCD Pipelines
     runs-on: ubuntu-latest
 

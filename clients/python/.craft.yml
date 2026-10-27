@@ -1,13 +1,13 @@
 changelog:
   policy: auto
-  # Categories in `.github/release.yml` are the per-client headings; no scope subheadings.
+  # Group entries only by the categories in `.github/release.yml`.
   scopeGrouping: false
-preReleaseCommand: ../scripts/bump-version-clients.sh
-releaseBranchPrefix: release-library
+preReleaseCommand: ../../scripts/bump-version-py-client.sh
+releaseBranchPrefix: release-py
 
 targets:
   - name: github
-  - name: crates
+    tagPrefix: py-client@
   - name: pypi
   - name: sentry-pypi
     internalPypiRepo: getsentry/pypi
