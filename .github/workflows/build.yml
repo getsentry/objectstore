@@ -32,8 +32,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          # libcurl4-openssl-dev: librdkafka 2.12 includes curl headers even when built
-          # without curl (fixed upstream, unreleased).
+          # Workaround: rdkafka-sys requires always curl headers, fixed with librdkafka >=2.15.0.
           sudo apt-get install -y llvm libcurl4-openssl-dev
 
       - name: Install sentry-cli

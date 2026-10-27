@@ -22,8 +22,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # librdkafka 2.12 includes curl headers even when built without curl (fixed upstream,
-      # unreleased). Needed by anything that builds the `kafka` feature.
+      # Workaround: rdkafka-sys requires always curl headers, fixed with librdkafka >=2.15.0.
       - name: Install libcurl-dev
         run: |
           sudo apt-get update
@@ -77,8 +76,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # librdkafka 2.12 includes curl headers even when built without curl (fixed upstream,
-      # unreleased). Needed by anything that builds the `kafka` feature.
+      # Workaround: rdkafka-sys requires always curl headers, fixed with librdkafka >=2.15.0.
       - name: Install libcurl-dev
         run: |
           sudo apt-get update
@@ -182,8 +180,7 @@ jobs:
       id-token: write
 
     steps:
-      # librdkafka 2.12 includes curl headers even when built without curl (fixed upstream,
-      # unreleased). Needed by anything that builds the `kafka` feature.
+      # Workaround: rdkafka-sys requires always curl headers, fixed with librdkafka >=2.15.0.
       - name: Install libcurl-dev
         run: |
           sudo apt-get update
