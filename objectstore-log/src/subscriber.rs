@@ -78,12 +78,11 @@ pub fn init(config: &LoggingConfig) {
 
 /// Builds the default [`EnvFilter`] when `RUST_LOG` is not set.
 ///
-/// Uses `INFO` as the base level with `DEBUG` for `tower_http` and `bigtable_rs::bigtable`, then
-/// sets `TRACE` for every internal objectstore crate discovered at build time.
-///
-/// `bigtable_rs::bigtable` logs failed background `PingAndWarm` requests and channel refreshes at
-/// `DEBUG`. The module is targeted directly because other `bigtable_rs` modules log per request.
+/// Uses `INFO` as the base level. Selected dependencies are raised to `DEBUG` where their debug
+/// logs are low-volume and useful for diagnosing production issues. Every internal objectstore
+/// crate discovered at build time is set to `TRACE`.
 fn default_filter() -> EnvFilter {
+    // Target `bigtable_rs::bigtable` rather than the whole crate: other modules log per request.
     let mut filter = EnvFilter::new("INFO,tower_http=DEBUG,bigtable_rs::bigtable=DEBUG");
 
     for name in CRATE_NAMES {
