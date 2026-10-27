@@ -1,9 +1,9 @@
 changelog:
   policy: auto
-  # Default is `true`, which adds a subheading per PR title scope.
+  # Group entries only by the categories in `.github/release.yml`.
   scopeGrouping: false
 preReleaseCommand: ../../scripts/bump-version-rs-client.sh
-releaseBranchPrefix: release-library/rs-client
+releaseBranchPrefix: release-rust
 # The crates target publishes from source, so there are no build artifacts.
 artifactProvider:
   name: none

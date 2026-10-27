@@ -1,1 +1,29 @@
-../../.github/release.yml
+# Changelog categories for this client. Keep in sync with the other client's
+# `.github/release.yml`.
+#
+# A custom file replaces Craft's defaults entirely. It groups entries by change
+# type, strips the `type(scope):` prefix, and catches every remaining change so
+# it still counts toward the version bump.
+changelog:
+  exclude:
+    labels:
+      - skip-changelog
+  categories:
+    - title: Breaking Changes
+      commit_patterns:
+        - "^(?<type>\\w+(?:\\([^)]+\\))?!:\\s*)"
+      semver: major
+    - title: New Features
+      commit_patterns:
+        - "^(?<type>feat(?:\\([^)]+\\))?:\\s*)"
+      semver: minor
+    - title: Bug Fixes
+      commit_patterns:
+        - "^(?<type>fix(?:\\([^)]+\\))?:\\s*)"
+      semver: patch
+    # Catch-all: any other conventional type, then any other title.
+    - title: Other Changes
+      commit_patterns:
+        - "^(?<type>\\w+(?:\\([^)]+\\))?:\\s*)"
+        - ".*"
+      semver: patch
