@@ -122,3 +122,21 @@ uuid = { version = "1.23.3", features = ["v4"] }
 yansi = "1.0.1"
 zstd = "0.13.3"
 zstd-safe = "7.2.4"
+
+# DO NOT MERGE: test the unreleased sentry-tracing layer API from
+# https://github.com/getsentry/sentry-rust/pull/1348. Patching (rather than
+# changing the `sentry` requirement) keeps every crate in the graph, including
+# `sentry_arroyo` and `objectstore-client` via `sentry-core`, on a single copy
+# of the SDK so they share one Hub.
+[patch.crates-io]
+sentry = { git = "https://github.com/getsentry/sentry-rust", branch = "szokeasaurusrex/deprecate-tracing-helpers" }
+sentry-actix = { git = "https://github.com/getsentry/sentry-rust", branch = "szokeasaurusrex/deprecate-tracing-helpers" }
+sentry-backtrace = { git = "https://github.com/getsentry/sentry-rust", branch = "szokeasaurusrex/deprecate-tracing-helpers" }
+sentry-contexts = { git = "https://github.com/getsentry/sentry-rust", branch = "szokeasaurusrex/deprecate-tracing-helpers" }
+sentry-core = { git = "https://github.com/getsentry/sentry-rust", branch = "szokeasaurusrex/deprecate-tracing-helpers" }
+sentry-debug-images = { git = "https://github.com/getsentry/sentry-rust", branch = "szokeasaurusrex/deprecate-tracing-helpers" }
+sentry-log = { git = "https://github.com/getsentry/sentry-rust", branch = "szokeasaurusrex/deprecate-tracing-helpers" }
+sentry-panic = { git = "https://github.com/getsentry/sentry-rust", branch = "szokeasaurusrex/deprecate-tracing-helpers" }
+sentry-tower = { git = "https://github.com/getsentry/sentry-rust", branch = "szokeasaurusrex/deprecate-tracing-helpers" }
+sentry-tracing = { git = "https://github.com/getsentry/sentry-rust", branch = "szokeasaurusrex/deprecate-tracing-helpers" }
+sentry-types = { git = "https://github.com/getsentry/sentry-rust", branch = "szokeasaurusrex/deprecate-tracing-helpers" }
