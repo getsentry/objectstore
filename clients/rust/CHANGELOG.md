@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.3.0
+
+### Breaking Changes
+
+- Remove the deprecated `Session::mint_token()` by @sentry-junior in [#717](https://github.com/getsentry/objectstore/pull/717)
+  - Replace `session.mint_token()` with `session.get_token()`.
+- Remove the deprecated `TokenGenerator::sign()` by @sentry-junior in [#716](https://github.com/getsentry/objectstore/pull/716)
+  - Replace `generator.sign(&scope)` with `generator.create_token(&scope).sign()`.
+- Remove the deprecated `PutBuilder::compression()` by @sentry-junior in [#715](https://github.com/getsentry/objectstore/pull/715)
+  - Replace `.compression(...)` with `.compress(...)` on put builders.
+- `Usecase::new` now returns a `Result`, and the panicking constructor is now `Usecase::from_static` by @sentry-junior in [#710](https://github.com/getsentry/objectstore/pull/710)
+  - Replace `Usecase::new("name")` with `Usecase::from_static("name")`.
+  - Replace `Usecase::try_new(name)` with `Usecase::new(name)`.
+- Mark `Error` as `#[non_exhaustive]` so new error variants can be added without a breaking change by @lcian in [#706](https://github.com/getsentry/objectstore/pull/706)
+  - Add a wildcard arm (`_ => ...`) to exhaustive `match` expressions on `objectstore_client::Error`.
+- Remove the multipart upload API (`Session::initiate_multipart_upload()`, `Session::resume_multipart_upload()`) and the `multipart` feature flag by @lcian in [#704](https://github.com/getsentry/objectstore/pull/704)
+  - Use resumable uploads instead.
+  - Remove `match` arms for the removed `Error::InvalidPartNumber`, `Error::InvalidUploadId` and `Error::MultipartComplete` variants.
+
+### New Features
+
+- Support gzip compression in server and clients by @sentry-junior in [#693](https://github.com/getsentry/objectstore/pull/693)
+
 ## 0.2.10
 
 ### Bug Fixes
