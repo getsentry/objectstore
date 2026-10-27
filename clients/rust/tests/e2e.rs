@@ -113,6 +113,39 @@ async fn uses_zstd_by_default() {
 }
 
 #[tokio::test]
+async fn roundtrips_gzip() {
+    let server = test_server().await;
+
+    let client = Client::builder(server.url("/"))
+        .token(test_token_generator())
+        .build()
+        .unwrap();
+    let usecase = Usecase::new("usecase")
+        .unwrap()
+        .with_compression(Compression::Gzip);
+    let session = client.session(usecase.for_organization(12345)).unwrap();
+
+    let stored_id = session.put("oh hai!").send().await.unwrap().key;
+
+    let request = session.get(&stored_id).decompress(false);
+    let response = request.send().await.unwrap().unwrap();
+    assert_eq!(response.metadata.compression, Some(Compression::Gzip));
+
+    let received_compressed = response.payload().await.unwrap();
+    let mut decompressed = Vec::new();
+    std::io::Read::read_to_end(
+        &mut flate2::read::GzDecoder::new(&received_compressed[..]),
+        &mut decompressed,
+    )
+    .unwrap();
+    assert_eq!(decompressed, b"oh hai!");
+
+    let response = session.get(&stored_id).send().await.unwrap().unwrap();
+    assert_eq!(response.metadata.compression, None);
+    assert_eq!(response.payload().await.unwrap(), "oh hai!");
+}
+
+#[tokio::test]
 async fn stores_precompressed_payload_verbatim() {
     let server = test_server().await;
 

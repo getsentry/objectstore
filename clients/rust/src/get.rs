@@ -1,6 +1,6 @@
 use std::{fmt, io};
 
-use async_compression::tokio::bufread::ZstdDecoder;
+use async_compression::tokio::bufread::{GzipDecoder, ZstdDecoder};
 use bytes::BytesMut;
 use futures_util::{StreamExt, TryStreamExt};
 use objectstore_types::metadata::{Compression, Metadata};
@@ -118,9 +118,9 @@ impl GetBuilder {
     }
 }
 
-/// Wraps a stream in a zstd decompression layer.
+/// Wraps a stream in a decompression layer.
 ///
-/// Decompresses if the metadata indicates zstd compression, `decompress` is `true`,
+/// Decompresses if the metadata indicates compression, `decompress` is `true`,
 /// and the stored encoding is not listed in `accept_encoding`. When the stored encoding
 /// is in `accept_encoding`, the payload is returned compressed and `metadata.compression`
 /// is preserved. Clears `metadata.compression` when decompression is applied.
@@ -141,7 +141,14 @@ pub(crate) fn maybe_decompress(
             decoder.multiple_members(true);
             ReaderStream::new(decoder).boxed()
         }
-        _ => stream,
+        (Some(Compression::Gzip), true) => {
+            metadata.compression = None;
+            let mut decoder = GzipDecoder::new(StreamReader::new(stream));
+            // Gzip streams may contain concatenated members (RFC 1952 §2.2).
+            decoder.multiple_members(true);
+            ReaderStream::new(decoder).boxed()
+        }
+        (Some(_), false) | (None, _) => stream,
     }
 }
 
@@ -239,6 +246,54 @@ mod tests {
         let mut metadata = no_compression_metadata();
         let out = maybe_decompress(stream, &mut metadata, true, &[Compression::Zstd]);
         assert_eq!(collect(out).await, payload);
+        assert_eq!(metadata.compression, None);
+    }
+
+    fn gzip_compress(data: &[u8]) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(data).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn gzip_metadata() -> Metadata {
+        Metadata {
+            compression: Some(Compression::Gzip),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn gzip_decompression() {
+        let payload = b"hello world";
+        let stream = raw_stream(&gzip_compress(payload));
+        let mut metadata = gzip_metadata();
+
+        let out = maybe_decompress(stream, &mut metadata, true, &[]);
+        assert_eq!(collect(out).await, payload);
+        assert_eq!(metadata.compression, None);
+    }
+
+    #[tokio::test]
+    async fn gzip_accept_encoding() {
+        let compressed = gzip_compress(b"hello world");
+        let stream = raw_stream(&compressed);
+        let mut metadata = gzip_metadata();
+
+        let out = maybe_decompress(stream, &mut metadata, true, &[Compression::Gzip]);
+        assert_eq!(collect(out).await, compressed);
+        assert_eq!(metadata.compression, Some(Compression::Gzip));
+    }
+
+    #[tokio::test]
+    async fn gzip_concatenated_members() {
+        let mut compressed = gzip_compress(b"hello ");
+        compressed.extend(gzip_compress(b"world"));
+        let stream = raw_stream(&compressed);
+        let mut metadata = gzip_metadata();
+
+        let out = maybe_decompress(stream, &mut metadata, true, &[]);
+        assert_eq!(collect(out).await, b"hello world");
         assert_eq!(metadata.compression, None);
     }
 

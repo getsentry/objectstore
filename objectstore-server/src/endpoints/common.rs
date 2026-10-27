@@ -13,6 +13,7 @@ use thiserror::Error;
 
 use crate::auth::AuthError;
 use crate::extractors::batch::BatchError;
+use crate::rate_limits::LimitExceeded;
 
 /// A JSON error response returned by the API.
 #[derive(Serialize, Deserialize, Debug)]
@@ -150,7 +151,7 @@ impl ApiError {
                 ServiceErrorKind::RangeNotSatisfiable { .. } => StatusCode::RANGE_NOT_SATISFIABLE,
                 ServiceErrorKind::UploadOffsetMismatch { .. } => StatusCode::CONFLICT,
                 ServiceErrorKind::UploadSessionGone => StatusCode::GONE,
-                ServiceErrorKind::AtCapacity => StatusCode::SERVICE_UNAVAILABLE,
+                ServiceErrorKind::AtCapacity => LimitExceeded::Capacity.status(),
                 ServiceErrorKind::Unsupported => StatusCode::NOT_IMPLEMENTED,
                 ServiceErrorKind::BackendRateLimited => StatusCode::TOO_MANY_REQUESTS,
                 ServiceErrorKind::BackendTimeout | ServiceErrorKind::BackendUnavailable => {
@@ -188,6 +189,12 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        if let ApiError::Service(e) = &self
+            && e.kind() == ServiceErrorKind::AtCapacity
+        {
+            return LimitExceeded::Capacity.into_response();
+        }
+
         self.capture();
         let body = ApiErrorResponse::from_error(&self);
         (self.status(), Json(body)).into_response()

@@ -127,7 +127,8 @@ Key configuration sections:
 - `service` — storage service parameters (backend concurrency limit)
 - `killswitches` — traffic blocking rules
 - `storage_cogs` — where backends publish their cost-tracking change stream; corresponds
-  to config on each backend. See [`change_stream`](objectstore_service::change_stream).
+  to config on each backend. Requires the `storage-cogs` Cargo feature. See
+  [`change_stream`](objectstore_service::change_stream).
 - `usecases` — per-use-case properties (expiration policy constraints)
 - `runtime` — worker threads, metrics interval
 - `sentry` / `metrics` / `logging` — observability
@@ -149,6 +150,11 @@ Bandwidth is checked before throughput; throughput checks global, usecase,
 scope, then explicit rules. The first exceeded limit determines the response.
 Responses identify only capacity protection or an exceeded traffic allowance;
 the specific limit is recorded in logs and metrics.
+
+Rejected requests, including those rejected by the web concurrency limit and
+service backpressure below, carry `x-envoy-ratelimited: true`. Envoy does not retry responses with
+this header, even if the route retries on `gateway-error`. Outlier detection
+still counts the 503 responses.
 
 ### Throughput
 

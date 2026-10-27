@@ -293,6 +293,16 @@ impl TieredStorage {
         }
     }
 
+    /// Records the size of a resumable upload chunk written to the long-term backend.
+    fn record_chunk_size(&self, id: &ObjectId, content_length: u64) {
+        objectstore_metrics::record!(
+            "put_chunk.size" = content_length,
+            usecase = id.usecase().to_string(),
+            backend_choice = BackendChoice::LongTerm.as_str(),
+            backend_type = self.backend_type(&BackendChoice::LongTerm),
+        );
+    }
+
     /// Updates a latency timer to identify the selected route.
     fn tag_backend(&self, timer: &mut TimerGuard, choice: &BackendChoice) {
         timer.set_tag("backend_choice", choice.as_str());
@@ -486,6 +496,9 @@ impl Backend for TieredStorage {
             }
             return Err(error);
         }
+        if metadata.origin.is_none() {
+            objectstore_metrics::count!("put.origin_missing", usecase = id.usecase().to_string());
+        }
         let token = TieredResumableToken {
             revision: revision.key,
             inner,
@@ -505,6 +518,12 @@ impl Backend for TieredStorage {
         content_length: u64,
         stream: ClientStream,
     ) -> Result<UploadProgress> {
+        let timer = objectstore_metrics::timer!(
+            "put_chunk.latency",
+            usecase = session.object_id.usecase().to_string(),
+            backend_choice = BackendChoice::LongTerm.as_str(),
+            backend_type = self.backend_type(&BackendChoice::LongTerm),
+        );
         let tiered = TieredResumableToken::decode(&session.backend_token)?;
         let time_expires = tiered.time_expires;
         let inner_session = tiered.into_inner_session(session);
@@ -536,10 +555,12 @@ impl Backend for TieredStorage {
                 .long_term
                 .put_chunk(&inner_session, offset, content_length, stream)
                 .await?;
-            return match progress {
-                UploadProgress::Incomplete { .. } => Ok(progress),
-                UploadProgress::Complete => Err(ErrorKind::UploadSessionGone.into()),
-            };
+            if progress == UploadProgress::Complete {
+                return Err(ErrorKind::UploadSessionGone.into());
+            }
+            timer.record();
+            self.record_chunk_size(id, content_length);
+            return Ok(progress);
         }
 
         // Read the publication precondition while verifying the LT offset.
@@ -557,7 +578,9 @@ impl Backend for TieredStorage {
             UploadProgress::Incomplete { .. } => {}
         }
         let current = match current? {
+            // A retried final chunk whose upload was already published writes nothing.
             TieredMetadata::Tombstone(t) if t.target == *revision => {
+                timer.record();
                 return Ok(UploadProgress::Complete);
             }
             TieredMetadata::Tombstone(t) => Some(t.target),
@@ -600,6 +623,16 @@ impl Backend for TieredStorage {
             )
             .await?;
         guard.advance(ChangePhase::compare_and_write(written));
+
+        timer.record();
+        self.record_chunk_size(id, content_length);
+        objectstore_metrics::record!(
+            "put.size" = session.upload_length.get(),
+            usecase = id.usecase().to_string(),
+            backend_choice = BackendChoice::LongTerm.as_str(),
+            backend_type = self.backend_type(&BackendChoice::LongTerm),
+            upload_type = "resumable",
+        );
         Ok(UploadProgress::Complete)
     }
 

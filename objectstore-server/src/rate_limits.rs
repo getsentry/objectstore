@@ -19,16 +19,30 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
+use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use futures_util::Stream;
-use http::StatusCode;
+use http::{HeaderValue, StatusCode};
 use objectstore_service::id::ObjectContext;
 use objectstore_types::scope::Scopes;
 use objectstore_types::usecase::Usecase;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Response header that prevents Envoy from retrying a response.
+///
+/// Envoy does not retry a response with this header, even if the route retries on
+/// `gateway-error` or `5xx`. Only the `envoy-ratelimited` retry condition retries it. Outlier
+/// detection still counts the response. See the [Envoy router
+/// documentation](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/router_filter#x-envoy-ratelimited).
+pub const HEADER_ENVOY_RATELIMITED: &str = "x-envoy-ratelimited";
+
 /// Classifies a rejected request as capacity protection or an exceeded traffic allowance.
+///
+/// This is the single conversion for rate limit and capacity rejections into HTTP responses.
+/// Its [`IntoResponse`] implementation sets the status from [`status`](Self::status) and marks
+/// the response with [`HEADER_ENVOY_RATELIMITED`], so that Envoy does not retry a rejection and
+/// add load to an instance that is already at capacity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum LimitExceeded {
     /// A general capacity protection limit was exceeded.
@@ -46,6 +60,16 @@ impl LimitExceeded {
             Self::Capacity => StatusCode::SERVICE_UNAVAILABLE,
             Self::Allowance => StatusCode::TOO_MANY_REQUESTS,
         }
+    }
+}
+
+impl IntoResponse for LimitExceeded {
+    fn into_response(self) -> Response {
+        let mut response = (self.status(), self.to_string()).into_response();
+        response
+            .headers_mut()
+            .insert(HEADER_ENVOY_RATELIMITED, HeaderValue::from_static("true"));
+        response
     }
 }
 
