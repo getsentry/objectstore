@@ -122,10 +122,6 @@ cargo build --release --locked
 
 The server binary will be located at `target/release/objectstore`.
 
-Release images are built with `--features storage-cogs`, which compiles
-`librdkafka` from source and additionally requires `cmake` and the libcurl
-headers.
-
 ### Docker Container
 
 To build the Docker container, first build the release binary, then build the
