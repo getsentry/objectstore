@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.3.0
+
+### Breaking Changes
+
+- Split the signing key from the token policy: `SecretKey(kid, secret_key)` now only holds the EdDSA key, and `TokenGenerator(key, expiry_seconds=60, permissions=None)` wraps it with the token defaults and is what you pass to `Client(token=...)`. The deprecated `sign_for_scope()` alias is removed. by @sentry-junior in [#721](https://github.com/getsentry/objectstore/pull/721)
+  - Replace `SecretKey(kid, secret_key, expiry_seconds, permissions)` or `TokenGenerator(kid, secret_key, ...)` with `TokenGenerator(SecretKey(kid, secret_key), expiry_seconds, permissions)`.
+    ```python
+    # Before
+    client = Client(url, token=SecretKey(kid, secret_key, expiry_seconds=300))
+    
+    # After
+    key = SecretKey(kid, secret_key)
+    client = Client(url, token=TokenGenerator(key, expiry_seconds=300))
+    ```
+  - Replace `.sign_for_scope(...)` with `.token_for_scope(...)`.
+- Remove the deprecated `compression` argument from `Session.put()` by @sentry-junior in [#718](https://github.com/getsentry/objectstore/pull/718)
+  - Replace `session.put(..., compression=...)` with `session.put(..., compress=...)`.
+- Remove the deprecated `propagate_traces` argument from `Client` by @sentry-junior in [#714](https://github.com/getsentry/objectstore/pull/714)
+  - Drop `propagate_traces=...` from `Client(...)` calls. Sentry's `StdlibIntegration`, enabled by default, already propagates traces on Objectstore requests.
+- Remove the multipart upload API (`Session::initiate_multipart_upload()`, `Session::resume_multipart_upload()`) and the `multipart` feature flag by @lcian in [#704](https://github.com/getsentry/objectstore/pull/704)
+  - Use resumable uploads instead.
+  - Remove `match` arms for the removed `Error::InvalidPartNumber`, `Error::InvalidUploadId` and `Error::MultipartComplete` variants.
+
+### New Features
+
+- Add a `response_content_disposition` option (`"inline"` or `"attachment"`) to `Session.object_url()` and `Session.presigned_object_url()`. Pre-signed URLs include it in their signature. by @jan-auer in [#696](https://github.com/getsentry/objectstore/pull/696)
+- Support gzip compression in server and clients by @sentry-junior in [#693](https://github.com/getsentry/objectstore/pull/693)
+
 ## 0.2.10
 
 ### New Features
