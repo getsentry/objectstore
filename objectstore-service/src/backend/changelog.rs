@@ -130,7 +130,7 @@ impl ChangeManager {
             id,
             change,
             phase: ChangePhase::Recorded,
-            manager: self.clone(),
+            manager: self,
             _token: token,
         };
 
@@ -387,15 +387,12 @@ impl ChangeState {
 
 impl Drop for ChangeState {
     fn drop(&mut self) {
-        match self.phase {
-            ChangePhase::Completed => {}
-            _ => {
-                objectstore_log::error!(
-                    change = ?self.change,
-                    phase = ?self.phase,
-                    "Operation dropped without completing cleanup"
-                );
-            }
+        if self.phase != ChangePhase::Completed {
+            objectstore_log::error!(
+                change = ?self.change,
+                phase = ?self.phase,
+                "Operation dropped without completing cleanup"
+            );
         }
     }
 }

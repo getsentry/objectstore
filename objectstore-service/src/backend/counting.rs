@@ -15,7 +15,6 @@
 //! [`StreamExecutor`]: crate::streaming::StreamExecutor
 
 use std::num::NonZeroU64;
-use std::sync::Arc;
 
 use objectstore_types::metadata::Metadata;
 use objectstore_types::range::ByteRange;
@@ -45,14 +44,13 @@ fn count(usecase: &Usecase) {
 /// See the [module documentation](self) for how it should be used.
 #[derive(Debug)]
 pub struct CountingBackend {
-    inner: Arc<dyn Backend>,
+    inner: Box<dyn Backend>,
 }
 
 impl CountingBackend {
     /// Creates a [`CountingBackend`] that wraps `inner` and increments `cogs.usage`
     /// before delegating operations to it.
     pub fn new(inner: Box<dyn Backend>) -> Self {
-        let inner: Arc<dyn Backend> = Arc::from(inner);
         Self { inner }
     }
 }
