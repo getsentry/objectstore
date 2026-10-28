@@ -362,12 +362,12 @@ impl PutBuilder {
         )
         .await?;
         if let payload::PreparedBody::Replayable(body) = &prepared {
-            let create = crate::resumable::implementation::CreateResumableUploadBuilder {
-                session: self.session.clone(),
-                total_length: body.len(),
-                key: self.key.clone(),
-                metadata: self.metadata,
-            };
+            let create = crate::resumable::implementation::CreateResumableUploadBuilder::new(
+                self.session.clone(),
+                body.len(),
+                self.key.clone(),
+                self.metadata,
+            );
             if let Ok(Some(upload)) = create.send().await {
                 return automatic::upload(body, upload).await;
             }

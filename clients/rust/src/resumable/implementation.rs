@@ -43,14 +43,24 @@ struct SessionQuery<'a> {
 /// examples on using this API.
 #[derive(Clone, Debug)]
 pub struct ResumableUpload {
-    pub(super) session: Session,
-    pub(super) key: ObjectKey,
-    pub(super) token: SessionToken,
-    pub(super) total_length: Option<u64>,
-    pub(super) granularity: Option<u64>,
+    session: Session,
+    key: ObjectKey,
+    token: SessionToken,
+    total_length: Option<u64>,
+    granularity: Option<u64>,
 }
 
 impl ResumableUpload {
+    pub(super) fn resume(session: Session, key: ObjectKey, token: SessionToken) -> Self {
+        Self {
+            session,
+            key,
+            token,
+            total_length: None,
+            granularity: None,
+        }
+    }
+
     /// Returns the object key bound to this upload.
     pub fn key(&self) -> &str {
         &self.key
@@ -159,13 +169,27 @@ impl ResumableUpload {
 /// A builder for creating a resumable upload.
 #[derive(Debug)]
 pub struct CreateResumableUploadBuilder {
-    pub(crate) session: Session,
-    pub(crate) total_length: u64,
-    pub(crate) key: Option<ObjectKey>,
-    pub(crate) metadata: Metadata,
+    session: Session,
+    total_length: u64,
+    key: Option<ObjectKey>,
+    metadata: Metadata,
 }
 
 impl CreateResumableUploadBuilder {
+    pub(crate) fn new(
+        session: Session,
+        total_length: u64,
+        key: Option<ObjectKey>,
+        metadata: Metadata,
+    ) -> Self {
+        Self {
+            session,
+            total_length,
+            key,
+            metadata,
+        }
+    }
+
     /// Sets an explicit object key instead of asking the server to generate one.
     pub fn key(mut self, key: impl Into<ObjectKey>) -> Self {
         self.key = Some(key.into()).filter(|key| !key.is_empty());
