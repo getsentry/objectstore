@@ -1,4 +1,6 @@
-//! Prepare replayable wire bytes and give each file request exclusive reader ownership.
+//! Prepare replayable payloads and manage file-reader lifetimes.
+//!
+//! Uncompressed and precompressed inputs are reused; client compression spools to a temporary file.
 
 use std::io::{self, SeekFrom};
 use std::path::PathBuf;
@@ -172,7 +174,8 @@ impl ReplayBody {
     }
 }
 
-/// Explicitly stoppable because HTTP may retain the request body after returning a response.
+/// A stoppable reader for one file upload request.
+///
 /// Dropping this handle signals cancellation; finishing also waits for pending disk IO.
 struct FileReader {
     stop: oneshot::Sender<()>,

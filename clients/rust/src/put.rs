@@ -108,6 +108,8 @@ impl Session {
 
     /// Creates or replaces an object using the contents of an opened file.
     ///
+    /// Uploads from the current position. The file must remain unchanged until completion.
+    ///
     /// The file descriptor is held open from the moment this method is called until the
     /// upload completes. When enqueueing many files via [`Session::many`], prefer
     /// [`put_path`](Session::put_path) instead: it defers opening the file until just before
@@ -118,6 +120,8 @@ impl Session {
     }
 
     /// Creates or replaces an object using the contents of the file at `path`.
+    ///
+    /// The file must remain unchanged while the upload is running.
     ///
     /// Unlike [`put_file`](Session::put_file), this method defers opening the file until the
     /// request is actually sent. When enqueueing many file uploads via [`Session::many`], this
@@ -136,17 +140,11 @@ impl Session {
 ///
 /// # Automatic resumable uploads
 ///
-/// Buffers and regular files (including paths) use resumable uploads at 256 MiB by default,
-/// measured from the current position before client compression. Override or disable this with
-/// [`Self::resumable_threshold_bytes`]. Streams, generic readers, and files of unknown size use
-/// direct uploads. Files must remain unchanged during upload.
+/// Large buffers and regular files with known lengths use resumable uploads automatically,
+/// recovering from interrupted requests. Streams, generic readers, and uploads queued through
+/// [`Session::many`] do not use resumables. No feature flag is required.
 ///
-/// Input is reused unless compression is needed, in which case the compressed payload is spooled
-/// to a temporary file. Use [`crate::ClientBuilder::spool_dir`] to choose its directory.
-/// Transient failures and writes making no progress are retried up to twice. Acknowledged
-/// progress resets the retry count.
-///
-/// No feature flag is required. Uploads queued through [`Session::many`] do not use resumables.
+/// Configure this with [`Self::resumable_threshold_bytes`] and [`crate::ClientBuilder::spool_dir`].
 #[derive(Debug)]
 pub struct PutBuilder {
     pub(crate) session: Session,
@@ -160,8 +158,10 @@ pub struct PutBuilder {
 impl PutBuilder {
     /// Sets the minimum remaining input size for automatic resumable uploads.
     ///
-    /// Inherits [`crate::Usecase::resumable_threshold_bytes`] unless overridden. Pass [`None`]
-    /// to disable or zero to include every supported payload. See [`PutBuilder`] for eligibility.
+    /// Measures remaining bytes before client compression. Inherits the
+    /// [`Usecase` threshold](crate::Usecase::with_resumable_threshold_bytes) unless overridden.
+    /// Pass [`None`] to disable or zero to include every supported payload.
+    /// See [`PutBuilder`] for eligibility.
     ///
     /// ```no_run
     /// # async fn example(session: objectstore_client::Session) -> objectstore_client::Result<()> {

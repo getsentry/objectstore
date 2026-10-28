@@ -153,9 +153,8 @@ session.put("payload")
 
 ### Automatic Resumable Uploads
 
-Large uploads automatically use resumable uploads and resend only what the server hasn't
-stored after a failed write. No feature flag is required.
-
+Large PUTs automatically use resumable uploads, resending only what the server hasn't
+stored after a failed request.
 See [`PutBuilder`] for eligibility, configuration, and recovery behavior.
 
 ### Resumable Upload API

@@ -1,4 +1,7 @@
 //! Write prepared payloads, recovering from authoritative server progress.
+//!
+//! Writes and progress probes share two retries, reset when the server acknowledges progress.
+//! Terminal failures attempt cancellation and preserve the original error.
 
 use std::io;
 use std::time::Duration;

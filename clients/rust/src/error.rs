@@ -58,8 +58,7 @@ pub enum Error {
     },
     /// An automatic resumable upload failed after session creation.
     ///
-    /// The source preserves the failure that caused the upload to stop. Cancellation errors
-    /// are ignored so they cannot replace that failure.
+    /// The source contains the original failure.
     #[error("upload failed: {0}")]
     UploadFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// A resumable upload session expired, was canceled, or could otherwise not be found.
