@@ -5,15 +5,13 @@
 
 use std::io::{self, SeekFrom};
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Poll, ready};
 
 use bytes::Bytes;
 use futures_util::{StreamExt, stream};
 use tempfile::NamedTempFile;
 use tokio::fs::File;
-use tokio::io::{AsyncRead, AsyncSeekExt, AsyncWriteExt, ReadBuf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use super::{CompressionMode, PutBody};
 use crate::ClientStream;
@@ -146,31 +144,15 @@ impl ReplayableBody {
         };
         file.seek(SeekFrom::Start(offset)).await?;
         let mut remaining = self.len() - offset;
-        let mut buffer = vec![0; 64 * 1024];
-        Ok(stream::poll_fn(move |cx| {
-            if remaining == 0 {
-                return Poll::Ready(None);
+        Ok(async_stream::try_stream! {
+            while remaining > 0 {
+                let mut bytes = vec![0; remaining.min(64 * 1024) as usize];
+                file.read_exact(&mut bytes).await
+                    .map_err(|error| io::Error::other(ReadError(error)))?;
+                remaining -= bytes.len() as u64;
+                yield Bytes::from(bytes);
             }
-            let count = remaining.min(buffer.len() as u64) as usize;
-            let mut read = ReadBuf::new(&mut buffer[..count]);
-            let result = ready!(Pin::new(&mut file).poll_read(cx, &mut read)).and_then(|()| {
-                if read.filled().is_empty() {
-                    Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "upload file became shorter",
-                    ))
-                } else {
-                    remaining -= read.filled().len() as u64;
-                    Ok(Bytes::copy_from_slice(read.filled()))
-                }
-            });
-            if result.is_err() {
-                remaining = 0;
-            }
-            Poll::Ready(Some(
-                result.map_err(|error| io::Error::other(ReadError(error))),
-            ))
-        })
+        }
         .boxed())
     }
 }

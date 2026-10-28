@@ -15,6 +15,7 @@ features = ["resumable-upload-api"]
 
 [dependencies]
 async-compression = { workspace = true, features = ["gzip", "tokio", "zstd"] }
+async-stream = { workspace = true }
 bytes = { workspace = true }
 futures-util = { workspace = true }
 infer = { workspace = true }
