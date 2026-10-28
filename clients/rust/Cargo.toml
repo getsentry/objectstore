@@ -28,7 +28,7 @@ sentry-core = { version = ">=0.41", default-features = false, features = ["clien
 serde = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
-tokio = { version = "1.45.0", default-features = false, features = ["fs", "io-util", "rt", "sync", "time"] }
+tokio = { version = "1.45.0", default-features = false, features = ["fs", "io-util", "rt", "time"] }
 tokio-util = { workspace = true, features = ["io"] }
 url = { workspace = true }
 zstd-safe = { workspace = true }

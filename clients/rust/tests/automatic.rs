@@ -231,51 +231,51 @@ async fn streams_and_readers_remain_direct() {
 }
 
 #[tokio::test]
-async fn files_use_remaining_length_and_paths_open_lazily() {
+async fn files_remain_direct_and_paths_open_lazily() {
     let server = Server::new([
+        Reply::Status(200),
+        Reply::Status(200),
         Reply::Create,
         Reply::Offset(204, 2),
         Reply::Complete,
-        Reply::Status(200),
-        Reply::Create,
-        Reply::Complete,
     ])
     .await;
-    let session = server.session(Some(4));
+    let session = server.session(Some(0));
     let mut temporary = tempfile::NamedTempFile::new().unwrap();
     temporary.write_all(b"prefix-data").unwrap();
-    let mut file = tokio::fs::File::open(temporary.path()).await.unwrap();
-    file.seek(SeekFrom::Start(7)).await.unwrap();
-    session.put_file(file).send().await.unwrap();
-    let mut file = tokio::fs::File::open(temporary.path()).await.unwrap();
-    file.seek(SeekFrom::Start(8)).await.unwrap();
-    session.put_file(file).send().await.unwrap();
+    for position in [7, 8] {
+        let mut file = tokio::fs::File::open(temporary.path()).await.unwrap();
+        file.seek(SeekFrom::Start(position)).await.unwrap();
+        session.put_file(file).send().await.unwrap();
+    }
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("created-after-builder");
     let put = session.put_path(&path);
     tokio::fs::write(path, b"path").await.unwrap();
     put.send().await.unwrap();
     let requests = server.finish();
-    assert_eq!(requests[0].headers["upload-length"], "4");
-    assert_eq!(requests[1].body, "data");
-    assert_eq!(requests[2].body, "ta");
-    assert_eq!(requests[3].body, "ata");
-    assert_eq!(requests[5].body, "path");
+    assert_eq!(requests[0].body, "data");
+    assert_eq!(requests[1].body, "ata");
+    assert!(
+        requests[..2]
+            .iter()
+            .all(|r| !r.headers.contains_key("upload-length"))
+    );
+    assert_eq!(requests[2].headers["upload-length"], "4");
+    assert_eq!(requests[3].body, "path");
+    assert_eq!(requests[4].body, "th");
 }
 
 #[tokio::test]
-async fn file_retry_after_response_before_body_is_consumed() {
+async fn path_retry_after_response_before_body_is_consumed() {
     let server = Server::new([Reply::Create, Reply::EarlyOffset(4), Reply::Complete]).await;
     let data: Vec<u8> = (0..8 * 1024 * 1024).map(|n| (n % 251) as u8).collect();
-    let mut file = tempfile::tempfile().unwrap();
+    let mut file = tempfile::NamedTempFile::new().unwrap();
     file.write_all(&data).unwrap();
-    std::io::Seek::rewind(&mut file).unwrap();
-    let put = server
-        .session(Some(0))
-        .put_file(tokio::fs::File::from_std(file));
+    let put = server.session(Some(0)).put_path(file.path());
     tokio::time::timeout(Duration::from_secs(10), put.send())
         .await
-        .expect("retry must recover ownership of the previous request's file")
+        .expect("retry must use an independent reader")
         .unwrap();
     let requests = server.finish();
     assert_eq!(requests[2].method, Method::PUT);
@@ -573,16 +573,14 @@ async fn local_file_errors_are_not_retried() {
 }
 
 #[tokio::test]
-async fn compressed_file_replays_the_prepared_bytes() {
+async fn compressed_path_replays_the_prepared_bytes() {
     for compression in [Compression::Zstd, Compression::Gzip] {
         let server = Server::new([Reply::Create, Reply::Offset(204, 4), Reply::Complete]).await;
         let mut file = tempfile::NamedTempFile::new().unwrap();
-        file.write_all(b"prefix-payload").unwrap();
-        let mut input = tokio::fs::File::open(file.path()).await.unwrap();
-        input.seek(SeekFrom::Start(7)).await.unwrap();
+        file.write_all(b"payload").unwrap();
         server
             .session(Some(0))
-            .put_file(input)
+            .put_path(file.path())
             .compress(compression)
             .send()
             .await
@@ -594,32 +592,16 @@ async fn compressed_file_replays_the_prepared_bytes() {
     }
 }
 
-#[tokio::test]
-async fn preparation_read_failure_does_not_fall_back() {
-    let server = Server::new([]).await;
-    let mut file = tempfile::NamedTempFile::new().unwrap();
-    file.write_all(b"payload").unwrap();
-    let write_only = std::fs::OpenOptions::new()
-        .write(true)
-        .open(file.path())
-        .unwrap();
-    let error = server
-        .session(Some(0))
-        .put_file(tokio::fs::File::from_std(write_only))
-        .compress(Compression::Zstd)
-        .send()
-        .await
-        .unwrap_err();
-    assert!(matches!(error, Error::Io(_)));
-    assert!(server.finish().is_empty());
-}
-
 #[cfg(unix)]
 #[tokio::test]
-async fn non_regular_files_use_direct_uploads() {
+async fn non_regular_paths_use_direct_uploads() {
     let server = Server::new([Reply::Status(200)]).await;
-    let file = tokio::fs::File::open("/dev/null").await.unwrap();
-    server.session(Some(0)).put_file(file).send().await.unwrap();
+    server
+        .session(Some(0))
+        .put_path("/dev/null")
+        .send()
+        .await
+        .unwrap();
     let requests = server.finish();
     assert!(!requests[0].headers.contains_key("upload-length"));
     assert!(requests[0].body.is_empty());

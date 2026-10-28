@@ -131,6 +131,7 @@ impl ClientBuilder {
     ///
     /// By default, the system temporary directory is used. The directory must already exist.
     /// If a temporary file cannot be created, uploads fall back to direct streaming.
+    /// Temporary storage may outlive the upload while HTTP readers remain open.
     pub fn spool_dir(self, path: impl Into<PathBuf>) -> Self {
         let Ok(mut inner) = self.0 else { return self };
         inner.spool_dir = Some(path.into());

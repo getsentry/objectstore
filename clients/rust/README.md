@@ -155,7 +155,8 @@ session.put("payload")
 
 Large PUTs automatically use resumable uploads, resending only what the server hasn't
 stored after a failed request.
-See [`PutBuilder`] for eligibility, configuration, and recovery behavior.
+See [`PutBuilder`] for eligibility, configuration, and recovery behavior, and
+[`Session::put_path`] for the path stability requirement.
 
 ### Resumable Upload API
 

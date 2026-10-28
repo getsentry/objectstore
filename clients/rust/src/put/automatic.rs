@@ -7,12 +7,12 @@ use std::io;
 use std::time::Duration;
 
 use super::PutResponse;
-use super::payload::ReplayableBody;
+use super::payload::{ReadError, ReplayableBody};
 use crate::Error;
 use crate::resumable::implementation::{ResumableUpload, UploadProgress};
 
 pub(super) async fn upload(
-    body: &mut ReplayableBody,
+    body: &ReplayableBody,
     handle: ResumableUpload,
 ) -> crate::Result<PutResponse> {
     match upload_inner(body, &handle).await {
@@ -26,15 +26,14 @@ pub(super) async fn upload(
     }
 }
 
-async fn upload_inner(body: &mut ReplayableBody, handle: &ResumableUpload) -> crate::Result<()> {
+async fn upload_inner(body: &ReplayableBody, handle: &ResumableUpload) -> crate::Result<()> {
     let mut offset = 0;
     let mut retries = 0;
     loop {
         let remaining = body.len() - offset;
-        let write = body
-            .with_stream(offset, |stream| async {
-                handle.put_stream(offset, remaining, stream).send().await
-            })
+        let write = handle
+            .put_stream(offset, remaining, body.stream(offset).await?)
+            .send()
             .await;
         let progress = match authoritative_progress(write) {
             Ok(UploadProgress::Incomplete { offset: next }) if next == offset => {
@@ -86,6 +85,17 @@ fn authoritative_progress(result: crate::Result<UploadProgress>) -> crate::Resul
 }
 
 fn is_transient(error: &Error) -> bool {
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(error) = source {
+        if error
+            .downcast_ref::<io::Error>()
+            .and_then(io::Error::get_ref)
+            .is_some_and(|inner| inner.is::<ReadError>())
+        {
+            return false;
+        }
+        source = error.source();
+    }
     match error {
         Error::Reqwest(error) => match error.status() {
             Some(status) => matches!(status.as_u16(), 408 | 429 | 502 | 503 | 504),

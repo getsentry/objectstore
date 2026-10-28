@@ -97,7 +97,7 @@ impl Session {
 
     /// Creates or replaces an object using an [`AsyncRead`] payload.
     ///
-    /// Readers use direct uploads. Use [`Self::put_file`] for automatic resumable file uploads.
+    /// Readers use direct uploads. Use [`Self::put_path`] for automatic resumable file uploads.
     pub fn put_read<R>(&self, body: R) -> PutBuilder
     where
         R: AsyncRead + Send + Sync + 'static,
@@ -108,7 +108,7 @@ impl Session {
 
     /// Creates or replaces an object using the contents of an opened file.
     ///
-    /// Uploads from the current position. The file must remain unchanged until completion.
+    /// Uploads from the current position using a direct request, regardless of the resumable threshold.
     ///
     /// The file descriptor is held open from the moment this method is called until the
     /// upload completes. When enqueueing many files via [`Session::many`], prefer
@@ -121,7 +121,9 @@ impl Session {
 
     /// Creates or replaces an object using the contents of the file at `path`.
     ///
-    /// The file must remain unchanged while the upload is running.
+    /// For resumable uploads, the path must stay readable and must not be modified, renamed,
+    /// removed, or replaced until the upload completes. Each attempt opens a new handle.
+    /// Handles may remain open until pending HTTP requests release their readers.
     ///
     /// Unlike [`put_file`](Session::put_file), this method defers opening the file until the
     /// request is actually sent. When enqueueing many file uploads via [`Session::many`], this
@@ -140,8 +142,8 @@ impl Session {
 ///
 /// # Automatic resumable uploads
 ///
-/// Large buffers and regular files with known lengths use resumable uploads automatically,
-/// recovering from interrupted requests. Streams, generic readers, and uploads queued through
+/// Large buffers and paths to regular files use resumable uploads automatically,
+/// recovering from interrupted requests. Open files, streams, readers, and uploads queued through
 /// [`Session::many`] do not use resumables. No feature flag is required.
 ///
 /// Configure this with [`Self::resumable_threshold_bytes`] and [`crate::ClientBuilder::spool_dir`].
@@ -352,14 +354,14 @@ impl PutBuilder {
 
         self.metadata.compression = self.compression.map(CompressionMode::compression);
         let headers = self.metadata.to_headers("")?;
-        let mut prepared = payload::prepare(
+        let prepared = payload::prepare(
             self.body,
             self.compression,
             self.resumable_threshold_bytes,
             self.session.client.spool_dir.clone(),
         )
         .await?;
-        if let payload::PreparedBody::Replayable(body) = &mut prepared {
+        if let payload::PreparedBody::Replayable(body) = &prepared {
             let create = crate::resumable::implementation::CreateResumableUploadBuilder {
                 session: self.session.clone(),
                 total_length: body.len(),

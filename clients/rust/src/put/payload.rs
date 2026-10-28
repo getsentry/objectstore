@@ -1,15 +1,19 @@
-//! Prepare replayable payloads and manage file-reader lifetimes.
+//! Prepare replayable buffers and stable paths.
 //!
-//! Uncompressed and precompressed inputs are reused; client compression spools to a temporary file.
+//! Each request opens an independent reader. Compression spools to a named temporary file.
+//! The HTTP layer may retain readers after an upload returns or is dropped, delaying cleanup.
 
 use std::io::{self, SeekFrom};
 use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Poll, ready};
 
 use bytes::Bytes;
 use futures_util::{StreamExt, stream};
+use tempfile::NamedTempFile;
 use tokio::fs::File;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
-use tokio::sync::{mpsc, oneshot};
+use tokio::io::{AsyncRead, AsyncSeekExt, AsyncWriteExt, ReadBuf};
 
 use super::{CompressionMode, PutBody};
 use crate::ClientStream;
@@ -33,11 +37,11 @@ impl PreparedBody {
             Self::OneShot(body) => {
                 request(super::encode_body(body, compression).await?, None).await
             }
-            Self::Replayable(mut body) => {
-                let length = body.len();
-                body.with_stream(0, |stream| {
-                    request(reqwest::Body::wrap_stream(stream), Some(length))
-                })
+            Self::Replayable(body) => {
+                request(
+                    reqwest::Body::wrap_stream(body.stream(0).await?),
+                    Some(body.len()),
+                )
                 .await
             }
         }
@@ -46,7 +50,14 @@ impl PreparedBody {
 
 pub(super) enum ReplayableBody {
     Buffer(Bytes),
-    File { file: File, start: u64, length: u64 },
+    Path {
+        path: PathBuf,
+        length: u64,
+    },
+    Temporary {
+        file: Arc<NamedTempFile>,
+        length: u64,
+    },
 }
 
 pub(super) async fn prepare(
@@ -58,183 +69,122 @@ pub(super) async fn prepare(
     let Some(threshold) = threshold else {
         return Ok(PreparedBody::OneShot(body));
     };
-    let body = match body {
-        PutBody::Path(path) => PutBody::File(File::open(path).await?),
-        body => body,
+    let length = match &body {
+        PutBody::Buffer(bytes) => Some(bytes.len() as u64),
+        PutBody::Path(path) => tokio::fs::metadata(path)
+            .await
+            .ok()
+            .filter(|metadata| metadata.is_file())
+            .map(|metadata| metadata.len()),
+        _ => None,
     };
-    let mut replay = match body {
-        PutBody::Buffer(bytes) => ReplayableBody::Buffer(bytes),
-        PutBody::File(mut file) => match regular_file_span(&mut file).await {
-            Some((start, length)) => ReplayableBody::File {
-                file,
-                start,
-                length,
-            },
-            None => return Ok(PreparedBody::OneShot(PutBody::File(file))),
-        },
-        body => return Ok(PreparedBody::OneShot(body)),
+    let Some(length) = length.filter(|length| *length >= threshold) else {
+        return Ok(PreparedBody::OneShot(body));
     };
-    if replay.len() < threshold {
-        return Ok(PreparedBody::OneShot(replay.into_put_body()));
-    }
 
     if let Some(CompressionMode::Compress(compression)) = compression {
-        let temporary = tokio::task::spawn_blocking(move || match spool_dir {
-            Some(dir) => tempfile::tempfile_in(dir),
-            None => tempfile::tempfile(),
+        let temporary = tokio::task::spawn_blocking(move || {
+            let temporary = match spool_dir {
+                Some(dir) => NamedTempFile::new_in(dir),
+                None => NamedTempFile::new(),
+            }?;
+            let output = temporary.as_file().try_clone()?;
+            Ok::<_, io::Error>((temporary, output))
         })
         .await
         .map_err(io::Error::other)?;
-        let Ok(temporary) = temporary else {
-            // Creation has not consumed input, so direct streaming is still possible.
-            return Ok(PreparedBody::OneShot(replay.into_put_body()));
+        let Ok((temporary, output)) = temporary else {
+            return Ok(PreparedBody::OneShot(body));
         };
-        let mut temporary = File::from_std(temporary);
-        let reader: Box<dyn AsyncRead + Send + Sync + Unpin> = match replay {
-            ReplayableBody::Buffer(bytes) => Box::new(io::Cursor::new(bytes)),
-            ReplayableBody::File { file, .. } => Box::new(file),
+        let mut output = File::from_std(output);
+        let reader: Box<dyn AsyncRead + Send + Sync + Unpin> = match body {
+            PutBody::Buffer(bytes) => Box::new(io::Cursor::new(bytes)),
+            PutBody::Path(path) => Box::new(File::open(path).await?),
+            _ => unreachable!("only buffers and paths are eligible"),
         };
         let reader = super::BufReader::new(reader);
         let length = match compression {
             crate::Compression::Zstd => {
-                tokio::io::copy(&mut super::ZstdEncoder::new(reader), &mut temporary).await?
+                tokio::io::copy(&mut super::ZstdEncoder::new(reader), &mut output).await?
             }
             crate::Compression::Gzip => {
-                tokio::io::copy(&mut super::GzipEncoder::new(reader), &mut temporary).await?
+                tokio::io::copy(&mut super::GzipEncoder::new(reader), &mut output).await?
             }
         };
-        temporary.flush().await?;
-        temporary.rewind().await?;
-        replay = ReplayableBody::File {
-            file: temporary,
-            start: 0,
+        output.flush().await?;
+        return Ok(PreparedBody::Replayable(ReplayableBody::Temporary {
+            file: Arc::new(temporary),
             length,
-        };
+        }));
     }
 
-    Ok(PreparedBody::Replayable(replay))
+    Ok(PreparedBody::Replayable(match body {
+        PutBody::Buffer(bytes) => ReplayableBody::Buffer(bytes),
+        PutBody::Path(path) => ReplayableBody::Path { path, length },
+        _ => unreachable!("only buffers and paths are eligible"),
+    }))
 }
 
-/// Returns the current position and remaining length of a regular file.
-async fn regular_file_span(file: &mut File) -> Option<(u64, u64)> {
-    file.flush().await.ok()?;
-    let metadata = file.metadata().await.ok()?;
-    if !metadata.is_file() {
-        return None;
-    }
-    let start = file.stream_position().await.ok()?;
-    Some((start, metadata.len().saturating_sub(start)))
-}
+/// Distinguishes local read failures from transport failures wrapped by reqwest.
+#[derive(Debug, thiserror::Error)]
+#[error("could not read upload payload: {0}")]
+pub(super) struct ReadError(#[source] io::Error);
 
 impl ReplayableBody {
-    /// Returns the unprepared input for a direct upload, positioned where it started.
-    fn into_put_body(self) -> PutBody {
-        match self {
-            Self::Buffer(bytes) => PutBody::Buffer(bytes),
-            Self::File { file, .. } => PutBody::File(file),
-        }
-    }
-
     pub(super) fn len(&self) -> u64 {
         match self {
             Self::Buffer(bytes) => bytes.len() as u64,
-            Self::File { length, .. } => *length,
+            Self::Path { length, .. } | Self::Temporary { length, .. } => *length,
         }
     }
 
-    /// Runs a request with a suffix, then stops its reader before returning the result.
-    ///
-    /// The request body may outlive the response. Keeping reader ownership here makes local
-    /// read errors explicit and prevents an old request from reading after a retry seeks.
-    pub(super) async fn with_stream<T, F>(
-        &mut self,
-        offset: u64,
-        request: impl FnOnce(ClientStream) -> F,
-    ) -> crate::Result<T>
-    where
-        F: std::future::Future<Output = crate::Result<T>>,
-    {
-        match self {
+    /// Opens an independent reader for the remaining suffix.
+    pub(super) async fn stream(&self, offset: u64) -> io::Result<ClientStream> {
+        let mut file = match self {
             Self::Buffer(bytes) => {
                 let bytes = bytes.slice(offset as usize..);
                 // Streaming bodies prevent independent replays by HTTP middleware.
-                request(stream::once(async move { Ok(bytes) }).boxed()).await
+                return Ok(stream::once(async move { Ok(bytes) }).boxed());
             }
-            Self::File {
-                file,
-                start,
-                length,
-            } => {
-                let (stream, reader) =
-                    FileReader::start(file, *start + offset, *length - offset).await?;
-                let response = request(stream).await;
-                // Read failures are returned directly, independently of reqwest's error wrapping.
-                reader.finish().await?;
-                response
+            Self::Path { path, .. } => File::open(path).await?,
+            Self::Temporary { file, .. } => {
+                let file = Arc::clone(file);
+                File::from_std(
+                    tokio::task::spawn_blocking(move || file.reopen())
+                        .await
+                        .map_err(io::Error::other)??,
+                )
             }
-        }
-    }
-}
-
-/// A stoppable reader for one file upload request.
-///
-/// Dropping this handle signals cancellation; finishing also waits for pending disk IO.
-struct FileReader {
-    stop: oneshot::Sender<()>,
-    task: tokio::task::JoinHandle<io::Result<()>>,
-}
-
-impl FileReader {
-    async fn start(file: &File, offset: u64, length: u64) -> io::Result<(ClientStream, Self)> {
-        // Duplicate the open handle, never reopen a path. Clones share the OS cursor, so
-        // with_stream must finish this reader before starting another request.
-        let mut file = file.try_clone().await?;
-        file.seek(SeekFrom::Start(offset)).await?;
-        let (send, mut receive) = mpsc::channel(1);
-        let (stop, stopped) = oneshot::channel();
-        let task = tokio::spawn(async move {
-            let result = {
-                let read = forward_file(&mut file, length, send);
-                futures_util::pin_mut!(read, stopped);
-                match futures_util::future::select(stopped, read).await {
-                    futures_util::future::Either::Left(_) => Ok(()),
-                    futures_util::future::Either::Right((result, _)) => result,
-                }
-            };
-            // An async read may leave blocking IO running after cancellation.
-            drop(file.into_std().await);
-            result
-        });
-        let stream = stream::poll_fn(move |cx| receive.poll_recv(cx)).boxed();
-        Ok((stream, Self { stop, task }))
-    }
-
-    async fn finish(self) -> io::Result<()> {
-        drop(self.stop);
-        self.task.await.map_err(io::Error::other)?
-    }
-}
-
-async fn forward_file(
-    file: &mut File,
-    length: u64,
-    send: mpsc::Sender<io::Result<Bytes>>,
-) -> io::Result<()> {
-    let mut remaining = length;
-    while remaining > 0 {
-        let Ok(permit) = send.reserve().await else {
-            break;
         };
-        let mut bytes = vec![0; remaining.min(64 * 1024) as usize];
-        if let Err(error) = file.read_exact(&mut bytes).await {
-            // Fail the HTTP body too, but keep the original error for the caller.
-            permit.send(Err(io::Error::other(error.to_string())));
-            return Err(error);
-        }
-        remaining -= bytes.len() as u64;
-        permit.send(Ok(Bytes::from(bytes)));
+        file.seek(SeekFrom::Start(offset)).await?;
+        let mut remaining = self.len() - offset;
+        let mut buffer = vec![0; 64 * 1024];
+        Ok(stream::poll_fn(move |cx| {
+            if remaining == 0 {
+                return Poll::Ready(None);
+            }
+            let count = remaining.min(buffer.len() as u64) as usize;
+            let mut read = ReadBuf::new(&mut buffer[..count]);
+            let result = ready!(Pin::new(&mut file).poll_read(cx, &mut read)).and_then(|()| {
+                if read.filled().is_empty() {
+                    Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "upload file became shorter",
+                    ))
+                } else {
+                    remaining -= read.filled().len() as u64;
+                    Ok(Bytes::copy_from_slice(read.filled()))
+                }
+            });
+            if result.is_err() {
+                remaining = 0;
+            }
+            Poll::Ready(Some(
+                result.map_err(|error| io::Error::other(ReadError(error))),
+            ))
+        })
+        .boxed())
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -243,41 +193,29 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn stopping_reader_waits_for_pending_read_even_if_http_keeps_body() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .max_blocking_threads(1)
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let data: Vec<u8> = (0..200_000).map(|n| (n % 251) as u8).collect();
-            let mut file = tempfile::tempfile().unwrap();
-            std::io::Write::write_all(&mut file, &data).unwrap();
-            let file = File::from_std(file);
-            let (mut old, reader) = FileReader::start(&file, 7, 150_000).await.unwrap();
-
-            // Occupy the sole blocking worker so the old read remains pending.
-            let (release, blocked) = std::sync::mpsc::channel();
-            let (started, running) = oneshot::channel();
-            let worker = tokio::task::spawn_blocking(move || {
-                started.send(()).unwrap();
-                blocked.recv().unwrap();
-            });
-            running.await.unwrap();
-            tokio::task::yield_now().await;
-            assert!(futures_util::poll!(old.next()).is_pending());
-            let finish = reader.finish();
-            tokio::pin!(finish);
-            assert!(futures_util::poll!(&mut finish).is_pending());
-            release.send(()).unwrap();
-            worker.await.unwrap();
-            finish.await.unwrap();
-            let (stream, reader) = FileReader::start(&file, 107, 149_900).await.unwrap();
-            let remaining: Vec<_> = stream.try_collect().await.unwrap();
-            reader.finish().await.unwrap();
-            assert_eq!(remaining.concat(), data[107..150_007]);
-            drop(old);
-        });
+    #[tokio::test]
+    async fn attempts_have_independent_readers() {
+        let data: Vec<u8> = (0..200_000).map(|n| (n % 251) as u8).collect();
+        let mut file = NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut file, &data).unwrap();
+        for body in [
+            ReplayableBody::Path {
+                path: file.path().to_owned(),
+                length: data.len() as u64,
+            },
+            ReplayableBody::Temporary {
+                file: Arc::new(file),
+                length: data.len() as u64,
+            },
+        ] {
+            let mut first = body.stream(0).await.unwrap();
+            let mut received = first.try_next().await.unwrap().unwrap().to_vec();
+            let second = body.stream(100).await.unwrap();
+            let suffix: Vec<_> = second.try_collect().await.unwrap();
+            let tail: Vec<_> = first.try_collect().await.unwrap();
+            received.extend(tail.concat());
+            assert_eq!(received, data);
+            assert_eq!(suffix.concat(), data[100..]);
+        }
     }
 }
