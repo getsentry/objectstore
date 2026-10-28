@@ -1,0 +1,124 @@
+name: Changelog Preview
+
+# Comments on the PR with the changelogs it will be listed in, one per Craft
+# workspace in `.craft.yml`, and the entry it adds to them.
+#
+# SECURITY: `pull_request_target` runs with a write token. The PR checkout is
+# only used to read git history and Craft configuration; never run code from it.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: changelog-preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    steps:
+      # Prefer the merge ref; fall back to the head if the PR has conflicts.
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        id: checkout-merge
+        continue-on-error: true
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        if: steps.checkout-merge.outcome == 'failure'
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Craft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CRAFT_VERSION: 3.3.0
+        run: |
+          gh release download "$CRAFT_VERSION" --repo getsentry/craft --pattern craft --dir "$RUNNER_TEMP"
+          sudo install "$RUNNER_TEMP/craft" /usr/local/bin/craft
+
+      - name: Comment changelog preview
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          CRAFT_LOG_LEVEL: Warn
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          GIT_AUTHOR_NAME: changelog-preview
+          GIT_AUTHOR_EMAIL: changelog-preview@localhost
+          GIT_COMMITTER_NAME: changelog-preview
+          GIT_COMMITTER_EMAIL: changelog-preview@localhost
+        run: |
+          set -euo pipefail
+
+          # Craft decides which workspaces a commit belongs to from the files it
+          # changes. Squash the PR into one commit on top of its base, like the
+          # merge will, and ask each workspace whether that commit is in it.
+          git fetch --quiet --no-tags origin "$BASE_REF"
+          base=$(git merge-base HEAD "origin/$BASE_REF")
+          git checkout --quiet --detach "$(git commit-tree "HEAD^{tree}" -p "$base" -m "#$PR_NUMBER")"
+
+          touched=()
+          impacts=()
+          entry=""
+          skipped=false
+          for workspace in $(craft workspace list | jq -r '.[]'); do
+            commits=$(CRAFT_WORKSPACE="$workspace" craft changelog --since "$base" --format json | jq '.totalCommits')
+            if [[ "$commits" == 0 ]]; then
+              continue
+            fi
+
+            result=$(CRAFT_WORKSPACE="$workspace" craft changelog --pr "$PR_NUMBER" --format json)
+            skipped=$(jq -r '.prSkipped' <<< "$result")
+            if [[ "$(jq -r '.versioningPolicy' <<< "$result")" == calver ]]; then
+              impact="CalVer"
+            else
+              case "$(jq -r '.bumpType' <<< "$result")" in
+                major) impact="🔴 Major" ;;
+                minor) impact="🟡 Minor" ;;
+                patch) impact="🟢 Patch" ;;
+                *) impact="⚪ None" ;;
+              esac
+            fi
+            touched+=("\`$workspace\`")
+            impacts+=("- \`$workspace\`: $impact")
+
+            # The entry is the same in every changelog. Craft quotes this PR's
+            # lines in the full preview; keep them and their section heading.
+            if [[ -z "$entry" ]]; then
+              entry=$(jq -r '.changelog' <<< "$result" | awk '
+                /^#+ / { heading = $0; printed = 0; next }
+                /^>/ {
+                  if (!printed && heading != "") { print heading "\n"; printed = 1 }
+                  sub(/^> ?/, ""); print
+                }')
+            fi
+          done
+
+          marker="<!-- objectstore-changelog-preview -->"
+          if [[ ${#touched[@]} -eq 0 ]]; then
+            summary="This PR doesn't change any released workspace, so it won't be listed in any changelog."
+          elif [[ "$skipped" == true ]]; then
+            summary="This PR is excluded from the changelogs of the workspaces it changes (\`skip-changelog\`): ${touched[*]}"
+          else
+            summary="This PR will be listed in the changelogs of:"$'\n\n'"$(printf '%s\n' "${impacts[@]}")"$'\n\n'"$entry"
+          fi
+          body="$marker"$'\n'"## Changelog Preview"$'\n\n'"$summary"
+
+          comment_id=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+            --jq ".[] | select(.body | startswith(\"$marker\")) | .id" | head -n 1)
+          if [[ -n "$comment_id" ]]; then
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$comment_id" -f body="$body" > /dev/null
+          elif [[ ${#touched[@]} -gt 0 ]]; then
+            gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -f body="$body" > /dev/null
+          fi
+          echo "$body" >> "$GITHUB_STEP_SUMMARY"

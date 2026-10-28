@@ -1,0 +1,67 @@
+minVersion: 3.3.0
+
+# Each workspace is released on its own, with its own version, tags, release
+# branch and changelog. Pick one with `--workspace <path>` or `CRAFT_WORKSPACE`.
+#
+# A workspace's changelog lists every PR that changes its directory or one of
+# its `includePaths`. Files outside all workspaces (root config, CI, docs, ...)
+# are excluded everywhere. Entries are grouped by the categories in
+# `.github/release.yml`, which all workspaces share.
+workspaces:
+  clients/python:
+    releaseBranchPrefix: release-py
+    preReleaseCommand: scripts/bump-version-py-client.sh
+    changelog:
+      policy: auto
+      scopeGrouping: false
+      unownedPaths: exclude
+    targets:
+      - name: github
+        tagPrefix: py-client@
+      - name: pypi
+      - name: sentry-pypi
+        internalPypiRepo: getsentry/pypi
+    requireNames:
+      - /.*objectstore_client.*whl$/
+      - /.*objectstore_client.*tar\.gz$/
+
+  clients/rust:
+    releaseBranchPrefix: release-rust
+    preReleaseCommand: scripts/bump-version-rs-client.sh
+    changelog:
+      policy: auto
+      scopeGrouping: false
+      unownedPaths: exclude
+    # The crates target publishes from source, so there are no build artifacts.
+    artifactProvider:
+      name: none
+    targets:
+      - name: github
+        tagPrefix: rs-client@
+      - name: crates
+
+  objectstore-server:
+    releaseBranchPrefix: release
+    preReleaseCommand: scripts/bump-version-server.sh
+    versioning:
+      policy: calver
+    changelog:
+      policy: auto
+      scopeGrouping: false
+      unownedPaths: exclude
+      # The crates the server binary is built from, plus its runtime options
+      # schema. Keep in sync with the server's path dependencies.
+      includePaths:
+        - objectstore-inventory-tracker
+        - objectstore-log
+        - objectstore-metrics
+        - objectstore-options
+        - objectstore-service
+        - objectstore-typed-options
+        - objectstore-typed-options-derive
+        - objectstore-types
+        - sentry-options
+    artifactProvider:
+      name: none
+    targets:
+      - name: github

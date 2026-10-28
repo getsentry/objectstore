@@ -1,5 +1,4 @@
-# Changelog categories for this client. Keep in sync with the other client's
-# `.github/release.yml`.
+# Changelog categories for every Craft workspace in `.craft.yml`.
 #
 # A custom file replaces Craft's defaults entirely. It groups entries by change
 # type, strips the `type(scope):` prefix, and catches every remaining change so
@@ -8,6 +7,11 @@ changelog:
   exclude:
     labels:
       - skip-changelog
+    # Release commits. Releasing one workspace can touch files of another
+    # (e.g. the Rust client bumps `objectstore-types`, which the server
+    # includes), so they would otherwise show up in that changelog.
+    authors:
+      - getsentry-bot
   categories:
     - title: Breaking Changes
       commit_patterns:
