@@ -49,18 +49,11 @@ workspaces:
       policy: auto
       scopeGrouping: false
       unownedPaths: exclude
-      # The crates the server binary is built from, plus its runtime options
-      # schema. Keep in sync with the server's path dependencies.
+      # The server crate and the storage service, which hold nearly all
+      # server behavior. Changes to the other crates the server is built from
+      # aren't listed.
       includePaths:
-        - objectstore-inventory-tracker
-        - objectstore-log
-        - objectstore-metrics
-        - objectstore-options
         - objectstore-service
-        - objectstore-typed-options
-        - objectstore-typed-options-derive
-        - objectstore-types
-        - sentry-options
     artifactProvider:
       name: none
     targets:

@@ -7,11 +7,6 @@ changelog:
   exclude:
     labels:
       - skip-changelog
-    # Release commits. Releasing one workspace can touch files of another
-    # (e.g. the Rust client bumps `objectstore-types`, which the server
-    # includes), so they would otherwise show up in that changelog.
-    authors:
-      - getsentry-bot
   categories:
     - title: Breaking Changes
       commit_patterns:

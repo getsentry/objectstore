@@ -50,5 +50,3 @@ jobs:
           version: ${{ inputs.version }}
           force: ${{ inputs.force }}
           merge_target: ${{ inputs.merge_target }}
-          git_user_name: getsentry-bot
-          git_user_email: bot@sentry.io
