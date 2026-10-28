@@ -8,10 +8,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use futures_util::{StreamExt, stream};
+use futures_util::{StreamExt, TryStreamExt, stream};
 use tempfile::NamedTempFile;
 use tokio::fs::File;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio_util::io::ReaderStream;
 
 use super::{CompressionMode, PutBody};
 use crate::ClientStream;
@@ -142,18 +143,16 @@ impl ReplayableBody {
                 )
             }
         };
-        file.seek(SeekFrom::Start(offset)).await?;
-        let mut remaining = self.len() - offset;
-        Ok(async_stream::try_stream! {
-            while remaining > 0 {
-                let mut bytes = vec![0; remaining.min(64 * 1024) as usize];
-                file.read_exact(&mut bytes).await
-                    .map_err(|error| io::Error::other(ReadError(error)))?;
-                remaining -= bytes.len() as u64;
-                yield Bytes::from(bytes);
-            }
+        if file.metadata().await?.len() < self.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "upload file became shorter",
+            ));
         }
-        .boxed())
+        file.seek(SeekFrom::Start(offset)).await?;
+        Ok(ReaderStream::new(file.take(self.len() - offset))
+            .map_err(|error| io::Error::other(ReadError(error)))
+            .boxed())
     }
 }
 
