@@ -29,6 +29,6 @@ impl Session {
     /// The `key` and `token` must come from the same previously created upload and scope. The
     /// server rejects a mismatched or unknown token when an operation is sent.
     pub fn resume_upload(&self, key: impl Into<ObjectKey>, token: SessionToken) -> ResumableUpload {
-        ResumableUpload::resume(self.clone(), key.into(), token)
+        ResumableUpload::new(self.clone(), key.into(), token)
     }
 }

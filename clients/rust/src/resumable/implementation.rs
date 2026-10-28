@@ -51,7 +51,7 @@ pub struct ResumableUpload {
 }
 
 impl ResumableUpload {
-    pub(super) fn resume(session: Session, key: ObjectKey, token: SessionToken) -> Self {
+    pub(crate) fn new(session: Session, key: ObjectKey, token: SessionToken) -> Self {
         Self {
             session,
             key,
