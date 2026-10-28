@@ -36,7 +36,7 @@ async fn upload_inner(body: &ReplayableBody, handle: &ResumableUpload) -> crate:
                 .send()
                 .await
         };
-        let failure = match upload_offset(response) {
+        let failure = match get_offset(response) {
             Ok(None) => return Ok(()),
             Ok(Some(next)) => {
                 if next < offset || next > body.len() {
@@ -68,7 +68,7 @@ async fn upload_inner(body: &ReplayableBody, handle: &ResumableUpload) -> crate:
     }
 }
 
-fn upload_offset(result: crate::Result<UploadProgress>) -> crate::Result<Option<u64>> {
+fn get_offset(result: crate::Result<UploadProgress>) -> crate::Result<Option<u64>> {
     match result {
         Ok(UploadProgress::Complete) => Ok(None),
         Ok(UploadProgress::Incomplete { offset }) | Err(Error::UploadOffsetMismatch { offset }) => {
