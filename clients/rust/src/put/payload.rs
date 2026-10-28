@@ -178,7 +178,7 @@ impl FileReader {
         // with_stream must finish this reader before starting another request.
         let mut file = file.try_clone().await?;
         file.seek(SeekFrom::Start(offset)).await?;
-        let (send, receive) = mpsc::channel(1);
+        let (send, mut receive) = mpsc::channel(1);
         let (stop, stopped) = oneshot::channel();
         let task = tokio::spawn(async move {
             let result = {
@@ -193,10 +193,7 @@ impl FileReader {
             drop(file.into_std().await);
             result
         });
-        let stream = stream::unfold(receive, |mut receive| async {
-            receive.recv().await.map(|bytes| (bytes, receive))
-        })
-        .boxed();
+        let stream = stream::poll_fn(move |cx| receive.poll_recv(cx)).boxed();
         Ok((stream, Self { stop, task }))
     }
 
