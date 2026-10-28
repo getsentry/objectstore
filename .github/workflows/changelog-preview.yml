@@ -4,8 +4,8 @@ name: Changelog Preview
 # workspace in `.craft.yml`, and the entry it adds to them.
 #
 # SECURITY: `pull_request_target` runs with a write token. Only the base
-# branch is checked out. The PR's commits are fetched as git objects to read
-# which files they change, but never checked out, so no PR file is read or run.
+# branch is checked out; the PR's code is never fetched. Its changed paths come
+# from the GitHub API.
 
 on:
   pull_request_target:
@@ -42,7 +42,6 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           CRAFT_LOG_LEVEL: Warn
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
           GIT_AUTHOR_NAME: changelog-preview
           GIT_AUTHOR_EMAIL: changelog-preview@localhost
           GIT_COMMITTER_NAME: changelog-preview
@@ -50,14 +49,25 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Craft decides which workspaces a commit belongs to from the files it
-          # changes. Squash the PR into one commit on top of its merge base, like
-          # the merge will, and ask each workspace whether that commit is in it.
-          # `reset --soft` moves HEAD to that commit but keeps the base branch's
-          # files, so Craft reads its configuration from the base branch.
-          git fetch --quiet --no-tags origin "+refs/pull/$PR_NUMBER/head:refs/remotes/pr/head"
-          base=$(git merge-base pr/head "origin/$BASE_REF")
-          git reset --quiet --soft "$(git commit-tree "pr/head^{tree}" -p "$base" -m "#$PR_NUMBER")"
+          # Craft decides which workspaces a commit belongs to from the paths it
+          # changes. Build one commit on top of the base branch that changes the
+          # same paths as the PR (with placeholder content), and ask each
+          # workspace whether that commit is in it. `reset --soft` moves HEAD to
+          # it but keeps the base branch's files, which Craft reads its
+          # configuration from.
+          base=$(git rev-parse HEAD)
+          placeholder=$(git hash-object -w --stdin <<< "changelog preview")
+          export GIT_INDEX_FILE="$RUNNER_TEMP/changelog-preview-index"
+          git read-tree "$base"
+          gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" \
+            | jq -j --arg blob "$placeholder" '.[]
+                | (if .previous_filename then "0 \("0" * 40)\t\(.previous_filename)\u0000" else "" end)
+                + (if .status == "removed" then "0 \("0" * 40)" else "100644 \($blob)" end)
+                + "\t\(.filename)\u0000"' \
+            | git update-index -z --index-info
+          tree=$(git write-tree)
+          unset GIT_INDEX_FILE
+          git reset --quiet --soft "$(git commit-tree "$tree" -p "$base" -m "#$PR_NUMBER")"
 
           touched=()
           impacts=()
