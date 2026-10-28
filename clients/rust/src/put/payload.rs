@@ -1,7 +1,4 @@
-//! Prepare replayable buffers and stable paths.
-//!
-//! Each request opens an independent reader. Compression spools to a named temporary file.
-//! The HTTP layer may retain readers after an upload returns or is dropped, delaying cleanup.
+//! Helpers to buffer resumable upload bodies.
 
 use std::io::{self, SeekFrom};
 use std::path::PathBuf;
@@ -23,8 +20,7 @@ pub(super) enum PreparedBody {
 }
 
 impl PreparedBody {
-    /// Converts input or prepared wire bytes into an HTTP body.
-    pub(super) async fn into_body(
+    pub(super) async fn into_reqwest_body(
         self,
         compression: Option<CompressionMode>,
     ) -> io::Result<reqwest::Body> {

@@ -373,7 +373,7 @@ impl PutBuilder {
             }
         }
 
-        let body = prepared.into_body(self.compression).await?;
+        let body = prepared.into_reqwest_body(self.compression).await?;
         builder = builder.headers(headers);
         let response = builder.body(body).send().await?;
         Ok(response.error_for_status_and_drain().await?.json().await?)
