@@ -90,7 +90,7 @@ sentry_arroyo = "2.47.0"
 # - `ssl` is required for SASL/SCRAM
 # - `librdkafka` must be built from source either way, and `cmake-build` is the
 #    recommended way to do it
-# - `libz-static` avoids a runtime dependency on `libz.so.1`, which distroless lacks
+# - `libz-static` avoids a runtime dependency on `libz.so.1`, which the base image lacks
 # - the version range lets downstream users of objectstore-inventory-tracker pin
 #   whichever `rdkafka` they use; the lower bound matches `sentry_arroyo`, which
 #   shares the same `rdkafka` types

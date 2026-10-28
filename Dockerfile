@@ -1,11 +1,14 @@
-ARG IMAGE_TAG=nonroot
-FROM gcr.io/distroless/cc-debian13:${IMAGE_TAG}
+ARG BASE_IMAGE=us-docker.pkg.dev/sentryio/dhi-mirror/static:20250419-glibc-debian13
+FROM ${BASE_IMAGE} AS base
+
+FROM ${BASE_IMAGE}
 
 ARG BINARY=objectstore
 COPY ${BINARY} /bin/entrypoint
 
-# Ensure correct permissions on the data volume
-COPY --from=gcr.io/distroless/cc-debian13:nonroot --chown=nonroot:nonroot /home/nonroot /data
+# The base image has no shell to `mkdir` the data volume, so copy the empty
+# home directory instead to ensure correct permissions.
+COPY --from=base --chown=nonroot:nonroot /home/nonroot /data
 
 VOLUME ["/data"]
 
