@@ -83,7 +83,8 @@ pub(super) async fn prepare(
         let reader: Box<dyn AsyncRead + Send + Sync + Unpin> = match body {
             PutBody::Buffer(bytes) => Box::new(io::Cursor::new(bytes)),
             PutBody::Path(path) => Box::new(File::open(path).await?),
-            _ => unreachable!("only buffers and paths are eligible"),
+            // The eligibility check above excludes every other input type.
+            body => return Ok(PreparedBody::OneShot(body)),
         };
         let reader = super::BufReader::new(reader);
         let length = match compression {
@@ -104,7 +105,8 @@ pub(super) async fn prepare(
     Ok(PreparedBody::Replayable(match body {
         PutBody::Buffer(bytes) => ReplayableBody::Buffer(bytes),
         PutBody::Path(path) => ReplayableBody::Path { path, length },
-        _ => unreachable!("only buffers and paths are eligible"),
+        // The eligibility check above excludes every other input type.
+        body => return Ok(PreparedBody::OneShot(body)),
     }))
 }
 
