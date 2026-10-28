@@ -12,6 +12,18 @@ use futures_util::{StreamExt, stream};
 use objectstore_client::{Client, Compression, Error, ExpirationPolicy, Session, Usecase};
 use tokio::io::AsyncSeekExt;
 
+fn decode(compression: Compression, encoded: &[u8]) -> Vec<u8> {
+    match compression {
+        Compression::Zstd => zstd::decode_all(encoded).unwrap(),
+        Compression::Gzip => {
+            let mut decoded = Vec::new();
+            io::Read::read_to_end(&mut flate2::read::GzDecoder::new(encoded), &mut decoded)
+                .unwrap();
+            decoded
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct Received {
     method: Method,
@@ -273,68 +285,72 @@ async fn file_retry_after_response_before_body_is_consumed() {
 
 #[tokio::test]
 async fn compression_spooling_metadata_and_creation_fallback() {
-    for creation in [Reply::Create, Reply::Status(501), Reply::Status(503)] {
-        let fallback = !matches!(creation, Reply::Create);
-        let server = Server::new([
-            creation,
+    for compression in [Compression::Zstd, Compression::Gzip] {
+        for creation in [Reply::Create, Reply::Status(501), Reply::Status(503)] {
+            let fallback = !matches!(creation, Reply::Create);
+            let server = Server::new([
+                creation,
+                if fallback {
+                    Reply::Status(200)
+                } else {
+                    Reply::Complete
+                },
+            ])
+            .await;
+            let dir = tempfile::tempdir().unwrap();
+            let client = server.client().spool_dir(dir.path()).build().unwrap();
+            let session = client
+                .session(
+                    Usecase::from_static("testing")
+                        .with_compression(compression)
+                        .with_resumable_threshold_bytes(1024)
+                        .for_organization(123),
+                )
+                .unwrap();
+            session
+                .put(vec![b'x'; 1024])
+                .key("key")
+                .content_type("text/plain")
+                .filename("file.txt")
+                .origin("127.0.0.1")
+                .append_metadata("test", "value")
+                .expiration_policy(ExpirationPolicy::TimeToLive(Duration::from_secs(60)))
+                .send()
+                .await
+                .unwrap();
+            let requests = server.finish();
+            let encoded = &requests[1].body;
+            assert_eq!(decode(compression, encoded), vec![b'x'; 1024]);
+            assert!(encoded.len() < 1024); // Eligibility was decided before compression.
+            assert_eq!(
+                requests[0].headers["upload-length"],
+                encoded.len().to_string()
+            );
+            assert_eq!(
+                requests[1].headers["content-length"],
+                encoded.len().to_string()
+            );
+            assert_eq!(requests[0].method, Method::PUT);
+            let metadata =
+                objectstore_types::metadata::Metadata::from_headers(&requests[0].headers, "")
+                    .unwrap();
+            assert_eq!(metadata.compression, Some(compression));
+            assert_eq!(metadata.content_type, "text/plain");
+            assert_eq!(metadata.filename.as_deref(), Some("file.txt"));
+            assert_eq!(metadata.origin.as_deref(), Some("127.0.0.1"));
+            assert_eq!(metadata.custom["test"], "value");
+            assert_eq!(
+                metadata.expiration_policy,
+                ExpirationPolicy::TimeToLive(Duration::from_secs(60))
+            );
             if fallback {
-                Reply::Status(200)
-            } else {
-                Reply::Complete
-            },
-        ])
-        .await;
-        let dir = tempfile::tempdir().unwrap();
-        let client = server.client().spool_dir(dir.path()).build().unwrap();
-        let session = client
-            .session(
-                Usecase::from_static("testing")
-                    .with_resumable_threshold_bytes(1024)
-                    .for_organization(123),
-            )
-            .unwrap();
-        session
-            .put(vec![b'x'; 1024])
-            .key("key")
-            .content_type("text/plain")
-            .filename("file.txt")
-            .origin("127.0.0.1")
-            .append_metadata("test", "value")
-            .expiration_policy(ExpirationPolicy::TimeToLive(Duration::from_secs(60)))
-            .send()
-            .await
-            .unwrap();
-        let requests = server.finish();
-        let encoded = &requests[1].body;
-        assert_eq!(
-            zstd::decode_all(encoded.as_ref()).unwrap(),
-            vec![b'x'; 1024]
-        );
-        assert!(encoded.len() < 1024); // Eligibility was decided before compression.
-        assert_eq!(
-            requests[0].headers["upload-length"],
-            encoded.len().to_string()
-        );
-        assert_eq!(
-            requests[1].headers["content-length"],
-            encoded.len().to_string()
-        );
-        assert_eq!(requests[0].method, Method::PUT);
-        let metadata =
-            objectstore_types::metadata::Metadata::from_headers(&requests[0].headers, "").unwrap();
-        assert_eq!(metadata.compression, Some(Compression::Zstd));
-        assert_eq!(metadata.content_type, "text/plain");
-        assert_eq!(metadata.filename.as_deref(), Some("file.txt"));
-        assert_eq!(metadata.origin.as_deref(), Some("127.0.0.1"));
-        assert_eq!(metadata.custom["test"], "value");
-        assert_eq!(
-            metadata.expiration_policy,
-            ExpirationPolicy::TimeToLive(Duration::from_secs(60))
-        );
-        if fallback {
-            assert_eq!(requests[1].headers["content-encoding"], "zstd");
+                assert_eq!(
+                    requests[1].headers["content-encoding"],
+                    compression.as_str()
+                );
+            }
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
         }
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 }
 
@@ -558,22 +574,24 @@ async fn local_file_errors_are_not_retried() {
 
 #[tokio::test]
 async fn compressed_file_replays_the_prepared_bytes() {
-    let server = Server::new([Reply::Create, Reply::Offset(204, 4), Reply::Complete]).await;
-    let mut file = tempfile::NamedTempFile::new().unwrap();
-    file.write_all(b"prefix-payload").unwrap();
-    let mut input = tokio::fs::File::open(file.path()).await.unwrap();
-    input.seek(SeekFrom::Start(7)).await.unwrap();
-    server
-        .session(Some(0))
-        .put_file(input)
-        .compress(Compression::Zstd)
-        .send()
-        .await
-        .unwrap();
-    let requests = server.finish();
-    let encoded = &requests[1].body;
-    assert_eq!(requests[2].body, encoded.slice(4..));
-    assert_eq!(zstd::decode_all(encoded.as_ref()).unwrap(), b"payload");
+    for compression in [Compression::Zstd, Compression::Gzip] {
+        let server = Server::new([Reply::Create, Reply::Offset(204, 4), Reply::Complete]).await;
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(b"prefix-payload").unwrap();
+        let mut input = tokio::fs::File::open(file.path()).await.unwrap();
+        input.seek(SeekFrom::Start(7)).await.unwrap();
+        server
+            .session(Some(0))
+            .put_file(input)
+            .compress(compression)
+            .send()
+            .await
+            .unwrap();
+        let requests = server.finish();
+        let encoded = &requests[1].body;
+        assert_eq!(requests[2].body, encoded.slice(4..));
+        assert_eq!(decode(compression, encoded), b"payload");
+    }
 }
 
 #[tokio::test]

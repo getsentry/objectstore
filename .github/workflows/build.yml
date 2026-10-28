@@ -32,8 +32,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          # libcurl4-openssl-dev: librdkafka is built from source and links against libcurl,
-          # whose headers are not on the runner by default.
+          # Workaround: rdkafka-sys requires always curl headers, fixed with librdkafka >=2.15.0.
           sudo apt-get install -y llvm libcurl4-openssl-dev
 
       - name: Install sentry-cli
@@ -43,11 +42,6 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal --target ${{ matrix.target }} --no-self-update
 
-      - name: Install protoc
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
       # Ensure a clean build on release, use caches when building main.
       - uses: swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
         if: ${{ !startsWith(github.ref, 'refs/heads/release/') }}
@@ -56,7 +50,7 @@ jobs:
 
       - name: Build Binary
         run: |
-          cargo build --release --locked --target=${{ matrix.target }} --bin objectstore --features profiling
+          cargo build --release --locked --target=${{ matrix.target }} --bin objectstore --features profiling,storage-cogs
           cp target/${{ matrix.target }}/release/objectstore ./objectstore
 
       - name: Split Debug Info

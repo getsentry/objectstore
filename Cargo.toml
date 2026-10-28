@@ -31,7 +31,7 @@ objectstore-service = { path = "objectstore-service" }
 objectstore-test = { path = "objectstore-test" }
 objectstore-typed-options = { path = "objectstore-typed-options" }
 objectstore-typed-options-derive = { path = "objectstore-typed-options-derive" }
-objectstore-types = { path = "objectstore-types", version = "0.2.10" }
+objectstore-types = { path = "objectstore-types", version = "0.3.0" }
 stresstest = { path = "stresstest" }
 
 anyhow = "1.0.102"
@@ -43,7 +43,7 @@ async-trait = "0.1.92"
 axum = "0.8.9"
 axum-extra = { version = "0.12.6", default-features = false }
 base64 = "0.22.1"
-bigtable_rs = { git = "https://github.com/getsentry/bigtable_rs.git", rev = "56c310a5c8518d52ae7c7db53825beb078e326b5", default-features = false, features = ["gcp-auth-ring", "tonic-tls-ring"] }
+bigtable_rs = { git = "https://github.com/getsentry/bigtable_rs.git", rev = "072cb5871766b39c08c9a4d1f43c8d3895eeb96e", default-features = false, features = ["gcp-auth-ring", "tonic-tls-ring"] }
 blake3 = "1.8.5"
 bytes = "1.12.0"
 bytesize = "2.4.0"
@@ -52,6 +52,7 @@ console = "0.16.3"
 ed25519-dalek = { version = "2.2.0" }
 elegant-departure = "0.3.2"
 figment = "0.10.19"
+flate2 = "1.1.9"
 futures = "0.3.32"
 futures-util = "0.3.32"
 gcp_auth = "0.12.6"
@@ -89,8 +90,11 @@ sentry_arroyo = "2.47.0"
 # - `ssl` is required for SASL/SCRAM
 # - `librdkafka` must be built from source either way, and `cmake-build` is the
 #    recommended way to do it
-# - `libz-static` avoids a runtime dependency on `libz.so.1`; see objectstore-inventory-tracker
-rdkafka = { version = "0.39.0", features = [
+# - `libz-static` avoids a runtime dependency on `libz.so.1`, which distroless lacks
+# - the version range lets downstream users of objectstore-inventory-tracker pin
+#   whichever `rdkafka` they use; the lower bound matches `sentry_arroyo`, which
+#   shares the same `rdkafka` types
+rdkafka = { version = ">=0.37.0, <0.40.0", features = [
     "cmake-build",
     "libz-static",
     "ssl",

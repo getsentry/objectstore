@@ -532,6 +532,26 @@ async fn send_batch(
     Ok(results)
 }
 
+/// Returns the worst-case size of `size` bytes after compressing them with `compression`.
+fn compress_bound(compression: Compression, size: usize) -> usize {
+    match compression {
+        Compression::Zstd => zstd_safe::compress_bound(size),
+        Compression::Gzip => deflate_bound(size) + GZIP_FRAMING_SIZE,
+    }
+}
+
+/// Size of the gzip header and trailer around the deflate stream (RFC 1952).
+const GZIP_FRAMING_SIZE: usize = 18;
+
+/// Returns the worst-case size of a raw deflate stream for `size` input bytes.
+fn deflate_bound(size: usize) -> usize {
+    // Neither `flate2` nor `miniz_oxide` expose a bound, so this mirrors zlib's
+    // `compressBound` without its 6-byte zlib wrapper. Incompressible input is emitted
+    // as stored blocks with a 5-byte header each, which this conservatively bounds at
+    // 5 bytes per 16 KiB of input plus a constant for the final block.
+    size + (size >> 12) + (size >> 14) + (size >> 25) + 7
+}
+
 fn classify_fail(key: Option<ObjectKey>, error: Error) -> Classified {
     Classified::Failed(OperationResult::Put(
         key.unwrap_or_else(|| "<unknown>".to_owned()),
@@ -568,9 +588,9 @@ async fn classify(op: BatchOperation) -> Classified {
             // Client-side compression happens while streaming the body, so the on-wire size is
             // only known up to its worst case. Precompressed bodies are sent as-is.
             let size = match (compression, size) {
-                (Some(CompressionMode::Compress(Compression::Zstd)), Some(size)) => {
-                    usize::try_from(size).ok().map(zstd_safe::compress_bound)
-                }
+                (Some(CompressionMode::Compress(compression)), Some(size)) => usize::try_from(size)
+                    .ok()
+                    .map(|size| compress_bound(compression, size)),
                 (Some(CompressionMode::Precompressed(_)) | None, Some(size)) => {
                     usize::try_from(size).ok()
                 }
@@ -853,6 +873,16 @@ mod tests {
         core::assert_matches!(
             classify(put_with_zstd(size)).await,
             Classified::Individual(_)
+        );
+    }
+
+    #[tokio::test]
+    async fn gzip_put_bound() {
+        let size = 1_000_000;
+        let op = put_with_compression(size, CompressionMode::Compress(Compression::Gzip));
+        std::assert_matches!(
+            classify(op).await,
+            Classified::Batchable(_, s) if s == compress_bound(Compression::Gzip, size) as u64
         );
     }
 

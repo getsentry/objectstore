@@ -65,6 +65,7 @@ use anyhow::Result;
 use bytes::Bytes;
 use figment::providers::{Env, Format, Serialized, Yaml};
 use objectstore_service::backend::local_fs::FileSystemConfig;
+#[cfg(feature = "storage-cogs")]
 use objectstore_service::change_stream::CostTrackerConfig;
 use objectstore_service::encryption::Cipher;
 use objectstore_types::auth::Permission;
@@ -72,7 +73,7 @@ use secrecy::{CloneableSecret, SecretBox, SerializableSecret, zeroize::Zeroize};
 use serde::{Deserialize, Serialize};
 
 pub use objectstore_log::{LevelFilter, LogFormat, LoggingConfig};
-pub use objectstore_service::backend::{MultipartUploadStorageConfig, StorageConfig};
+pub use objectstore_service::backend::StorageConfig;
 
 use crate::killswitches::Killswitches;
 use crate::rate_limits::RateLimits;
@@ -543,6 +544,9 @@ pub struct Config {
     /// - `OS__STORAGE_COGS__TOPIC=shared-resources-inventory`
     /// - `OS__STORAGE_COGS__BOOTSTRAP_SERVERS=kafka:9092`
     /// - `OS__STORAGE_COGS__OVERRIDE_PARAMS__<PROPERTY>=<value>`
+    ///
+    /// Requires the `storage-cogs` Cargo feature.
+    #[cfg(feature = "storage-cogs")]
     #[serde(default)]
     pub storage_cogs: Option<CostTrackerConfig>,
 
@@ -852,6 +856,7 @@ impl Default for Config {
                 cogs: None,
             }),
 
+            #[cfg(feature = "storage-cogs")]
             storage_cogs: None,
             runtime: Runtime::default(),
             logging: LoggingConfig::default(),
@@ -926,7 +931,7 @@ impl Config {
 mod tests {
     use std::io::Write;
 
-    use objectstore_service::backend::{HighVolumeStorageConfig, MultipartUploadStorageConfig};
+    use objectstore_service::backend::HighVolumeStorageConfig;
     use secrecy::ExposeSecret;
 
     use crate::killswitches::Killswitch;
@@ -1125,7 +1130,7 @@ mod tests {
             let HighVolumeStorageConfig::BigTable(hv) = &c.high_volume;
             assert_eq!(hv.project_id, "my-project");
             assert_eq!(hv.rpc_timeout, Duration::from_secs(2));
-            let MultipartUploadStorageConfig::Gcs(lt) = &c.long_term else {
+            let StorageConfig::Gcs(lt) = c.long_term.as_ref() else {
                 panic!("expected gcs long_term");
             };
             assert_eq!(lt.bucket, "my-objectstore-bucket");
@@ -1156,7 +1161,7 @@ mod tests {
             assert_eq!(hv.instance_name, "my-instance");
             assert_eq!(hv.table_name, "my-table");
             assert_eq!(hv.rpc_timeout, Duration::from_millis(750));
-            let MultipartUploadStorageConfig::FileSystem(lt) = &c.long_term else {
+            let StorageConfig::FileSystem(lt) = c.long_term.as_ref() else {
                 panic!("expected filesystem long_term");
             };
             assert_eq!(lt.path, Path::new("/data/lt"));
@@ -1166,6 +1171,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "storage-cogs")]
     fn storage_cogs_via_env() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("OS__STORAGE__TYPE", "bigtable");
@@ -1213,6 +1219,7 @@ mod tests {
             };
             let stream = storage.cogs.as_ref().expect("change stream");
             assert_eq!(stream.sample_rate, 1.0, "reports everything by default");
+            #[cfg(feature = "storage-cogs")]
             assert!(
                 config.storage_cogs.is_none(),
                 "no transport is configured by default"
@@ -1223,6 +1230,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "storage-cogs")]
     fn serde_var_yaml_references() {
         let secrets = tempfile::tempdir().unwrap();
         let absolute_secret = secrets.path().join("kafka-password");

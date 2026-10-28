@@ -74,7 +74,7 @@ pub(super) async fn prepare(
         return Ok(PreparedBody::Direct(replay.into_put_body()));
     }
 
-    if let Some(CompressionMode::Compress(crate::Compression::Zstd)) = compression {
+    if let Some(CompressionMode::Compress(compression)) = compression {
         let temporary = tokio::task::spawn_blocking(move || match spool_dir {
             Some(dir) => tempfile::tempfile_in(dir),
             None => tempfile::tempfile(),
@@ -90,8 +90,15 @@ pub(super) async fn prepare(
             ReplayBody::Buffer(bytes) => Box::new(io::Cursor::new(bytes)),
             ReplayBody::File { file, .. } => Box::new(file),
         };
-        let mut encoder = super::ZstdEncoder::new(super::BufReader::new(reader));
-        let length = tokio::io::copy(&mut encoder, &mut temporary).await?;
+        let reader = super::BufReader::new(reader);
+        let length = match compression {
+            crate::Compression::Zstd => {
+                tokio::io::copy(&mut super::ZstdEncoder::new(reader), &mut temporary).await?
+            }
+            crate::Compression::Gzip => {
+                tokio::io::copy(&mut super::GzipEncoder::new(reader), &mut temporary).await?
+            }
+        };
         temporary.flush().await?;
         temporary.rewind().await?;
         replay = ReplayBody::File {

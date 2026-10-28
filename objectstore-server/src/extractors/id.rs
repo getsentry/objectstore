@@ -30,9 +30,7 @@ impl IntoResponse for ObjectRejection {
                 "Object access is disabled for this scope through killswitches",
             )
                 .into_response(),
-            ObjectRejection::RateLimited(error) => {
-                (error.status(), error.to_string()).into_response()
-            }
+            ObjectRejection::RateLimited(error) => error.into_response(),
         }
     }
 }

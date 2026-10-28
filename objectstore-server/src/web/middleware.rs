@@ -11,6 +11,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use crate::endpoints;
 use crate::extractors::downstream_service::DownstreamService;
 use crate::extractors::request_time::RequestTime;
+use crate::rate_limits::LimitExceeded;
 use crate::web::RequestCounter;
 use crate::web::metrics_body::{EmitMetricsGuard, MetricsBody};
 use crate::web::sentry_body::SentryBody;
@@ -41,7 +42,7 @@ pub async fn limit_web_concurrency(
         let service = request.extract_parts::<DownstreamService>().await.unwrap();
         objectstore_metrics::count!("web.concurrency.rejected", service = service.to_string());
         objectstore_log::warn!("Request rejected: web concurrency limit reached");
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        return LimitExceeded::Capacity.into_response();
     }
 
     next.run(request).await

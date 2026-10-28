@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::num::NonZeroU64;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 use std::{fmt, io};
 
 use futures_util::{StreamExt, TryStreamExt};
@@ -14,13 +14,13 @@ use objectstore_types::headers;
 use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use objectstore_types::range::{ByteRange, ContentRange};
 use objectstore_types::time::{Rfc3339Timestamp, Timestamp};
-use reqwest::header::{HeaderMap, HeaderName};
+use reqwest::header::HeaderMap;
 use reqwest::{Body, IntoUrl, Method, RequestBuilder, StatusCode, Url, header, multipart};
 use serde::{Deserialize, Serialize};
 
 use crate::backend::common::{
-    self, Backend, DeleteResponse, ExpiryUpdate, GetResponse, MetadataResponse,
-    MultipartUploadBackend, PutResponse, SetExpiryResponse,
+    self, Backend, DeleteResponse, ExpiryUpdate, GetResponse, MetadataResponse, PutResponse,
+    SetExpiryResponse,
 };
 use crate::backend::extensions::{ReqwestResultExt, ResponseExt, SendTraced};
 use crate::change_stream::{
@@ -29,10 +29,6 @@ use crate::change_stream::{
 use crate::error::{Error, ErrorKind, Result, ResultExt as _};
 use crate::gcp_auth::PrefetchingTokenProvider;
 use crate::id::ObjectId;
-use crate::multipart::{
-    AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
-    ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
-};
 use crate::resumable::{BackendToken, Session, UploadProgress};
 use crate::stream::ClientStream;
 
@@ -247,8 +243,7 @@ impl GcsObject {
             );
         }
 
-        // Free-form strings are stored escaped, even though this JSON representation could carry
-        // them verbatim. See `insert_gcs_meta_header` for why, and why both writers must agree.
+        // Preserve the stored escaping convention for free-form metadata strings.
         if let Some(origin) = &metadata.origin {
             gcs_object.metadata.insert(
                 GcsMetaKey::Origin,
@@ -410,83 +405,9 @@ impl Serialize for GcsMetaKey {
     }
 }
 
-/// Builds HTTP headers that encode `metadata` for a GCS XML API request.
-fn metadata_to_gcs_headers(metadata: &Metadata) -> Result<header::HeaderMap> {
-    let mut headers = header::HeaderMap::new();
-
-    if let Some(custom_time) = metadata.time_expires {
-        let formatted = custom_time.as_rfc3339();
-        headers.insert(
-            HeaderName::from_static("x-goog-custom-time"),
-            formatted
-                .to_string()
-                .parse()
-                .context(ErrorKind::Internal, "encoding GCS custom-time header")?,
-        );
-    }
-
-    if let Some(compression) = metadata.compression {
-        headers.insert(
-            header::CONTENT_ENCODING,
-            compression
-                .to_string()
-                .parse()
-                .context(ErrorKind::Internal, "encoding GCS content-encoding header")?,
-        );
-    }
-
-    if metadata.expiration_policy != ExpirationPolicy::default() {
-        insert_gcs_meta_header(
-            &mut headers,
-            &GcsMetaKey::Expiration,
-            &metadata.expiration_policy.to_string(),
-        )?;
-    }
-
-    if let Some(origin) = &metadata.origin {
-        insert_gcs_meta_header(&mut headers, &GcsMetaKey::Origin, origin)?;
-    }
-
-    if let Some(filename) = &metadata.filename {
-        insert_gcs_meta_header(&mut headers, &GcsMetaKey::Filename, filename)?;
-    }
-
-    for (key, value) in &metadata.custom {
-        insert_gcs_meta_header(&mut headers, &GcsMetaKey::Custom(key.clone()), value)?;
-    }
-
-    Ok(headers)
-}
-
 /// Decodes a stored GCS metadata value into its logical string.
 fn decode_gcs_meta_value(value: &str, context: &'static str) -> Result<String> {
     headers::decode_header_str(value).context(ErrorKind::CorruptData, context)
-}
-
-/// Inserts a single `x-goog-meta-*` header, escaping the value for transport.
-///
-/// Google: "you should generally avoid non-ascii characters, because they are not permitted in
-/// HTTP headers, which the XML API uses" ([docs]). Real GCS does preserve raw UTF-8 here, but that
-/// is undocumented, and it still drops leading whitespace and turns invalid UTF-8 into `U+FFFD`.
-///
-/// [`GcsObject::from_metadata`] escapes the same values on the JSON path: reads always come back
-/// through the JSON API and cannot tell which writer produced an object, so both must agree.
-///
-/// [docs]: https://docs.cloud.google.com/storage/docs/metadata
-fn insert_gcs_meta_header(
-    headers: &mut header::HeaderMap,
-    key: &GcsMetaKey,
-    value: &str,
-) -> Result<()> {
-    let header_name = format!("x-goog-meta-{key}");
-    headers.insert(
-        HeaderName::try_from(&header_name).context(
-            ErrorKind::Internal,
-            format!("encoding GCS metadata header {header_name}"),
-        )?,
-        headers::encode_header_value(value),
-    );
-    Ok(())
 }
 
 /// Special status code returned by GCS when a Resumable Upload is canceled successfully or when
@@ -592,29 +513,6 @@ impl GcsBackend {
         Ok(url)
     }
 
-    /// Formats a GCS XML API URL for the given object.
-    ///
-    /// Unlike [`object_url`](Self::object_url) (JSON API at
-    /// `/storage/v1/b/{bucket}/o/{name}`), this produces
-    /// `/{bucket}/{path_segments}` for the S3-compatible XML API used by
-    /// multipart uploads.
-    fn xml_object_url(&self, id: &ObjectId) -> Result<Url> {
-        let mut url = self.endpoint.clone();
-        {
-            let mut segments = url.path_segments_mut().map_err(|()| {
-                Error::new(
-                    ErrorKind::Internal,
-                    format!("building GCS object URL from {}", self.endpoint),
-                )
-            })?;
-            segments.push(&self.bucket);
-            for part in id.as_storage_path().to_string().split('/') {
-                segments.push(part);
-            }
-        }
-        Ok(url)
-    }
-
     /// Creates a request builder with the appropriate authentication.
     async fn request(&self, method: Method, url: impl IntoUrl) -> Result<RequestBuilder> {
         let mut builder = self.client.request(method, url);
@@ -626,6 +524,17 @@ impl GcsBackend {
             builder = builder.bearer_auth(token.as_str());
         }
         Ok(builder)
+    }
+
+    /// Counts a terminal request-operation error without retrying the future.
+    async fn with_failure_metrics<T>(
+        &self,
+        action: &'static str,
+        future: impl Future<Output = Result<T>> + Send,
+    ) -> Result<T> {
+        future.await.inspect_err(|_| {
+            objectstore_metrics::count!("gcs.failures", action = action);
+        })
     }
 
     /// Retries a GCS request on transient errors.
@@ -889,10 +798,6 @@ impl Backend for GcsBackend {
         256 * 1024
     }
 
-    fn as_multipart_upload_backend(&self) -> Result<&dyn MultipartUploadBackend> {
-        Ok(self)
-    }
-
     #[tracing::instrument(level = "debug", fields(?id), skip_all)]
     async fn put_object(
         &self,
@@ -937,14 +842,18 @@ impl Backend for GcsBackend {
         // set the header *after* writing the multipart form into the request.
         let content_type = format!("multipart/related; boundary={}", multipart.boundary());
 
+        let url = self.upload_url(id, "multipart")?;
         let response = self
-            .request(Method::POST, self.upload_url(id, "multipart")?)
-            .await?
-            .multipart(multipart)
-            .header(header::CONTENT_TYPE, content_type)
-            .send_traced()
-            .await
-            .check_error("uploading a GCS object")
+            .with_failure_metrics("put_object", async {
+                self.request(Method::POST, url)
+                    .await?
+                    .multipart(multipart)
+                    .header(header::CONTENT_TYPE, content_type)
+                    .send_traced()
+                    .await
+                    .check_error("uploading a GCS object")
+                    .await
+            })
             .await?;
 
         let stored_size = read_stored_content_length(response).await;
@@ -983,7 +892,15 @@ impl Backend for GcsBackend {
 
             let payload_response = self
                 .with_retry("get_payload", || async {
-                    let mut req = self.request(Method::GET, download_url.clone()).await?;
+                    // GCS transparently decompresses objects stored with `Content-Encoding: gzip`
+                    // unless the request accepts gzip (decompressive transcoding). We always return
+                    // payloads exactly as stored, so opt out of it. This also keeps range reads
+                    // applying to the stored bytes. See:
+                    // https://cloud.google.com/storage/docs/transcoding#decompressive_transcoding
+                    let mut req = self
+                        .request(Method::GET, download_url.clone())
+                        .await?
+                        .header(header::ACCEPT_ENCODING, "gzip");
                     if let Some(r) = range {
                         req = req.header(header::RANGE, r.to_header_value());
                     }
@@ -1276,17 +1193,21 @@ impl Backend for GcsBackend {
             _ => format!("bytes {offset}-{}/{}", end - 1, session.upload_length),
         };
 
-        let response = self
-            .request(Method::PUT, session_uri.as_str())
-            .await?
-            .header(header::CONTENT_LENGTH, content_length)
-            .header(header::CONTENT_RANGE, content_range)
-            .body(Body::wrap_stream(stream))
-            .send_traced()
-            .await
-            .reqwest_context("uploading a GCS resumable chunk")?;
+        let progress = self
+            .with_failure_metrics("put_chunk", async {
+                let response = self
+                    .request(Method::PUT, session_uri.as_str())
+                    .await?
+                    .header(header::CONTENT_LENGTH, content_length)
+                    .header(header::CONTENT_RANGE, content_range)
+                    .body(Body::wrap_stream(stream))
+                    .send_traced()
+                    .await
+                    .reqwest_context("uploading a GCS resumable chunk")?;
 
-        let progress = range_response_to_upload_progress(session.upload_length, response).await?;
+                range_response_to_upload_progress(session.upload_length, response).await
+            })
+            .await?;
         if let GcsUploadProgress::Complete(ref object) = progress {
             let stored_size = object.size.as_deref().and_then(|size| size.parse().ok());
             let expires_at = object.custom_time.map(Rfc3339Timestamp::into_inner);
@@ -1388,380 +1309,12 @@ impl Backend for GcsBackend {
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct XmlInitiateMultipartUploadResponse {
-    upload_id: String,
-}
-
-impl TryFrom<XmlInitiateMultipartUploadResponse> for InitiateMultipartResponse {
-    type Error = Error;
-
-    fn try_from(r: XmlInitiateMultipartUploadResponse) -> Result<Self> {
-        Ok(UploadId::new(r.upload_id)?)
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct XmlListPartsResponse {
-    #[serde(default)]
-    is_truncated: bool,
-    next_part_number_marker: Option<PartNumber>,
-    #[serde(default, rename = "Part")]
-    parts: Vec<XmlPart>,
-}
-
-impl From<XmlListPartsResponse> for ListPartsResponse {
-    fn from(xml: XmlListPartsResponse) -> Self {
-        Self {
-            parts: xml.parts.into_iter().map(Into::into).collect(),
-            is_truncated: xml.is_truncated,
-            next_part_number_marker: xml.next_part_number_marker,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct XmlPart {
-    part_number: PartNumber,
-    #[serde(rename = "ETag")]
-    e_tag: String,
-    #[serde(with = "humantime_serde")]
-    last_modified: SystemTime,
-    size: u64,
-}
-
-impl From<XmlPart> for crate::multipart::Part {
-    fn from(p: XmlPart) -> Self {
-        Self {
-            part_number: p.part_number,
-            etag: p.e_tag,
-            last_modified: p.last_modified,
-            size: p.size,
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename = "CompleteMultipartUpload")]
-struct XmlCompleteMultipartUpload {
-    #[serde(rename = "Part")]
-    parts: Vec<XmlCompletePart>,
-}
-
-impl From<Vec<CompletedPart>> for XmlCompleteMultipartUpload {
-    fn from(parts: Vec<CompletedPart>) -> Self {
-        Self {
-            parts: parts.into_iter().map(Into::into).collect(),
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "PascalCase")]
-struct XmlCompletePart {
-    part_number: PartNumber,
-    #[serde(rename = "ETag")]
-    e_tag: String,
-}
-
-impl From<CompletedPart> for XmlCompletePart {
-    fn from(p: CompletedPart) -> Self {
-        Self {
-            part_number: p.part_number,
-            e_tag: p.etag,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename = "Error", rename_all = "PascalCase")]
-struct XmlError {
-    code: String,
-    message: String,
-}
-
-impl From<XmlError> for crate::multipart::CompleteMultipartError {
-    fn from(e: XmlError) -> Self {
-        Self {
-            code: e.code,
-            message: e.message,
-        }
-    }
-}
-
-/// XXX: Any change that affects this implementation should be manually tested against real GCS.
-/// That's because the fork of [storage-testbench](https://github.com/googleapis/storage-testbench)
-/// that we test against has an incomplete implementation of the XML multipart API that likely doesn't match GCS's behavior in many cases.
-#[async_trait::async_trait]
-impl MultipartUploadBackend for GcsBackend {
-    #[tracing::instrument(level = "debug", fields(?id), skip_all)]
-    async fn initiate_multipart(
-        &self,
-        id: &ObjectId,
-        metadata: &Metadata,
-    ) -> Result<InitiateMultipartResponse> {
-        objectstore_log::debug!("Initiating multipart upload on GCS backend");
-        self.change_stream
-            .begin_write(id, metadata.time_expires)
-            .await?;
-        let mut url = self.xml_object_url(id)?;
-        url.set_query(Some("uploads"));
-
-        let mut headers = metadata_to_gcs_headers(metadata)?;
-        headers.insert(
-            header::CONTENT_TYPE,
-            metadata
-                .content_type
-                .parse()
-                .context(ErrorKind::InvalidMetadata, "encoding GCS content type")?,
-        );
-        headers.insert(
-            header::CONTENT_LENGTH,
-            header::HeaderValue::from_static("0"),
-        );
-
-        self.with_retry("initiate_multipart", || {
-            let url = url.clone();
-            let headers = headers.clone();
-            async move {
-                let resp = self
-                    .request(Method::POST, url)
-                    .await?
-                    .headers(headers)
-                    .send_traced()
-                    .await
-                    .check_error("initiating a GCS multipart upload")
-                    .await?;
-
-                let body = resp
-                    .bytes()
-                    .await
-                    .reqwest_context("reading GCS initiate-multipart response")?;
-
-                let xml: XmlInitiateMultipartUploadResponse =
-                    quick_xml::de::from_reader(body.as_ref()).context(
-                        ErrorKind::CorruptData,
-                        "decoding GCS initiate-multipart response",
-                    )?;
-
-                xml.try_into()
-            }
-        })
-        .await
-    }
-
-    #[tracing::instrument(level = "debug", skip(self, content_md5, body))]
-    async fn upload_part(
-        &self,
-        id: &ObjectId,
-        upload_id: &UploadId,
-        part_number: PartNumber,
-        content_length: u64,
-        content_md5: Option<&str>,
-        body: ClientStream,
-    ) -> Result<UploadPartResponse> {
-        objectstore_log::debug!("Uploading part to GCS backend");
-        let mut url = self.xml_object_url(id)?;
-        url.query_pairs_mut()
-            .append_pair("partNumber", &part_number.to_string())
-            .append_pair("uploadId", upload_id);
-
-        let mut builder = self
-            .request(Method::PUT, url)
-            .await?
-            .header(header::CONTENT_LENGTH, content_length)
-            .body(Body::wrap_stream(body));
-
-        if let Some(md5) = content_md5 {
-            builder = builder.header("content-md5", md5);
-        }
-
-        let resp = builder
-            .send_traced()
-            .await
-            .check_error("uploading a GCS multipart part")
-            .await?;
-
-        let etag = resp
-            .headers()
-            .get(header::ETAG)
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_owned())
-            .ok_or_else(|| {
-                Error::new(
-                    ErrorKind::BackendFailure,
-                    "GCS upload-part response missing ETag",
-                )
-            })?;
-
-        resp.drain_body().await;
-
-        Ok(etag)
-    }
-
-    #[tracing::instrument(level = "debug", skip(self))]
-    async fn list_parts(
-        &self,
-        id: &ObjectId,
-        upload_id: &UploadId,
-        max_parts: Option<u32>,
-        part_number_marker: Option<PartNumber>,
-    ) -> Result<ListPartsResponse> {
-        objectstore_log::debug!("Listing parts on GCS backend");
-        let mut url = self.xml_object_url(id)?;
-        {
-            let mut pairs = url.query_pairs_mut();
-            pairs.append_pair("uploadId", upload_id);
-            if let Some(max) = max_parts {
-                pairs.append_pair("max-parts", &max.to_string());
-            }
-            if let Some(marker) = part_number_marker {
-                pairs.append_pair("part-number-marker", &marker.to_string());
-            }
-        }
-
-        self.with_retry("list_parts", || {
-            let url = url.clone();
-            async move {
-                let resp = self
-                    .request(Method::GET, url)
-                    .await?
-                    .send_traced()
-                    .await
-                    .check_error("listing GCS multipart parts")
-                    .await?;
-
-                let body = resp
-                    .bytes()
-                    .await
-                    .reqwest_context("reading GCS list-parts response")?;
-
-                let xml: XmlListPartsResponse = quick_xml::de::from_reader(body.as_ref())
-                    .context(ErrorKind::CorruptData, "decoding GCS list-parts response")?;
-
-                Ok(xml.into())
-            }
-        })
-        .await
-    }
-
-    #[tracing::instrument(level = "debug", skip(self))]
-    async fn abort_multipart(
-        &self,
-        id: &ObjectId,
-        upload_id: &UploadId,
-    ) -> Result<AbortMultipartResponse> {
-        objectstore_log::debug!("Aborting multipart upload on GCS backend");
-        let mut url = self.xml_object_url(id)?;
-        url.query_pairs_mut().append_pair("uploadId", upload_id);
-
-        self.with_retry("abort_multipart", || {
-            let url = url.clone();
-            async move {
-                let resp = self
-                    .request(Method::DELETE, url)
-                    .await?
-                    .send_traced()
-                    .await
-                    .reqwest_context("aborting a GCS multipart upload")?;
-
-                // XXX: real S3 would return 404 here if the upload has been recently completed and we
-                // would have to handle it. It turns out GCS returns 204 instead, so we don't need to
-                // handle that case.
-
-                resp.check_error("aborting a GCS multipart upload")
-                    .await?
-                    .drain_body()
-                    .await;
-
-                Ok(())
-            }
-        })
-        .await
-    }
-
-    #[tracing::instrument(level = "debug", skip(self, parts))]
-    async fn complete_multipart(
-        &self,
-        id: &ObjectId,
-        upload_id: &UploadId,
-        parts: Vec<CompletedPart>,
-        access_time: Timestamp,
-    ) -> Result<CompleteMultipartResponse> {
-        objectstore_log::debug!("Completing multipart upload on GCS backend");
-        let mut url = self.xml_object_url(id)?;
-        url.query_pairs_mut().append_pair("uploadId", upload_id);
-
-        let body = XmlCompleteMultipartUpload::from(parts);
-        let xml = quick_xml::se::to_string(&body).context(
-            ErrorKind::Internal,
-            "encoding GCS complete-multipart request",
-        )?;
-
-        self.with_retry("complete_multipart", || {
-            let url = url.clone();
-            let xml = xml.clone();
-            async move {
-                let resp = self
-                    .request(Method::POST, url)
-                    .await?
-                    .header(header::CONTENT_TYPE, "application/xml")
-                    .body(xml)
-                    .send_traced()
-                    .await
-                    .check_error("completing a GCS multipart upload")
-                    .await?;
-
-                // XXX: real S3 would return 404 here if the upload has been recently completed and we
-                // would have to handle it. It turns out GCS returns 200 instead, so we don't need to
-                // handle that case.
-
-                let body = resp
-                    .bytes()
-                    .await
-                    .reqwest_context("reading GCS complete-multipart response")?;
-
-                let error = quick_xml::de::from_reader::<_, XmlError>(body.as_ref())
-                    .ok()
-                    .map(Into::into);
-
-                if error.is_none() {
-                    // The XML API does not return the stored object, so read it back.
-                    let object = self
-                        .get_gcs_metadata(&self.object_url(id)?, access_time)
-                        .await
-                        .ok()
-                        .flatten();
-                    let stored_size = object
-                        .as_ref()
-                        .and_then(|object| object.size.as_deref()?.parse().ok());
-                    self.report_object_write(
-                        id,
-                        stored_size,
-                        object.as_ref().map_or(0, GcsObject::metadata_size),
-                        object.and_then(|object| {
-                            object.custom_time.map(Rfc3339Timestamp::into_inner)
-                        }),
-                    )
-                    .await;
-                }
-
-                Ok(error)
-            }
-        })
-        .await
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::num::{NonZeroU32, NonZeroU64};
+    use std::num::NonZeroU64;
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
@@ -1775,7 +1328,6 @@ mod tests {
     use super::*;
     use crate::backend::common::ExpiryTarget;
     use crate::id::ObjectContext;
-    use crate::multipart::CompletedPart;
     use crate::stream;
     #[cfg(feature = "storage-cogs")]
     use crate::stream::ClientError;
@@ -1972,6 +1524,15 @@ mod tests {
         assert!(requests[1].contains("alt=media&ifGenerationMatch=1"));
         assert!(!requests[2].contains("alt=media"));
         assert!(requests[3].contains("alt=media&ifGenerationMatch=2"));
+        // Payload downloads opt out of GCS decompressive transcoding.
+        for request in [&requests[1], &requests[3]] {
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("\r\naccept-encoding: gzip\r\n"),
+                "missing accept-encoding: {request}"
+            );
+        }
         server.join().unwrap();
 
         Ok(())
@@ -2263,12 +1824,27 @@ mod tests {
             .create_upload_session(&id, &Metadata::default(), nonzero(4))
             .await?;
         inject_retry_test(&mut backend, "storage.objects.insert", "return-503").await?;
-        assert!(matches!(
-            backend
-                .put_chunk(&token, 0, 4, stream::single(b"data".to_vec()))
-                .await,
-            Err(error) if error.kind() == ErrorKind::BackendUnavailable
-        ));
+        let metrics = objectstore_metrics::with_capturing_test_client_async(async {
+            assert!(matches!(
+                backend
+                    .put_chunk(&token, 0, 4, stream::single(b"data".to_vec()))
+                    .await,
+                Err(error) if error.kind() == ErrorKind::BackendUnavailable
+            ));
+        })
+        .await;
+        assert_eq!(
+            metrics
+                .iter()
+                .filter(|metric| metric.starts_with("gcs.failures:"))
+                .collect::<Vec<_>>(),
+            ["gcs.failures:+1|c|#action:put_chunk"]
+        );
+        assert!(
+            !metrics
+                .iter()
+                .any(|metric| metric.starts_with("gcs.retries:"))
+        );
         assert_eq!(
             backend.upload_offset(&token).await?,
             UploadProgress::Incomplete { offset: 0 }
@@ -2408,9 +1984,6 @@ mod tests {
         }
     }
 
-    /// Both GCS write paths must agree on how a logical string is stored, because every read goes
-    /// through the JSON API: `put_object` writes metadata as JSON, `initiate_multipart` writes it
-    /// as `x-goog-meta-*` request headers.
     #[tokio::test]
     async fn test_unicode_metadata_roundtrip_json_upload() -> Result<()> {
         let backend = create_test_backend().await?;
@@ -2425,21 +1998,6 @@ mod tests {
                 Timestamp::now(),
             )
             .await?;
-
-        let meta = backend.get_metadata(&id, Timestamp::now()).await?.unwrap();
-        assert_eq!(meta.filename, metadata.filename);
-        assert_eq!(meta.custom, metadata.custom);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_unicode_metadata_roundtrip_multipart_upload() -> Result<()> {
-        let backend = create_test_backend().await?;
-        let id = make_id();
-        let metadata = unicode_metadata();
-
-        multipart_put(&backend, &id, &metadata, "hello, world").await?;
 
         let meta = backend.get_metadata(&id, Timestamp::now()).await?.unwrap();
         assert_eq!(meta.filename, metadata.filename);
@@ -2835,411 +2393,38 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn test_multipart_single_part() -> Result<()> {
-        let backend = create_test_backend().await?;
-        let id = make_id();
-        let metadata = Metadata {
-            content_type: "text/plain".into(),
-            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_mins(33)),
-            origin: Some("203.0.113.42".into()),
-            custom: BTreeMap::from_iter([("hello".into(), "world".into())]),
-            ..Default::default()
-        };
-
-        let upload_id = backend.initiate_multipart(&id, &metadata).await?;
-
-        let data = b"hello, multipart world!";
-        let etag = backend
-            .upload_part(
-                &id,
-                &upload_id,
-                NonZeroU32::new(1).unwrap(),
-                data.len() as u64,
-                None,
-                stream::single(data.to_vec()),
-            )
-            .await?;
-
-        let result = backend
-            .complete_multipart(
-                &id,
-                &upload_id,
-                vec![CompletedPart {
-                    part_number: NonZeroU32::new(1).unwrap(),
-                    etag,
-                }],
-                Timestamp::now(),
-            )
-            .await?;
-        assert!(result.is_none(), "expected no error on complete");
-
-        let (meta, _, stream) = backend
-            .get_object(&id, Timestamp::now(), None)
-            .await?
-            .unwrap();
-        let payload = stream::read_to_vec(stream).await?;
-        assert_eq!(payload, data);
-        assert_eq!(meta.content_type, "text/plain".to_string());
-        assert_eq!(
-            meta.expiration_policy,
-            ExpirationPolicy::TimeToLive(Duration::from_mins(33))
-        );
-        assert_eq!(meta.origin, Some("203.0.113.42".into()));
-        assert_eq!(
-            meta.custom,
-            BTreeMap::from_iter([("hello".into(), "world".into())])
-        );
-
-        Ok(())
+    fn gzip_encode(data: &[u8]) -> Vec<u8> {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(data).unwrap();
+        encoder.finish().unwrap()
     }
 
+    /// GCS decompresses `Content-Encoding: gzip` objects on download unless the request accepts
+    /// gzip. Full and range reads must return the stored compressed bytes.
     #[tokio::test]
-    async fn test_multipart_multiple_parts() -> Result<()> {
-        let backend = create_test_backend().await?;
-        let id = make_id();
-        let metadata = Metadata::default();
-
-        let upload_id = backend.initiate_multipart(&id, &metadata).await?;
-
-        // Non-final parts must be >= 5 MiB.
-        const MIN_PART: usize = 5 * 1024 * 1024;
-        let part1 = vec![b'a'; MIN_PART];
-        let part2 = vec![b'b'; MIN_PART];
-        let part3 = b"cccc".to_vec();
-
-        let etag1 = backend
-            .upload_part(
-                &id,
-                &upload_id,
-                NonZeroU32::new(1).unwrap(),
-                part1.len() as u64,
-                None,
-                stream::single(part1.clone()),
-            )
-            .await?;
-        let etag2 = backend
-            .upload_part(
-                &id,
-                &upload_id,
-                NonZeroU32::new(2).unwrap(),
-                part2.len() as u64,
-                None,
-                stream::single(part2.clone()),
-            )
-            .await?;
-        let etag3 = backend
-            .upload_part(
-                &id,
-                &upload_id,
-                NonZeroU32::new(3).unwrap(),
-                part3.len() as u64,
-                None,
-                stream::single(part3.clone()),
-            )
-            .await?;
-
-        let result = backend
-            .complete_multipart(
-                &id,
-                &upload_id,
-                vec![
-                    CompletedPart {
-                        part_number: NonZeroU32::new(1).unwrap(),
-                        etag: etag1,
-                    },
-                    CompletedPart {
-                        part_number: NonZeroU32::new(2).unwrap(),
-                        etag: etag2,
-                    },
-                    CompletedPart {
-                        part_number: NonZeroU32::new(3).unwrap(),
-                        etag: etag3,
-                    },
-                ],
-                Timestamp::now(),
-            )
-            .await?;
-        assert!(result.is_none(), "expected no error on complete");
-
-        // Object exists after complete
-        let (_meta, _, stream) = backend
-            .get_object(&id, Timestamp::now(), None)
-            .await?
-            .unwrap();
-        let payload = stream::read_to_vec(stream).await?;
-        let mut expected = Vec::new();
-        expected.extend_from_slice(&part1);
-        expected.extend_from_slice(&part2);
-        expected.extend_from_slice(&part3);
-        assert_eq!(payload, expected);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_multipart_out_of_order_upload() -> Result<()> {
-        let backend = create_test_backend().await?;
-        let id = make_id();
-        let metadata = Metadata::default();
-
-        let upload_id = backend.initiate_multipart(&id, &metadata).await?;
-
-        // Non-final parts must be >= 5 MiB.
-        const MIN_PART: usize = 5 * 1024 * 1024;
-        let part1 = vec![b'a'; MIN_PART];
-        let part2 = vec![b'b'; MIN_PART];
-        let part3 = b"cccc".to_vec();
-
-        // Upload parts out of order: 2, 3, 1.
-        let etag2 = backend
-            .upload_part(
-                &id,
-                &upload_id,
-                NonZeroU32::new(2).unwrap(),
-                part2.len() as u64,
-                None,
-                stream::single(part2.clone()),
-            )
-            .await?;
-        let etag3 = backend
-            .upload_part(
-                &id,
-                &upload_id,
-                NonZeroU32::new(3).unwrap(),
-                part3.len() as u64,
-                None,
-                stream::single(part3.clone()),
-            )
-            .await?;
-        let etag1 = backend
-            .upload_part(
-                &id,
-                &upload_id,
-                NonZeroU32::new(1).unwrap(),
-                part1.len() as u64,
-                None,
-                stream::single(part1.clone()),
-            )
-            .await?;
-
-        // Complete with parts listed in order.
-        let result = backend
-            .complete_multipart(
-                &id,
-                &upload_id,
-                vec![
-                    CompletedPart {
-                        part_number: NonZeroU32::new(1).unwrap(),
-                        etag: etag1,
-                    },
-                    CompletedPart {
-                        part_number: NonZeroU32::new(2).unwrap(),
-                        etag: etag2,
-                    },
-                    CompletedPart {
-                        part_number: NonZeroU32::new(3).unwrap(),
-                        etag: etag3,
-                    },
-                ],
-                Timestamp::now(),
-            )
-            .await?;
-        assert!(result.is_none(), "expected no error on complete");
-
-        // Verify reassembly order matches part numbers, not upload order.
-        let (_meta, _, stream) = backend
-            .get_object(&id, Timestamp::now(), None)
-            .await?
-            .unwrap();
-        let payload = stream::read_to_vec(stream).await?;
-        let mut expected = Vec::new();
-        expected.extend_from_slice(&part1);
-        expected.extend_from_slice(&part2);
-        expected.extend_from_slice(&part3);
-        assert_eq!(payload, expected);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_multipart_list_parts() -> Result<()> {
-        let backend = create_test_backend().await?;
-        let id = make_id();
-        let metadata = Metadata::default();
-
-        let upload_id = backend.initiate_multipart(&id, &metadata).await?;
-
-        let etag1 = backend
-            .upload_part(
-                &id,
-                &upload_id,
-                NonZeroU32::new(1).unwrap(),
-                3,
-                None,
-                stream::single(b"aaa".to_vec()),
-            )
-            .await?;
-        let etag2 = backend
-            .upload_part(
-                &id,
-                &upload_id,
-                NonZeroU32::new(2).unwrap(),
-                3,
-                None,
-                stream::single(b"bbb".to_vec()),
-            )
-            .await?;
-
-        // List all parts.
-        let list = backend.list_parts(&id, &upload_id, None, None).await?;
-        assert_eq!(list.parts.len(), 2);
-        assert_eq!(list.parts[0].part_number.get(), 1);
-        assert_eq!(list.parts[0].etag, etag1);
-        assert_eq!(list.parts[0].size, 3);
-        assert_eq!(list.parts[1].part_number.get(), 2);
-        assert_eq!(list.parts[1].etag, etag2);
-        assert_eq!(list.parts[1].size, 3);
-
-        // List with max_parts=1 to test pagination.
-        let page1 = backend.list_parts(&id, &upload_id, Some(1), None).await?;
-        assert_eq!(page1.parts.len(), 1);
-        assert_eq!(page1.parts[0].part_number.get(), 1);
-        assert!(page1.is_truncated);
-        assert!(page1.next_part_number_marker.is_some());
-
-        let page2 = backend
-            .list_parts(&id, &upload_id, Some(1), page1.next_part_number_marker)
-            .await?;
-        assert_eq!(page2.parts.len(), 1);
-        assert_eq!(page2.parts[0].part_number.get(), 2);
-
-        // Clean up.
-        backend.abort_multipart(&id, &upload_id).await?;
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_multipart_abort() -> Result<()> {
-        let backend = create_test_backend().await?;
-        let id = make_id();
-        let metadata = Metadata::default();
-
-        let upload_id = backend.initiate_multipart(&id, &metadata).await?;
-
-        backend
-            .upload_part(
-                &id,
-                &upload_id,
-                NonZeroU32::new(1).unwrap(),
-                5,
-                None,
-                stream::single(b"hello".to_vec()),
-            )
-            .await?;
-
-        backend.abort_multipart(&id, &upload_id).await?;
-
-        // Object should not exist after abort.
-        let result = backend.get_object(&id, Timestamp::now(), None).await?;
-        assert!(result.is_none(), "object should not exist after abort");
-
-        // A second abort should still succeed (idempotent 404 handling).
-        backend.abort_multipart(&id, &upload_id).await?;
-
-        Ok(())
-    }
-
-    async fn multipart_put(
-        backend: &GcsBackend,
-        id: &ObjectId,
-        metadata: &Metadata,
-        payload: impl Into<bytes::Bytes>,
-    ) -> Result<()> {
-        let payload: bytes::Bytes = payload.into();
-        let upload_id = backend.initiate_multipart(id, metadata).await?;
-        let etag = backend
-            .upload_part(
-                id,
-                &upload_id,
-                NonZeroU32::new(1).unwrap(),
-                payload.len() as u64,
-                None,
-                stream::single(payload),
-            )
-            .await?;
-        let error = backend
-            .complete_multipart(
-                id,
-                &upload_id,
-                vec![CompletedPart {
-                    part_number: NonZeroU32::new(1).unwrap(),
-                    etag,
-                }],
-                Timestamp::now(),
-            )
-            .await?;
-        assert!(
-            error.is_none(),
-            "complete_multipart returned error: {error:?}"
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_multipart_ttl_immediate() -> Result<()> {
-        let backend = create_test_backend().await?;
-        let id = make_id();
-        let metadata = Metadata {
-            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_secs(0)),
-            time_expires: Some(Timestamp::now() - Duration::from_secs(1)),
-            ..Default::default()
-        };
-
-        multipart_put(&backend, &id, &metadata, "hello, world").await?;
-
-        let result = backend.get_object(&id, Timestamp::now(), None).await?;
-        assert!(result.is_none());
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_multipart_tti_immediate() -> Result<()> {
-        let backend = create_test_backend().await?;
-        let id = make_id();
-        let metadata = Metadata {
-            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_secs(0)),
-            time_expires: Some(Timestamp::now() - Duration::from_secs(1)),
-            ..Default::default()
-        };
-
-        multipart_put(&backend, &id, &metadata, "hello, world").await?;
-
-        let result = backend.get_object(&id, Timestamp::now(), None).await?;
-        assert!(result.is_none());
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_multipart_compressed_payload_roundtrip() -> Result<()> {
+    async fn test_gzip_payload_full_and_range_reads() -> Result<()> {
         use objectstore_types::metadata::Compression;
 
         let backend = create_test_backend().await?;
 
-        let plaintext = b"hello, world (but compressed with zstd)";
-        let compressed = zstd::encode_all(&plaintext[..], 3)?;
+        let plaintext = b"hello, world (but compressed with gzip)";
+        let compressed = gzip_encode(plaintext);
 
         let id = make_id();
         let metadata = Metadata {
             content_type: "text/plain".into(),
-            compression: Some(Compression::Zstd),
+            compression: Some(Compression::Gzip),
             ..Default::default()
         };
 
-        multipart_put(&backend, &id, &metadata, compressed.clone()).await?;
+        backend
+            .put_object(
+                &id,
+                &metadata,
+                stream::single(compressed.clone()),
+                Timestamp::now(),
+            )
+            .await?;
 
         let (meta, _, stream) = backend
             .get_object(&id, Timestamp::now(), None)
@@ -3247,15 +2432,31 @@ mod tests {
             .unwrap();
         let payload = stream::read_to_vec(stream).await?;
 
-        assert_eq!(meta.compression, Some(Compression::Zstd));
+        assert_eq!(meta.compression, Some(Compression::Gzip));
         assert_eq!(
             payload, compressed,
-            "Payload should be returned still compressed, not auto-decompressed"
+            "Payload should be returned still compressed, not transcoded"
         );
+
+        let (meta, content_range, stream) = backend
+            .get_object(&id, Timestamp::now(), Some(ByteRange::Bounded(2, 9)))
+            .await?
+            .unwrap();
+        let payload = stream::read_to_vec(stream).await?;
+
+        assert_eq!(meta.compression, Some(Compression::Gzip));
+        assert_eq!(
+            content_range,
+            Some(ContentRange {
+                start: 2,
+                end: 9,
+                total: compressed.len() as u64,
+            })
+        );
+        assert_eq!(payload, &compressed[2..=9]);
 
         Ok(())
     }
-
     #[cfg(feature = "storage-cogs")]
     #[tokio::test]
     async fn change_stream_reports_the_size_gcs_stored() -> Result<()> {
@@ -3288,46 +2489,6 @@ mod tests {
         );
         assert!(records[0].expiration_time.is_some());
 
-        Ok(())
-    }
-
-    #[cfg(feature = "storage-cogs")]
-    #[tokio::test]
-    async fn multipart_completion_reports_to_change_stream() -> Result<()> {
-        let (backend, producer) = create_test_backend_with_change_stream().await?;
-        let id = make_id();
-        let payload = b"multipart payload".to_vec();
-        let metadata = Metadata {
-            time_expires: Some(Timestamp::now() + Duration::from_secs(3600)),
-            ..Default::default()
-        };
-        let upload_id = backend.initiate_multipart(&id, &metadata).await?;
-        let etag = backend
-            .upload_part(
-                &id,
-                &upload_id,
-                NonZeroU32::new(1).unwrap(),
-                payload.len() as u64,
-                None,
-                stream::single(payload.clone()),
-            )
-            .await?;
-        let part = CompletedPart {
-            part_number: NonZeroU32::new(1).unwrap(),
-            etag,
-        };
-        backend
-            .complete_multipart(&id, &upload_id, vec![part], Timestamp::now())
-            .await?;
-
-        let records = producer.records();
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].op_type, OpType::Write);
-        assert_eq!(
-            records[0].size,
-            Some(payload.len() as u64 + GcsObject::from_metadata(&metadata).metadata_size())
-        );
-        assert!(records[0].expiration_time.is_some());
         Ok(())
     }
 

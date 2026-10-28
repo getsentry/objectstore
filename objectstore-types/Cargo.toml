@@ -5,7 +5,7 @@ description = "Shared types for the Objectstore client and server"
 homepage = "https://getsentry.github.io/objectstore/"
 repository = "https://github.com/getsentry/objectstore"
 license-file = "../LICENSE.md"
-version = "0.2.10"
+version = "0.3.0"
 edition = "2024"
 publish = true
 
@@ -14,7 +14,6 @@ base64 = { workspace = true }
 ed25519-dalek = { workspace = true }
 http = { workspace = true }
 humantime = { workspace = true }
-humantime-serde = { workspace = true }
 mediatype = { workspace = true }
 percent-encoding = { workspace = true }
 serde = { workspace = true }

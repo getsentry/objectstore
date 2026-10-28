@@ -3,14 +3,14 @@ use std::io::{self, Cursor};
 use std::path::PathBuf;
 use std::{borrow::Cow, collections::BTreeMap};
 
-use async_compression::tokio::bufread::ZstdEncoder;
+use async_compression::tokio::bufread::{GzipEncoder, ZstdEncoder};
 use bytes::Bytes;
 use futures_util::StreamExt;
 use objectstore_types::metadata::Metadata;
 use reqwest::Body;
 use serde::Deserialize;
 use tokio::fs::File;
-use tokio::io::{AsyncRead, BufReader};
+use tokio::io::{AsyncBufRead, AsyncRead, BufReader};
 use tokio_util::io::{ReaderStream, StreamReader};
 
 pub use objectstore_types::metadata::{Compression, ExpirationPolicy};
@@ -312,43 +312,27 @@ pub(crate) async fn encode_body(body: PutBody, mode: Option<CompressionMode>) ->
         Some(CompressionMode::Precompressed(_)) | None => None,
     };
 
-    Ok(match (compression, body) {
-        (Some(Compression::Zstd), PutBody::Buffer(bytes)) => {
-            let cursor = Cursor::new(bytes);
-            let encoder = ZstdEncoder::new(cursor);
-            let stream = ReaderStream::new(encoder);
-            Body::wrap_stream(stream)
-        }
-        (Some(Compression::Zstd), PutBody::Stream(stream)) => {
-            let stream = StreamReader::new(stream);
-            let encoder = ZstdEncoder::new(stream);
-            let stream = ReaderStream::new(encoder);
-            Body::wrap_stream(stream)
-        }
-        (Some(Compression::Zstd), PutBody::File(file)) => {
-            let reader = BufReader::new(file);
-            let encoder = ZstdEncoder::new(reader);
-            let stream = ReaderStream::new(encoder);
-            Body::wrap_stream(stream)
-        }
-        (Some(Compression::Zstd), PutBody::Path(file)) => {
-            let file = File::open(file).await?;
-            let reader = BufReader::new(file);
-            let encoder = ZstdEncoder::new(reader);
-            let stream = ReaderStream::new(encoder);
-            Body::wrap_stream(stream)
-        }
-        (None, PutBody::Buffer(bytes)) => bytes.into(),
-        (None, PutBody::Stream(stream)) => Body::wrap_stream(stream),
-        (None, PutBody::File(file)) => {
-            let stream = ReaderStream::new(file);
-            Body::wrap_stream(stream)
-        }
-        (None, PutBody::Path(path)) => {
-            let stream = ReaderStream::new(File::open(path).await?);
-            Body::wrap_stream(stream)
-        }
+    Ok(match compression {
+        None => match body {
+            PutBody::Buffer(bytes) => bytes.into(),
+            PutBody::Stream(stream) => Body::wrap_stream(stream),
+            PutBody::File(file) => Body::wrap_stream(ReaderStream::new(file)),
+            PutBody::Path(path) => Body::wrap_stream(ReaderStream::new(File::open(path).await?)),
+        },
+        Some(compression) => match body {
+            PutBody::Buffer(bytes) => compress(Cursor::new(bytes), compression),
+            PutBody::Stream(stream) => compress(StreamReader::new(stream), compression),
+            PutBody::File(file) => compress(BufReader::new(file), compression),
+            PutBody::Path(path) => compress(BufReader::new(File::open(path).await?), compression),
+        },
     })
+}
+
+fn compress(reader: impl AsyncBufRead + Send + 'static, compression: Compression) -> Body {
+    match compression {
+        Compression::Zstd => Body::wrap_stream(ReaderStream::new(ZstdEncoder::new(reader))),
+        Compression::Gzip => Body::wrap_stream(ReaderStream::new(GzipEncoder::new(reader))),
+    }
 }
 
 // TODO: instead of a separate `send` method, it would be nice to just implement `IntoFuture`.
@@ -403,6 +387,8 @@ impl PutBuilder {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read as _;
+
     use futures_util::stream;
     use http_body_util::BodyExt as _;
 
@@ -444,6 +430,31 @@ mod tests {
             zstd::decode_all(Cursor::new(encoded)).unwrap(),
             b"hello world"
         );
+    }
+
+    #[tokio::test]
+    async fn gzip_body_kinds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("payload");
+        std::fs::write(&path, b"hello world").unwrap();
+
+        let bodies = [
+            PutBody::Buffer(Bytes::from_static(b"hello world")),
+            stream_body(vec![b"hello ", b"world"]),
+            PutBody::File(File::open(&path).await.unwrap()),
+            PutBody::Path(path.clone()),
+        ];
+
+        for body in bodies {
+            let mode = Some(CompressionMode::Compress(Compression::Gzip));
+            let encoded = collect(encode_body(body, mode).await.unwrap()).await;
+
+            let mut decoded = Vec::new();
+            flate2::read::GzDecoder::new(&encoded[..])
+                .read_to_end(&mut decoded)
+                .unwrap();
+            assert_eq!(decoded, b"hello world");
+        }
     }
 
     #[tokio::test]

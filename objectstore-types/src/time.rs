@@ -2,7 +2,7 @@
 //!
 //! [`Timestamp`] represents object creation times, expiration deadlines, and the access times
 //! used to check or renew them. Fractional timestamps round up to the next second. Event
-//! timestamps, metrics, and multipart modification times retain their own precision.
+//! timestamps and metrics retain their own precision.
 //!
 //! The default serde representation preserves the `SystemTime` metadata format. Use
 //! [`Timestamp::as_rfc3339`] for HTTP headers and JSON fields containing RFC3339 strings.

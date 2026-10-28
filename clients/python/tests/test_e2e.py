@@ -1,3 +1,4 @@
+import gzip
 import os
 import shutil
 import signal
@@ -12,6 +13,7 @@ from collections.abc import Generator
 from datetime import timedelta
 from io import BytesIO
 from pathlib import Path
+from typing import cast
 from unittest.mock import Mock, patch
 
 import pytest
@@ -33,7 +35,7 @@ from objectstore_client._resumable import (
 )
 from objectstore_client.auth import Permission, SecretKey, TokenGenerator
 from objectstore_client.errors import RequestError
-from objectstore_client.metadata import TimeToLive
+from objectstore_client.metadata import Compression, TimeToLive
 from objectstore_client.scope import Scope
 
 TEST_EDDSA_KID: str = "test_kid"
@@ -477,6 +479,61 @@ def test_precompressed_is_stored_verbatim(server_url: str) -> None:
     assert retrieved.payload.read() == data
 
 
+def test_full_cycle_gzip(server_url: str) -> None:
+    client = Client(server_url, token=TestTokenGenerator.get())
+    session = client.session(
+        Usecase("test-usecase", compression="gzip"), org=42, project=1337
+    )
+
+    object_key = session.put(b"test data" * 100)
+
+    metadata = session.head(object_key)
+    assert metadata is not None
+    assert metadata.compression == "gzip"
+
+    retrieved = session.get(object_key)
+    assert retrieved is not None
+    assert retrieved.metadata.compression is None
+    assert retrieved.payload.read() == b"test data" * 100
+
+    for raw in [
+        session.get(object_key, decompress=False),
+        session.get(object_key, accept_encoding=["gzip"]),
+    ]:
+        assert raw is not None
+        assert raw.metadata.compression == "gzip"
+        assert gzip.decompress(raw.payload.read()) == b"test data" * 100
+
+
+def test_precompressed_gzip(server_url: str) -> None:
+    client = Client(server_url, token=TestTokenGenerator.get())
+    session = client.session(Usecase("test-usecase"), org=42, project=1337)
+
+    compressed = gzip.compress(b"test data")
+    object_key = session.put(compressed, precompressed="gzip")
+
+    raw = session.get(object_key, decompress=False)
+    assert raw is not None
+    assert raw.metadata.compression == "gzip"
+    assert raw.payload.read() == compressed
+
+    retrieved = session.get(object_key)
+    assert retrieved is not None
+    assert retrieved.payload.read() == b"test data"
+
+
+def test_unsupported_compression(server_url: str) -> None:
+    client = Client(server_url, token=TestTokenGenerator.get())
+    session = client.session(Usecase("test-usecase"), org=42, project=1337)
+
+    with pytest.raises(ValueError, match="Invalid compression"):
+        session.put(b"test data", compress=cast(Compression, "lz4"))
+    with pytest.raises(ValueError, match="Invalid compression"):
+        session.put(b"test data", precompressed=cast(Compression, "lz4"))
+    with pytest.raises(ValueError, match="Invalid compression"):
+        Usecase("test-usecase", compression=cast(Compression, "lz4"))
+
+
 def test_precompressed_rejects_conflicting_arguments(server_url: str) -> None:
     client = Client(server_url, token=TestTokenGenerator.get())
     session = client.session(Usecase("test-usecase"), org=42, project=1337)
@@ -895,25 +952,31 @@ def test_put_stores_under_literal_key(server_url: str) -> None:
 
 
 @pytest.mark.parametrize("source_kind", ["bytes", "buffer", "stream"])
-@pytest.mark.parametrize("compression", ["none", "zstd", "precompressed"])
+@pytest.mark.parametrize("compression", ["none", "zstd", "gzip"])
+@pytest.mark.parametrize("precompressed", [False, True])
 @pytest.mark.parametrize("threshold", [1, 2048])
 def test_automatic_resumable_upload(
-    server_url: str, source_kind: str, compression: str, threshold: int
+    server_url: str,
+    source_kind: str,
+    compression: Compression,
+    precompressed: bool,
+    threshold: int,
 ) -> None:
     session = Client(server_url, token=TestTokenGenerator.get()).session(
         Usecase(
             "test-usecase",
-            compression="zstd" if compression == "zstd" else "none",
+            compression="none" if precompressed else compression,
             expiration_policy=TimeToLive(timedelta(days=1)),
             resumable_threshold_bytes=threshold,
         ),
         org=42,
     )
     contents = b"file contents\n" * 100
-    precompressed = compression == "precompressed"
-    encoded = (
-        zstandard.ZstdCompressor().compress(contents) if precompressed else contents
-    )
+    encoded = contents
+    if compression == "zstd" and precompressed:
+        encoded = zstandard.ZstdCompressor().compress(contents)
+    elif compression == "gzip" and precompressed:
+        encoded = gzip.compress(contents)
     with (
         BytesIO()
         if source_kind == "buffer"
@@ -926,7 +989,9 @@ def test_automatic_resumable_upload(
         source.seek(len(b"skip this prefix"))
         key = session.put(
             source if source_kind in ("buffer", "stream") else encoded,
-            precompressed="zstd" if precompressed else None,
+            precompressed=compression
+            if precompressed and compression != "none"
+            else None,
             content_type="text/plain",
             metadata={"source": "file"},
             origin="203.0.113.42",
@@ -936,7 +1001,7 @@ def test_automatic_resumable_upload(
         assert not source.closed
         stored = session.head(key)
         assert stored is not None
-        assert stored.compression == ("zstd" if compression != "none" else None)
+        assert stored.compression == (compression if compression != "none" else None)
         assert stored.content_type == "text/plain"
         assert stored.filename == "example.txt"
         assert stored.origin == "203.0.113.42"
@@ -971,13 +1036,13 @@ def test_resumable_creation_fallback(
     assert retrieved.payload.read() == b"payload"
 
 
-@pytest.mark.parametrize("compress", [False, True])
-def test_nonseekable_upload(server_url: str, compress: bool) -> None:
+@pytest.mark.parametrize("compress", ["none", "zstd", "gzip"])
+def test_nonseekable_upload(server_url: str, compress: Compression) -> None:
     session = Client(server_url, token=TestTokenGenerator.get()).session(
         Usecase("test-usecase", resumable_threshold_bytes=1)
     )
     with UnrewindableStream(b"payload") as source:
-        key = session.put(source, compress="zstd" if compress else "none")
+        key = session.put(source, compress=compress)
         assert not source.closed
 
     retrieved = session.get(key)

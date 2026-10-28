@@ -1,11 +1,14 @@
+import gzip
 from io import BytesIO
 from typing import Any
 from unittest.mock import Mock
 
 import pytest
 import urllib3
+import zstandard
 from objectstore_client import Client, RequestError, Session, Usecase
 from objectstore_client._resumable import NoUploadProgress
+from objectstore_client.metadata import Compression
 
 
 @pytest.fixture
@@ -122,3 +125,44 @@ def test_sizing_must_restore_position(
         session.put(source)
 
     request.assert_not_called()
+
+
+@pytest.mark.parametrize("compression", ["gzip", "zstd"])
+def test_put_downloaded_compressed_stream(
+    session: Session, monkeypatch: pytest.MonkeyPatch, compression: Compression
+) -> None:
+    payload = b"downloaded data" * 100
+    compressed = (
+        gzip.compress(payload)
+        if compression == "gzip"
+        else zstandard.ZstdCompressor().compress(payload)
+    )
+    download = urllib3.HTTPResponse(
+        body=BytesIO(compressed),
+        headers={"content-encoding": compression},
+        preload_content=False,
+        decode_content=False,
+    )
+    close_download = Mock(wraps=download.close)
+    monkeypatch.setattr(download, "close", close_download)
+    uploaded: list[bytes] = []
+
+    def request(method: str, _url: str, **kwargs: Any) -> urllib3.HTTPResponse:
+        if method == "GET":
+            return download
+        assert method == "PUT"
+        assert "Content-Length" not in kwargs["headers"]
+        uploaded.append(kwargs["body"].read())
+        return urllib3.HTTPResponse(status=201, body=b'{"key":"copy"}')
+
+    monkeypatch.setattr(session._pool, "request", request)
+    retrieved = session.get("original")
+    assert retrieved is not None
+    assert not retrieved.payload.seekable()
+
+    assert session.put(retrieved.payload, key="copy") == "copy"
+    assert uploaded == [payload]
+    assert not retrieved.payload.closed
+
+    retrieved.payload.close()
+    close_download.assert_called_once_with()
