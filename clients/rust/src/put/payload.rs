@@ -24,26 +24,14 @@ pub(super) enum PreparedBody {
 }
 
 impl PreparedBody {
-    /// Supplies a direct request with either the original input or prepared wire bytes.
-    pub(super) async fn with_body<T, F>(
+    /// Converts input or prepared wire bytes into an HTTP body.
+    pub(super) async fn into_body(
         self,
         compression: Option<CompressionMode>,
-        request: impl FnOnce(reqwest::Body, Option<u64>) -> F,
-    ) -> crate::Result<T>
-    where
-        F: std::future::Future<Output = crate::Result<T>>,
-    {
+    ) -> io::Result<reqwest::Body> {
         match self {
-            Self::OneShot(body) => {
-                request(super::encode_body(body, compression).await?, None).await
-            }
-            Self::Replayable(body) => {
-                request(
-                    reqwest::Body::wrap_stream(body.stream(0).await?),
-                    Some(body.len()),
-                )
-                .await
-            }
+            Self::OneShot(body) => super::encode_body(body, compression).await,
+            Self::Replayable(body) => Ok(reqwest::Body::wrap_stream(body.stream(0).await?)),
         }
     }
 }

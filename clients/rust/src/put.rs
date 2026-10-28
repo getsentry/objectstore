@@ -373,17 +373,10 @@ impl PutBuilder {
             }
         }
 
-        // All direct uploads, including preparation and session-creation fallbacks, converge here.
-        prepared
-            .with_body(self.compression, |body, content_length| async move {
-                builder = builder.headers(headers);
-                if let Some(length) = content_length {
-                    builder = builder.header(reqwest::header::CONTENT_LENGTH, length);
-                }
-                let response = builder.body(body).send().await?;
-                Ok(response.error_for_status_and_drain().await?.json().await?)
-            })
-            .await
+        let body = prepared.into_body(self.compression).await?;
+        builder = builder.headers(headers);
+        let response = builder.body(body).send().await?;
+        Ok(response.error_for_status_and_drain().await?.json().await?)
     }
 }
 

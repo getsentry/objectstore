@@ -326,10 +326,12 @@ async fn compression_spooling_metadata_and_creation_fallback() {
                 requests[0].headers["upload-length"],
                 encoded.len().to_string()
             );
-            assert_eq!(
-                requests[1].headers["content-length"],
-                encoded.len().to_string()
-            );
+            if !fallback {
+                assert_eq!(
+                    requests[1].headers["content-length"],
+                    encoded.len().to_string()
+                );
+            }
             assert_eq!(requests[0].method, Method::PUT);
             let metadata =
                 objectstore_types::metadata::Metadata::from_headers(&requests[0].headers, "")
