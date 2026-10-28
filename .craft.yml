@@ -58,3 +58,6 @@ workspaces:
       name: none
     targets:
       - name: github
+        # Without a prefix, Craft would take the nearest client tag as the
+        # previous server release and start the changelog there.
+        tagPrefix: server@
