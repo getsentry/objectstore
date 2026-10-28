@@ -7,12 +7,12 @@ use std::io;
 use std::time::Duration;
 
 use super::PutResponse;
-use super::payload::ReplayBody;
+use super::payload::ReplayableBody;
 use crate::Error;
-use crate::resumable::{ResumableUpload, UploadProgress};
+use crate::resumable::implementation::{ResumableUpload, UploadProgress};
 
 pub(super) async fn upload(
-    body: &mut ReplayBody,
+    body: &mut ReplayableBody,
     handle: ResumableUpload,
 ) -> crate::Result<PutResponse> {
     match upload_inner(body, &handle).await {
@@ -26,7 +26,7 @@ pub(super) async fn upload(
     }
 }
 
-async fn upload_inner(body: &mut ReplayBody, handle: &ResumableUpload) -> crate::Result<()> {
+async fn upload_inner(body: &mut ReplayableBody, handle: &ResumableUpload) -> crate::Result<()> {
     let mut offset = 0;
     let mut retries = 0;
     loop {

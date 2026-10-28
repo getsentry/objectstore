@@ -15,8 +15,8 @@ use super::{CompressionMode, PutBody};
 use crate::ClientStream;
 
 pub(super) enum PreparedBody {
-    Direct(PutBody),
-    Replay(ReplayBody),
+    OneShot(PutBody),
+    Replayable(ReplayableBody),
 }
 
 impl PreparedBody {
@@ -30,8 +30,10 @@ impl PreparedBody {
         F: std::future::Future<Output = crate::Result<T>>,
     {
         match self {
-            Self::Direct(body) => request(super::encode_body(body, compression).await?, None).await,
-            Self::Replay(mut body) => {
+            Self::OneShot(body) => {
+                request(super::encode_body(body, compression).await?, None).await
+            }
+            Self::Replayable(mut body) => {
                 let length = body.len();
                 body.with_stream(0, |stream| {
                     request(reqwest::Body::wrap_stream(stream), Some(length))
@@ -42,7 +44,7 @@ impl PreparedBody {
     }
 }
 
-pub(super) enum ReplayBody {
+pub(super) enum ReplayableBody {
     Buffer(Bytes),
     File { file: File, start: u64, length: u64 },
 }
@@ -54,26 +56,26 @@ pub(super) async fn prepare(
     spool_dir: Option<PathBuf>,
 ) -> crate::Result<PreparedBody> {
     let Some(threshold) = threshold else {
-        return Ok(PreparedBody::Direct(body));
+        return Ok(PreparedBody::OneShot(body));
     };
     let body = match body {
         PutBody::Path(path) => PutBody::File(File::open(path).await?),
         body => body,
     };
     let mut replay = match body {
-        PutBody::Buffer(bytes) => ReplayBody::Buffer(bytes),
+        PutBody::Buffer(bytes) => ReplayableBody::Buffer(bytes),
         PutBody::File(mut file) => match regular_file_span(&mut file).await {
-            Some((start, length)) => ReplayBody::File {
+            Some((start, length)) => ReplayableBody::File {
                 file,
                 start,
                 length,
             },
-            None => return Ok(PreparedBody::Direct(PutBody::File(file))),
+            None => return Ok(PreparedBody::OneShot(PutBody::File(file))),
         },
-        body => return Ok(PreparedBody::Direct(body)),
+        body => return Ok(PreparedBody::OneShot(body)),
     };
     if replay.len() < threshold {
-        return Ok(PreparedBody::Direct(replay.into_put_body()));
+        return Ok(PreparedBody::OneShot(replay.into_put_body()));
     }
 
     if let Some(CompressionMode::Compress(compression)) = compression {
@@ -85,12 +87,12 @@ pub(super) async fn prepare(
         .map_err(io::Error::other)?;
         let Ok(temporary) = temporary else {
             // Creation has not consumed input, so direct streaming is still possible.
-            return Ok(PreparedBody::Direct(replay.into_put_body()));
+            return Ok(PreparedBody::OneShot(replay.into_put_body()));
         };
         let mut temporary = File::from_std(temporary);
         let reader: Box<dyn AsyncRead + Send + Sync + Unpin> = match replay {
-            ReplayBody::Buffer(bytes) => Box::new(io::Cursor::new(bytes)),
-            ReplayBody::File { file, .. } => Box::new(file),
+            ReplayableBody::Buffer(bytes) => Box::new(io::Cursor::new(bytes)),
+            ReplayableBody::File { file, .. } => Box::new(file),
         };
         let reader = super::BufReader::new(reader);
         let length = match compression {
@@ -103,14 +105,14 @@ pub(super) async fn prepare(
         };
         temporary.flush().await?;
         temporary.rewind().await?;
-        replay = ReplayBody::File {
+        replay = ReplayableBody::File {
             file: temporary,
             start: 0,
             length,
         };
     }
 
-    Ok(PreparedBody::Replay(replay))
+    Ok(PreparedBody::Replayable(replay))
 }
 
 /// Returns the current position and remaining length of a regular file.
@@ -124,7 +126,7 @@ async fn regular_file_span(file: &mut File) -> Option<(u64, u64)> {
     Some((start, metadata.len().saturating_sub(start)))
 }
 
-impl ReplayBody {
+impl ReplayableBody {
     /// Returns the unprepared input for a direct upload, positioned where it started.
     fn into_put_body(self) -> PutBody {
         match self {

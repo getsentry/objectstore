@@ -346,6 +346,10 @@ impl PutBuilder {
             None => reqwest::Method::POST,
         };
 
+        let mut builder = self
+            .session
+            .request(method, self.key.as_deref().unwrap_or_default())?;
+
         self.metadata.compression = self.compression.map(CompressionMode::compression);
         let headers = self.metadata.to_headers("")?;
         let mut prepared = payload::prepare(
@@ -355,8 +359,8 @@ impl PutBuilder {
             self.session.client.spool_dir.clone(),
         )
         .await?;
-        if let payload::PreparedBody::Replay(body) = &mut prepared {
-            let create = crate::resumable::CreateResumableUploadBuilder {
+        if let payload::PreparedBody::Replayable(body) = &mut prepared {
+            let create = crate::resumable::implementation::CreateResumableUploadBuilder {
                 session: self.session.clone(),
                 total_length: body.len(),
                 key: self.key.clone(),
@@ -370,11 +374,7 @@ impl PutBuilder {
         // All direct uploads, including preparation and session-creation fallbacks, converge here.
         prepared
             .with_body(self.compression, |body, content_length| async move {
-                // Mint authentication after preparation, which may outlast a token's validity.
-                let mut builder = self
-                    .session
-                    .request(method, self.key.as_deref().unwrap_or_default())?
-                    .headers(headers);
+                builder = builder.headers(headers);
                 if let Some(length) = content_length {
                     builder = builder.header(reqwest::header::CONTENT_LENGTH, length);
                 }
