@@ -16,6 +16,7 @@ use tokio_util::io::{ReaderStream, StreamReader};
 pub use objectstore_types::metadata::{Compression, ExpirationPolicy};
 
 use crate::response::ResponseExt as _;
+use crate::resumable::CreateResumableUploadBuilder;
 use crate::{ClientStream, ObjectKey, Session};
 
 mod automatic;
@@ -362,7 +363,7 @@ impl PutBuilder {
         )
         .await?;
         if let payload::PreparedBody::Replayable(body) = &prepared {
-            let create = crate::resumable::implementation::CreateResumableUploadBuilder::new(
+            let create = CreateResumableUploadBuilder::new(
                 self.session.clone(),
                 body.len(),
                 self.key.clone(),

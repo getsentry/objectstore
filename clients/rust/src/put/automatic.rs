@@ -6,7 +6,7 @@ use std::time::Duration;
 use crate::Error;
 use crate::put::PutResponse;
 use crate::put::payload::{ReadError, ReplayableBody};
-use crate::resumable::implementation::{ResumableUpload, UploadProgress};
+use crate::resumable::{ResumableUpload, UploadProgress};
 
 const MAX_RETRIES: u32 = 2;
 const BASE_RETRY_DELAY: Duration = Duration::from_secs(2);
