@@ -1,5 +1,4 @@
-# Changelog categories for this client. Keep in sync with the other client's
-# `.github/release.yml`.
+# Changelog categories for every Craft workspace in `.craft.yml`.
 #
 # A custom file replaces Craft's defaults entirely. It groups entries by change
 # type, strips the `type(scope):` prefix, and catches every remaining change so
