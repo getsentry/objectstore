@@ -16,10 +16,10 @@ objectstore)
     ;;
 esac
 
+BUILD_ARGS=()
 if [[ "$DEBUG_IMAGE" =~ ^(true|1|yes|on)$ ]]; then
-    IMAGE_TAG="debug-nonroot"
-else
-    IMAGE_TAG="nonroot"
+    # The hardened base image has no shell; use distroless with busybox instead.
+    BUILD_ARGS+=(--build-arg BASE_IMAGE="gcr.io/distroless/cc-debian13:debug-nonroot")
 fi
 
 docker build \
@@ -40,7 +40,7 @@ docker run --rm \
 docker build \
     --platform linux/amd64 \
     -f Dockerfile \
-    --build-arg IMAGE_TAG="$IMAGE_TAG" \
+    ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} \
     --build-arg BINARY="$BINARY" \
     -t "$BINARY:latest" \
     "target/x86_64-unknown-linux-gnu/release/"

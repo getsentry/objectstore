@@ -99,7 +99,7 @@ pub fn execute() -> Result<()> {
 
     let config = Config::load(args.config.as_deref())?;
 
-    // Ensure a rustls crypto provider is installed, required on distroless.
+    // Ensure a rustls crypto provider is installed, required in the Docker image.
     rustls::crypto::ring::default_provider()
         .install_default()
         .map_err(|_| anyhow::anyhow!("Failed to install rustls crypto provider"))?;

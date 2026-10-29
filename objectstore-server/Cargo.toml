@@ -38,7 +38,7 @@ objectstore-types = { workspace = true }
 papaya = { workspace = true }
 pin-project-lite = { workspace = true }
 rand = { workspace = true }
-reqwest = { workspace = true, features = ["charset", "http2", "system-proxy", "native-tls-no-alpn"] }
+reqwest = { workspace = true, features = ["charset", "http2", "system-proxy", "native-tls-vendored-no-alpn"] }
 rustls = { workspace = true }
 secrecy = { workspace = true, features = ["serde"] }
 sentry = { workspace = true, features = ["tower-axum-matched-path", "tracing", "logs"] }
