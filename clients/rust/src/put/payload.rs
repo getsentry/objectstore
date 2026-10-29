@@ -9,11 +9,11 @@ use bytes::Bytes;
 use futures_util::{StreamExt, TryStreamExt, stream};
 use tempfile::NamedTempFile;
 use tokio::fs::File;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
 use tokio_util::io::ReaderStream;
 
-use crate::ClientStream;
 use crate::put::{CompressionMode, PutBody, encode_body};
+use crate::{ClientStream, Compression};
 
 pub(super) enum PreparedBody {
     OneShot(PutBody),
@@ -120,20 +120,20 @@ pub(super) async fn prepare(
             return Ok(PreparedBody::OneShot(body));
         };
         let mut output = File::from_std(output);
-        let reader: Box<dyn AsyncRead + Send + Sync + Unpin> = match body {
-            PutBody::Buffer(bytes) => Box::new(io::Cursor::new(bytes)),
-            PutBody::Path(path) => Box::new(File::open(path).await?),
+        let length = match body {
+            PutBody::Buffer(bytes) => {
+                compress_into(io::Cursor::new(bytes), compression, &mut output).await?
+            }
+            PutBody::Path(path) => {
+                compress_into(
+                    BufReader::new(File::open(path).await?),
+                    compression,
+                    &mut output,
+                )
+                .await?
+            }
             // Unreachable: the eligibility check above only accepts buffers and paths.
             body => return Ok(PreparedBody::OneShot(body)),
-        };
-        let reader = BufReader::new(reader);
-        let length = match compression {
-            crate::Compression::Zstd => {
-                tokio::io::copy(&mut ZstdEncoder::new(reader), &mut output).await?
-            }
-            crate::Compression::Gzip => {
-                tokio::io::copy(&mut GzipEncoder::new(reader), &mut output).await?
-            }
         };
         output.flush().await?;
         return Ok(PreparedBody::Replayable(ReplayableBody::Temporary {
@@ -148,6 +148,17 @@ pub(super) async fn prepare(
         // Unreachable: the eligibility check above only accepts buffers and paths.
         body => return Ok(PreparedBody::OneShot(body)),
     }))
+}
+
+async fn compress_into(
+    reader: impl AsyncBufRead + Unpin,
+    compression: Compression,
+    output: &mut File,
+) -> io::Result<u64> {
+    match compression {
+        Compression::Zstd => tokio::io::copy(&mut ZstdEncoder::new(reader), output).await,
+        Compression::Gzip => tokio::io::copy(&mut GzipEncoder::new(reader), output).await,
+    }
 }
 
 /// Distinguishes local read failures from transport failures wrapped by reqwest.
