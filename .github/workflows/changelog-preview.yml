@@ -4,9 +4,6 @@ on:
   pull_request_target:
     types: [opened, synchronize, reopened, edited, labeled, unlabeled]
 
-# A called workflow can't get more permissions than its caller, and Craft's
-# preview job requests all three, so dropping any of them fails the run at
-# startup.
 permissions:
   contents: read
   pull-requests: write
