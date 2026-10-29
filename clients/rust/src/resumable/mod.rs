@@ -8,7 +8,7 @@ pub(crate) mod implementation;
 mod api;
 
 #[cfg(feature = "resumable-upload-api")]
-pub use implementation::{
+pub use crate::resumable::implementation::{
     CancelUploadBuilder, CreateResumableUploadBuilder, PutChunkBuilder, ResumableUpload,
     SessionToken, UploadProgress, UploadProgressBuilder,
 };

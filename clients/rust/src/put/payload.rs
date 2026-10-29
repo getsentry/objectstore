@@ -4,15 +4,16 @@ use std::io::{self, SeekFrom};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use async_compression::tokio::bufread::{GzipEncoder, ZstdEncoder};
 use bytes::Bytes;
 use futures_util::{StreamExt, TryStreamExt, stream};
 use tempfile::NamedTempFile;
 use tokio::fs::File;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
 use tokio_util::io::ReaderStream;
 
-use super::{CompressionMode, PutBody};
 use crate::ClientStream;
+use crate::put::{CompressionMode, PutBody, encode_body};
 
 pub(super) enum PreparedBody {
     OneShot(PutBody),
@@ -25,7 +26,7 @@ impl PreparedBody {
         compression: Option<CompressionMode>,
     ) -> io::Result<reqwest::Body> {
         match self {
-            Self::OneShot(body) => super::encode_body(body, compression).await,
+            Self::OneShot(body) => encode_body(body, compression).await,
             Self::Replayable(body) => Ok(reqwest::Body::wrap_stream(body.stream(0).await?)),
         }
     }
@@ -41,6 +42,45 @@ pub(super) enum ReplayableBody {
         file: Arc<NamedTempFile>,
         length: u64,
     },
+}
+
+impl ReplayableBody {
+    pub(super) fn len(&self) -> u64 {
+        match self {
+            Self::Buffer(bytes) => bytes.len() as u64,
+            Self::Path { length, .. } | Self::Temporary { length, .. } => *length,
+        }
+    }
+
+    /// Opens an independent reader for the remaining suffix.
+    pub(super) async fn stream(&self, offset: u64) -> io::Result<ClientStream> {
+        let mut file = match self {
+            Self::Buffer(bytes) => {
+                let bytes = bytes.slice(offset as usize..);
+                // Streaming bodies prevent independent replays by HTTP middleware.
+                return Ok(stream::once(async move { Ok(bytes) }).boxed());
+            }
+            Self::Path { path, .. } => File::open(path).await?,
+            Self::Temporary { file, .. } => {
+                let file = Arc::clone(file);
+                File::from_std(
+                    tokio::task::spawn_blocking(move || file.reopen())
+                        .await
+                        .map_err(io::Error::other)??,
+                )
+            }
+        };
+        if file.metadata().await?.len() < self.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "upload file became shorter",
+            ));
+        }
+        file.seek(SeekFrom::Start(offset)).await?;
+        Ok(ReaderStream::new(file.take(self.len() - offset))
+            .map_err(|error| io::Error::other(ReadError(error)))
+            .boxed())
+    }
 }
 
 pub(super) async fn prepare(
@@ -86,13 +126,13 @@ pub(super) async fn prepare(
             // Unreachable: the eligibility check above only accepts buffers and paths.
             body => return Ok(PreparedBody::OneShot(body)),
         };
-        let reader = super::BufReader::new(reader);
+        let reader = BufReader::new(reader);
         let length = match compression {
             crate::Compression::Zstd => {
-                tokio::io::copy(&mut super::ZstdEncoder::new(reader), &mut output).await?
+                tokio::io::copy(&mut ZstdEncoder::new(reader), &mut output).await?
             }
             crate::Compression::Gzip => {
-                tokio::io::copy(&mut super::GzipEncoder::new(reader), &mut output).await?
+                tokio::io::copy(&mut GzipEncoder::new(reader), &mut output).await?
             }
         };
         output.flush().await?;
@@ -114,45 +154,6 @@ pub(super) async fn prepare(
 #[derive(Debug, thiserror::Error)]
 #[error("could not read upload payload: {0}")]
 pub(super) struct ReadError(#[source] io::Error);
-
-impl ReplayableBody {
-    pub(super) fn len(&self) -> u64 {
-        match self {
-            Self::Buffer(bytes) => bytes.len() as u64,
-            Self::Path { length, .. } | Self::Temporary { length, .. } => *length,
-        }
-    }
-
-    /// Opens an independent reader for the remaining suffix.
-    pub(super) async fn stream(&self, offset: u64) -> io::Result<ClientStream> {
-        let mut file = match self {
-            Self::Buffer(bytes) => {
-                let bytes = bytes.slice(offset as usize..);
-                // Streaming bodies prevent independent replays by HTTP middleware.
-                return Ok(stream::once(async move { Ok(bytes) }).boxed());
-            }
-            Self::Path { path, .. } => File::open(path).await?,
-            Self::Temporary { file, .. } => {
-                let file = Arc::clone(file);
-                File::from_std(
-                    tokio::task::spawn_blocking(move || file.reopen())
-                        .await
-                        .map_err(io::Error::other)??,
-                )
-            }
-        };
-        if file.metadata().await?.len() < self.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "upload file became shorter",
-            ));
-        }
-        file.seek(SeekFrom::Start(offset)).await?;
-        Ok(ReaderStream::new(file.take(self.len() - offset))
-            .map_err(|error| io::Error::other(ReadError(error)))
-            .boxed())
-    }
-}
 
 #[cfg(test)]
 mod tests {

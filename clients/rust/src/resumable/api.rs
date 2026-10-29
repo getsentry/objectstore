@@ -2,7 +2,9 @@
 
 use objectstore_types::metadata::Metadata;
 
-use super::implementation::{CreateResumableUploadBuilder, ResumableUpload, SessionToken};
+use crate::resumable::implementation::{
+    CreateResumableUploadBuilder, ResumableUpload, SessionToken,
+};
 use crate::{ObjectKey, Session};
 
 impl Session {

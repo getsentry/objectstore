@@ -56,11 +56,6 @@ pub enum Error {
         /// The error message.
         message: String,
     },
-    /// An automatic resumable upload failed after session creation.
-    ///
-    /// The source contains the original failure.
-    #[error("upload failed: {0}")]
-    UploadFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// A resumable upload session expired, was canceled, or could otherwise not be found.
     #[error("resumable upload session is not available")]
     ResumableUploadUnavailable,

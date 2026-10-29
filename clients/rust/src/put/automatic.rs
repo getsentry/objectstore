@@ -3,10 +3,13 @@
 use std::io;
 use std::time::Duration;
 
-use super::PutResponse;
-use super::payload::{ReadError, ReplayableBody};
 use crate::Error;
+use crate::put::PutResponse;
+use crate::put::payload::{ReadError, ReplayableBody};
 use crate::resumable::implementation::{ResumableUpload, UploadProgress};
+
+const MAX_RETRIES: u32 = 2;
+const BASE_RETRY_DELAY: Duration = Duration::from_secs(2);
 
 pub(super) async fn upload(
     body: &ReplayableBody,
@@ -16,9 +19,9 @@ pub(super) async fn upload(
         Ok(()) => Ok(PutResponse {
             key: handle.key().to_owned(),
         }),
-        Err(error) => {
+        Err(err) => {
             let _ = handle.cancel().send().await;
-            Err(Error::UploadFailed(Box::new(error)))
+            Err(err)
         }
     }
 }
@@ -57,11 +60,11 @@ async fn upload_inner(body: &ReplayableBody, handle: &ResumableUpload) -> crate:
         };
 
         // Writes and progress queries share a budget, reset only by an advancing offset.
-        if retries >= 2 {
+        if retries >= MAX_RETRIES {
             return Err(failure);
         }
         let delay =
-            Duration::from_secs(2 << retries) + Duration::from_secs_f64(rand::random::<f64>());
+            BASE_RETRY_DELAY * (1 << retries) + Duration::from_secs_f64(rand::random::<f64>());
         tokio::time::sleep(delay).await;
         retries += 1;
         query_progress = true;

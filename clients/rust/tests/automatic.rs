@@ -502,7 +502,7 @@ async fn no_progress_and_probe_failures_share_the_retry_budget() {
         .send()
         .await
         .unwrap_err();
-    assert!(matches!(&error, Error::UploadFailed(_)));
+    assert!(matches!(&error, Error::Io(_)));
     assert!(error.to_string().contains("no progress"));
     let requests = server.finish();
     assert_eq!(requests[2].headers["upload-offset"], "*");
@@ -512,7 +512,7 @@ async fn no_progress_and_probe_failures_share_the_retry_budget() {
 
 #[tokio::test]
 async fn permanent_errors_and_invalid_offsets_cancel_without_restarting() {
-    for replies in [
+    for (case, replies) in [
         vec![Reply::Create, Reply::Status(403), Reply::Status(500)],
         vec![Reply::Create, Reply::Offset(204, 10), Reply::Status(204)],
         vec![
@@ -522,7 +522,10 @@ async fn permanent_errors_and_invalid_offsets_cancel_without_restarting() {
             Reply::Status(204),
         ],
         vec![Reply::Create, Reply::Status(410), Reply::Status(204)],
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let server = Server::new(replies).await;
         let error = server
             .session(Some(0))
@@ -530,8 +533,16 @@ async fn permanent_errors_and_invalid_offsets_cancel_without_restarting() {
             .send()
             .await
             .unwrap_err();
-        assert!(matches!(error, Error::UploadFailed(_)));
-        assert!(std::error::Error::source(&error).is_some());
+        match (case, &error) {
+            (0, Error::Reqwest(error)) => {
+                assert_eq!(error.status(), Some(reqwest::StatusCode::FORBIDDEN));
+            }
+            (1 | 2, Error::MalformedResponse(message)) => {
+                assert_eq!(message, "invalid upload offset");
+            }
+            (3, Error::ResumableUploadUnavailable) => {}
+            _ => panic!("unexpected error for case {case}: {error}"),
+        }
         assert_eq!(server.finish().last().unwrap().method, Method::DELETE);
     }
 }
@@ -567,8 +578,8 @@ async fn local_file_errors_are_not_retried() {
         .send()
         .await
         .unwrap_err();
-    assert!(matches!(error, Error::UploadFailed(_)));
-    assert!(error.to_string().contains("upload failed"));
+    assert!(matches!(&error, Error::Io(error) if error.kind() == io::ErrorKind::UnexpectedEof));
+    assert_eq!(error.to_string(), "upload file became shorter");
     let requests = server.finish();
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[1].method, Method::DELETE);
