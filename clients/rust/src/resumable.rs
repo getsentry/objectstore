@@ -84,7 +84,7 @@ impl Session {
 }
 
 impl ResumableUpload {
-    pub(crate) fn new(session: Session, key: ObjectKey, token: SessionToken) -> Self {
+    fn new(session: Session, key: ObjectKey, token: SessionToken) -> Self {
         Self {
             session,
             key,

@@ -15,13 +15,13 @@ use tokio_util::io::ReaderStream;
 use crate::put::{CompressionMode, PutBody, encode_body};
 use crate::{ClientStream, Compression};
 
-pub(super) enum PreparedBody {
+pub(crate) enum PreparedBody {
     OneShot(PutBody),
     Replayable(ReplayableBody),
 }
 
 impl PreparedBody {
-    pub(super) async fn into_reqwest_body(
+    pub async fn into_reqwest_body(
         self,
         compression: Option<CompressionMode>,
     ) -> io::Result<reqwest::Body> {
@@ -32,7 +32,7 @@ impl PreparedBody {
     }
 }
 
-pub(super) enum ReplayableBody {
+pub(crate) enum ReplayableBody {
     Buffer(Bytes),
     Path {
         path: PathBuf,
@@ -45,7 +45,7 @@ pub(super) enum ReplayableBody {
 }
 
 impl ReplayableBody {
-    pub(super) fn len(&self) -> u64 {
+    pub fn len(&self) -> u64 {
         match self {
             Self::Buffer(bytes) => bytes.len() as u64,
             Self::Path { length, .. } | Self::Temporary { length, .. } => *length,
@@ -53,7 +53,7 @@ impl ReplayableBody {
     }
 
     /// Opens an independent reader for the remaining suffix.
-    pub(super) async fn stream(&self, offset: u64) -> io::Result<ClientStream> {
+    pub async fn stream(&self, offset: u64) -> io::Result<ClientStream> {
         let mut file = match self {
             Self::Buffer(bytes) => {
                 let bytes = bytes.slice(offset as usize..);
@@ -83,7 +83,7 @@ impl ReplayableBody {
     }
 }
 
-pub(super) async fn prepare(
+pub async fn prepare(
     body: PutBody,
     compression: Option<CompressionMode>,
     threshold: Option<u64>,
@@ -164,7 +164,7 @@ async fn compress_into(
 /// Distinguishes local read failures from transport failures wrapped by reqwest.
 #[derive(Debug, thiserror::Error)]
 #[error("could not read upload payload: {0}")]
-pub(super) struct ReadError(#[source] io::Error);
+pub(crate) struct ReadError(#[source] io::Error);
 
 #[cfg(test)]
 mod tests {

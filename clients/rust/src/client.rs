@@ -1,5 +1,5 @@
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -357,11 +357,17 @@ impl Scope {
 
 #[derive(Debug)]
 pub(crate) struct ClientInner {
-    pub(crate) spool_dir: Option<PathBuf>,
+    spool_dir: Option<PathBuf>,
     reqwest: reqwest::Client,
     service_url: Url,
     propagate_traces: bool,
     token: Option<TokenProvider>,
+}
+
+impl ClientInner {
+    pub fn spool_dir(&self) -> Option<&Path> {
+        self.spool_dir.as_deref()
+    }
 }
 
 /// A client for Objectstore. Use [`Client::builder`] to configure and construct a Client.
@@ -462,6 +468,13 @@ impl Client {
     /// Convenience function to create a [`ClientBuilder`].
     pub fn builder(service_url: impl reqwest::IntoUrl) -> ClientBuilder {
         ClientBuilder::new(service_url)
+    }
+
+    /// Returns the configured spool directory.
+    ///
+    /// `None` means the system temporary directory is used.
+    pub fn spool_dir(&self) -> Option<&Path> {
+        self.inner.spool_dir()
     }
 
     /// Creates a session for the given scope using this client.

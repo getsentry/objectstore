@@ -359,7 +359,7 @@ impl PutBuilder {
             self.body,
             self.compression,
             self.resumable_threshold_bytes,
-            self.session.client.spool_dir.clone(),
+            self.session.client.spool_dir().map(PathBuf::from),
         )
         .await?;
         if let payload::PreparedBody::Replayable(body) = &prepared {

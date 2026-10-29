@@ -11,7 +11,7 @@ use crate::resumable::{ResumableUpload, UploadProgress};
 const MAX_RETRIES: u32 = 2;
 const BASE_RETRY_DELAY: Duration = Duration::from_secs(2);
 
-pub(super) async fn upload(
+pub(crate) async fn upload(
     body: &ReplayableBody,
     handle: ResumableUpload,
 ) -> crate::Result<PutResponse> {
