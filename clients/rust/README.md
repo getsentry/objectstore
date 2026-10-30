@@ -348,9 +348,7 @@ static CLIENT: LazyLock<Client> = LazyLock::new(|| {
         .expect("Objectstore client to build successfully")
 });
 
-static ATTACHMENTS: LazyLock<Usecase> = LazyLock::new(|| {
-    Usecase::from_static("attachments")
-});
+static ATTACHMENTS: Usecase = Usecase::from_static("attachments");
 
 async fn example() -> Result<()> {
     let session = CLIENT.session(ATTACHMENTS.for_project(42, 1337))?;

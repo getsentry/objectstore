@@ -12,6 +12,8 @@ use serde::Deserialize;
 use tokio::fs::File;
 use tokio::io::{AsyncBufRead, AsyncRead, BufReader};
 use tokio_util::io::{ReaderStream, StreamReader};
+#[cfg(feature = "tracing")]
+use tracing::debug;
 
 pub use objectstore_types::metadata::{Compression, ExpirationPolicy};
 
@@ -365,8 +367,13 @@ impl PutBuilder {
                 self.key.clone(),
                 self.metadata,
             );
-            if let Ok(Some(upload)) = create.send().await {
-                return automatic::upload(body, upload).await;
+            match create.send().await {
+                Ok(Some(upload)) => return automatic::upload(body, upload).await,
+                #[cfg(feature = "tracing")]
+                Err(error) => {
+                    debug!(%error, "Resumable upload creation failed; falling back to direct upload");
+                }
+                _ => {}
             }
         }
 
