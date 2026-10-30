@@ -12,11 +12,17 @@ use serde::Deserialize;
 use tokio::fs::File;
 use tokio::io::{AsyncBufRead, AsyncRead, BufReader};
 use tokio_util::io::{ReaderStream, StreamReader};
+#[cfg(feature = "tracing")]
+use tracing::debug;
 
 pub use objectstore_types::metadata::{Compression, ExpirationPolicy};
 
 use crate::response::ResponseExt as _;
+use crate::resumable::CreateResumableUploadBuilder;
 use crate::{ClientStream, ObjectKey, Session};
+
+mod automatic;
+mod payload;
 
 /// The response returned from the service after uploading an object.
 #[derive(Debug, Deserialize)]
@@ -75,6 +81,7 @@ impl Session {
                 .compression()
                 .map(CompressionMode::Compress),
             key: None,
+            resumable_threshold_bytes: self.scope.usecase().resumable_threshold_bytes(),
             body,
         }
     }
@@ -85,11 +92,15 @@ impl Session {
     }
 
     /// Creates or replaces an object using a streaming payload.
+    ///
+    /// Streams use direct uploads, regardless of the resumable threshold.
     pub fn put_stream(&self, body: ClientStream) -> PutBuilder {
         self.put_body(PutBody::Stream(body))
     }
 
     /// Creates or replaces an object using an [`AsyncRead`] payload.
+    ///
+    /// Readers use direct uploads. Use [`Self::put_path`] for automatic resumable file uploads.
     pub fn put_read<R>(&self, body: R) -> PutBuilder
     where
         R: AsyncRead + Send + Sync + 'static,
@@ -99,6 +110,8 @@ impl Session {
     }
 
     /// Creates or replaces an object using the contents of an opened file.
+    ///
+    /// Uploads from the current position using a direct request, regardless of the resumable threshold.
     ///
     /// The file descriptor is held open from the moment this method is called until the
     /// upload completes. When enqueueing many files via [`Session::many`], prefer
@@ -110,6 +123,10 @@ impl Session {
     }
 
     /// Creates or replaces an object using the contents of the file at `path`.
+    ///
+    /// For resumable uploads, the path must stay readable and must not be modified, renamed,
+    /// removed, or replaced until the upload completes. Each attempt opens a new handle.
+    /// Handles may remain open until pending HTTP requests release their readers.
     ///
     /// Unlike [`put_file`](Session::put_file), this method defers opening the file until the
     /// request is actually sent. When enqueueing many file uploads via [`Session::many`], this
@@ -125,6 +142,14 @@ impl Session {
 }
 
 /// A [`put`](Session::put) request builder.
+///
+/// # Automatic resumable uploads
+///
+/// Large buffers and paths to regular files use resumable uploads automatically,
+/// recovering from interrupted requests. Open files, streams, readers, and uploads queued through
+/// [`Session::many`] do not use resumables. No feature flag is required.
+///
+/// Configure this with [`Self::resumable_threshold_bytes`] and [`crate::ClientBuilder::spool_dir`].
 #[derive(Debug)]
 pub struct PutBuilder {
     pub(crate) session: Session,
@@ -132,9 +157,28 @@ pub struct PutBuilder {
     pub(crate) compression: Option<CompressionMode>,
     pub(crate) key: Option<ObjectKey>,
     pub(crate) body: PutBody,
+    pub(crate) resumable_threshold_bytes: Option<u64>,
 }
 
 impl PutBuilder {
+    /// Sets the minimum remaining input size for automatic resumable uploads.
+    ///
+    /// Measures remaining bytes before client compression. Inherits the
+    /// [`Usecase` threshold](crate::Usecase::with_resumable_threshold_bytes) unless overridden.
+    /// Pass [`None`] to disable or zero to include every supported payload.
+    /// See [`PutBuilder`] for eligibility.
+    ///
+    /// ```no_run
+    /// # async fn example(session: objectstore_client::Session) -> objectstore_client::Result<()> {
+    /// session.put("payload").resumable_threshold_bytes(None).send().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn resumable_threshold_bytes(mut self, threshold: impl Into<Option<u64>>) -> Self {
+        self.resumable_threshold_bytes = threshold.into();
+        self
+    }
+
     /// Sets an explicit object key.
     ///
     /// If a key is specified, the object will be stored under that key. Otherwise, the Objectstore
@@ -146,7 +190,7 @@ impl PutBuilder {
 
     /// Sets an explicit compression algorithm to be used for this payload.
     ///
-    /// The client compresses the payload while uploading it and records the algorithm in the
+    /// The client compresses the payload and records the algorithm in the
     /// object's metadata. [`None`] should be used if no compression should be performed by the
     /// client, either because the payload is uncompressible (such as a media format), or if the
     /// compression should not be recorded for this object.
@@ -307,15 +351,37 @@ impl PutBuilder {
             None => reqwest::Method::POST,
         };
 
+        self.metadata.compression = self.compression.map(CompressionMode::compression);
+        let headers = self.metadata.to_headers("")?;
+        let prepared = payload::prepare(
+            self.body,
+            self.compression,
+            self.resumable_threshold_bytes,
+            self.session.client.spool_dir().map(PathBuf::from),
+        )
+        .await?;
+        if let payload::PreparedBody::Replayable(body) = &prepared {
+            let create = CreateResumableUploadBuilder::new(
+                self.session.clone(),
+                body.len(),
+                self.key.clone(),
+                self.metadata,
+            );
+            match create.send().await {
+                Ok(Some(upload)) => return automatic::upload(body, upload).await,
+                #[cfg(feature = "tracing")]
+                Err(error) => {
+                    debug!(%error, "Resumable upload creation failed; falling back to direct upload");
+                }
+                _ => {}
+            }
+        }
+
+        let body = prepared.into_reqwest_body(self.compression).await?;
         let mut builder = self
             .session
             .request(method, self.key.as_deref().unwrap_or_default())?;
-
-        self.metadata.compression = self.compression.map(CompressionMode::compression);
-        let body = encode_body(self.body, self.compression).await?;
-
-        builder = builder.headers(self.metadata.to_headers("")?);
-
+        builder = builder.headers(headers);
         let response = builder.body(body).send().await?;
         Ok(response.error_for_status_and_drain().await?.json().await?)
     }

@@ -57,18 +57,15 @@ pub enum Error {
         message: String,
     },
     /// A resumable upload session expired, was canceled, or could otherwise not be found.
-    #[cfg(feature = "resumable-upload-api")]
     #[error("resumable upload session is not available")]
     ResumableUploadUnavailable,
     /// A resumable chunk starts at a different offset than the server currently holds.
-    #[cfg(feature = "resumable-upload-api")]
     #[error("upload offset mismatch (server holds {offset} bytes)")]
     UploadOffsetMismatch {
         /// The server's authoritative upload offset in bytes.
         offset: u64,
     },
     /// A non-final chunk is shorter than the upload granularity.
-    #[cfg(feature = "resumable-upload-api")]
     #[error(
         "non-final chunk {chunk_length} is smaller than upload granularity {upload_granularity}"
     )]
