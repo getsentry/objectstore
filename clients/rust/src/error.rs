@@ -20,8 +20,8 @@ pub enum Error {
     #[error("invalid scope: {0}")]
     InvalidScope(#[from] objectstore_types::scope::InvalidScopeError),
     /// Error when creating auth tokens, such as invalid keys.
-    #[error(transparent)]
-    TokenError(#[from] jsonwebtoken::errors::Error),
+    #[error("failed to create auth token: {0}")]
+    TokenError(#[from] crate::TokenError),
     /// Error when the permissions requested for a token exceed those granted to the
     /// [`TokenGenerator`](crate::TokenGenerator).
     #[error("requested permissions not granted to this token generator: {escalated:?}")]

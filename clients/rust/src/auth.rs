@@ -15,6 +15,14 @@ const DEFAULT_PERMISSIONS: [Permission; 3] = [
     Permission::ObjectDelete,
 ];
 
+/// An error creating or signing an auth token, such as an invalid key.
+///
+/// The message describes the cause. The underlying signing library is an implementation detail
+/// and not part of the public API.
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+pub struct TokenError(jsonwebtoken::errors::Error);
+
 /// Key configuration that will be used to sign tokens in Objectstore requests.
 pub struct SecretKey {
     /// A key ID that Objectstore must use to load the corresponding public key.
@@ -132,7 +140,8 @@ struct JwtClaims {
 impl TokenGenerator {
     /// Create a new [`TokenGenerator`] for a given key configuration.
     pub fn new(secret_key: SecretKey) -> crate::Result<TokenGenerator> {
-        let encoding_key = EncodingKey::from_ed_pem(secret_key.secret_key.as_bytes())?;
+        let encoding_key =
+            EncodingKey::from_ed_pem(secret_key.secret_key.as_bytes()).map_err(TokenError)?;
         Ok(TokenGenerator {
             kid: secret_key.kid,
             encoding_key,
@@ -256,6 +265,7 @@ impl TokenRequest<'_> {
         let mut header = Header::new(Algorithm::EdDSA);
         header.kid = Some(self.generator.kid.clone());
 
-        Ok(encode(&header, &claims, &self.generator.encoding_key)?)
+        let token = encode(&header, &claims, &self.generator.encoding_key).map_err(TokenError)?;
+        Ok(token)
     }
 }
