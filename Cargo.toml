@@ -42,7 +42,7 @@ async-stream = "0.3.6"
 async-trait = "0.1.92"
 axum = "0.8.9"
 axum-extra = { version = "0.12.6", default-features = false }
-base64 = "0.23.1"
+base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 bigtable_rs = { git = "https://github.com/getsentry/bigtable_rs.git", rev = "072cb5871766b39c08c9a4d1f43c8d3895eeb96e", default-features = false, features = ["gcp-auth-ring", "tonic-tls-ring"] }
 blake3 = "1.8.5"
 bytes = "1.12.0"
