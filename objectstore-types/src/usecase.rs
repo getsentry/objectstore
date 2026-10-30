@@ -109,23 +109,6 @@ impl Usecase {
     }
 }
 
-/// Checks whether a name follows the rules on [`Usecase`].
-const fn validate(name: &str) -> Result<(), InvalidUsecaseName> {
-    let bytes = name.as_bytes();
-    if bytes.len() < MIN_USECASE_NAME_LENGTH || bytes.len() > MAX_USECASE_NAME_LENGTH {
-        return Err(InvalidUsecaseName::InvalidLength);
-    }
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if !b.is_ascii_alphanumeric() && b != b'_' && b != b'-' {
-            return Err(InvalidUsecaseName::InvalidChar(i));
-        }
-        i += 1;
-    }
-    Ok(())
-}
-
 impl fmt::Debug for Usecase {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("Usecase").field(&self.as_str()).finish()
@@ -224,6 +207,35 @@ impl<'de> Deserialize<'de> for Usecase {
     }
 }
 
+/// An error indicating that a usecase name is invalid.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum InvalidUsecaseName {
+    /// The name is outside the permitted length range.
+    #[error("{message}", message = INVALID_LENGTH)]
+    InvalidLength,
+    /// The name contains a character outside the permitted set, starting at
+    /// this byte position.
+    #[error("{message}, at position {0}", message = INVALID_CHAR)]
+    InvalidChar(usize),
+}
+
+/// Checks whether a name follows the rules on [`Usecase`].
+const fn validate(name: &str) -> Result<(), InvalidUsecaseName> {
+    let bytes = name.as_bytes();
+    if bytes.len() < MIN_USECASE_NAME_LENGTH || bytes.len() > MAX_USECASE_NAME_LENGTH {
+        return Err(InvalidUsecaseName::InvalidLength);
+    }
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if !b.is_ascii_alphanumeric() && b != b'_' && b != b'-' {
+            return Err(InvalidUsecaseName::InvalidChar(i));
+        }
+        i += 1;
+    }
+    Ok(())
+}
+
 /// Deserializes a [`Usecase`] from a string, borrowing it where possible.
 struct UsecaseVisitor;
 
@@ -240,18 +252,6 @@ impl serde::de::Visitor<'_> for UsecaseVisitor {
     {
         Usecase::new(name).map_err(E::custom)
     }
-}
-
-/// An error indicating that a usecase name is invalid.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum InvalidUsecaseName {
-    /// The name is outside the permitted length range.
-    #[error("{message}", message = INVALID_LENGTH)]
-    InvalidLength,
-    /// The name contains a character outside the permitted set, starting at
-    /// this byte position.
-    #[error("{message}, at position {0}", message = INVALID_CHAR)]
-    InvalidChar(usize),
 }
 
 #[cfg(test)]
