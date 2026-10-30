@@ -129,6 +129,15 @@ pub enum ExpiryAnchor {
     Now,
 }
 
+/// A content type is not a valid [IANA Media
+/// Type](https://www.iana.org/assignments/media-types/media-types.xhtml).
+///
+/// The message describes which part is malformed. The underlying parser is an implementation
+/// detail and not part of the public API.
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+pub struct InvalidContentType(mediatype::MediaTypeError);
+
 /// Errors that can happen dealing with metadata
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -143,7 +152,7 @@ pub enum Error {
     Compression,
     /// The content type is invalid.
     #[error("invalid content type")]
-    ContentType(#[from] mediatype::MediaTypeError),
+    ContentType(#[from] InvalidContentType),
     /// The creation time is invalid.
     #[error("invalid creation time")]
     CreationTime(#[from] humantime::TimestampError),
@@ -598,7 +607,7 @@ impl Metadata {
 /// Validates that `content_type` is a valid [IANA Media
 /// Type](https://www.iana.org/assignments/media-types/media-types.xhtml).
 fn validate_content_type(content_type: &str) -> Result<(), Error> {
-    mediatype::MediaType::parse(content_type)?;
+    mediatype::MediaType::parse(content_type).map_err(InvalidContentType)?;
     Ok(())
 }
 
