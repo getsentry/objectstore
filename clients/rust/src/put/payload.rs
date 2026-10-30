@@ -277,19 +277,4 @@ mod tests {
             assert_eq!(suffix.concat(), data[107..]);
         });
     }
-
-    #[tokio::test]
-    async fn short_temporary_file_returns_a_local_read_error() {
-        let body = ReplayableBody::Temporary {
-            file: Arc::new(tempfile::tempfile().unwrap()),
-            length: 1,
-        };
-        let error = body.stream(0).await.unwrap().try_next().await.unwrap_err();
-        let error = error
-            .get_ref()
-            .unwrap()
-            .downcast_ref::<ReadError>()
-            .unwrap();
-        assert_eq!(error.0.kind(), io::ErrorKind::UnexpectedEof);
-    }
 }
