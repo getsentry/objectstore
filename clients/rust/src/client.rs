@@ -158,7 +158,7 @@ impl ClientBuilder {
 /// normalized.
 #[derive(Debug, Clone)]
 pub struct Usecase {
-    name: Arc<UsecaseName>,
+    name: UsecaseName,
     compression: Option<Compression>,
     expiration_policy: ExpirationPolicy,
 }
@@ -173,22 +173,37 @@ impl Usecase {
     /// Returns [`InvalidUsecaseName`] if the name violates the naming rules on
     /// [`Usecase`].
     pub fn new(name: &str) -> Result<Self, InvalidUsecaseName> {
-        Ok(Self {
-            name: Arc::new(UsecaseName::new(name)?),
-            compression: Some(Compression::Zstd),
-            expiration_policy: ExpirationPolicy::default(),
-        })
+        Ok(Self::with_name(UsecaseName::new(name)?))
     }
 
     /// Creates a Usecase for a statically defined name.
     ///
-    /// Use [`Self::new`] for dynamic names.
+    /// Use [`Self::new`] for dynamic names. The result can initialize a `static`:
+    ///
+    /// ```
+    /// use objectstore_client::Usecase;
+    ///
+    /// static ATTACHMENTS: Usecase = Usecase::from_static("attachments");
+    /// assert_eq!(ATTACHMENTS.name(), "attachments");
+    /// ```
     ///
     /// # Panics
     ///
-    /// Panics if the name violates the naming rules on [`Usecase`].
-    pub fn from_static(name: &'static str) -> Self {
-        Self::new(name).expect("invalid usecase name")
+    /// Panics if the name violates the naming rules on [`Usecase`]. In a const
+    /// context, this panic is reported as a compile error.
+    #[track_caller]
+    pub const fn from_static(name: &'static str) -> Self {
+        Self::with_name(UsecaseName::from_static(name))
+    }
+
+    /// Creates a Usecase with the default compression and expiration policy.
+    const fn with_name(name: UsecaseName) -> Self {
+        Self {
+            name,
+            compression: Some(Compression::Zstd),
+            // `ExpirationPolicy::default()` isn't callable in a const fn.
+            expiration_policy: ExpirationPolicy::Manual,
+        }
     }
 
     /// Returns the name of this usecase.
@@ -587,8 +602,16 @@ mod tests {
         ));
         assert!(matches!(
             Usecase::new("testing/org=999/injected"),
-            Err(InvalidUsecaseName::InvalidChar('/'))
+            Err(InvalidUsecaseName::InvalidChar(7))
         ));
+    }
+
+    #[test]
+    fn test_usecase_from_static_const() {
+        const USECASE: Usecase = Usecase::from_static("testing");
+        assert_eq!(USECASE.name(), "testing");
+        assert_eq!(USECASE.compression(), Some(Compression::Zstd));
+        assert_eq!(USECASE.expiration_policy(), ExpirationPolicy::default());
     }
 
     #[test]
