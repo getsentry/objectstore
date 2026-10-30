@@ -173,25 +173,35 @@ impl Usecase {
     /// Returns [`InvalidUsecaseName`] if the name violates the naming rules on
     /// [`Usecase`].
     pub fn new(name: &str) -> Result<Self, InvalidUsecaseName> {
-        Ok(Self {
-            name: UsecaseName::new(name)?,
-            compression: Some(Compression::Zstd),
-            expiration_policy: ExpirationPolicy::default(),
-        })
+        Ok(Self::with_name(UsecaseName::new(name)?))
     }
 
     /// Creates a Usecase for a statically defined name.
     ///
-    /// Use [`Self::new`] for dynamic names.
+    /// Use [`Self::new`] for dynamic names. The result can initialize a `static`:
+    ///
+    /// ```
+    /// use objectstore_client::Usecase;
+    ///
+    /// static ATTACHMENTS: Usecase = Usecase::from_static("attachments");
+    /// assert_eq!(ATTACHMENTS.name(), "attachments");
+    /// ```
     ///
     /// # Panics
     ///
     /// Panics if the name violates the naming rules on [`Usecase`]. In a const
     /// context, this panic is reported as a compile error.
+    #[track_caller]
     pub const fn from_static(name: &'static str) -> Self {
+        Self::with_name(UsecaseName::from_static(name))
+    }
+
+    /// Creates a Usecase with the default compression and expiration policy.
+    const fn with_name(name: UsecaseName) -> Self {
         Self {
-            name: UsecaseName::from_static(name),
+            name,
             compression: Some(Compression::Zstd),
+            // `ExpirationPolicy::default()` isn't callable in a const fn.
             expiration_policy: ExpirationPolicy::Manual,
         }
     }
@@ -592,7 +602,7 @@ mod tests {
         ));
         assert!(matches!(
             Usecase::new("testing/org=999/injected"),
-            Err(InvalidUsecaseName::InvalidChar('/'))
+            Err(InvalidUsecaseName::InvalidChar(7))
         ));
     }
 

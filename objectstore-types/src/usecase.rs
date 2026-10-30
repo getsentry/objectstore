@@ -15,6 +15,21 @@ pub const MIN_USECASE_NAME_LENGTH: usize = 3;
 /// Maximum length of a usecase name in bytes.
 pub const MAX_USECASE_NAME_LENGTH: usize = 64;
 
+/// Message for [`InvalidUsecaseName::InvalidLength`].
+const INVALID_LENGTH: &str = "invalid usecase name: must be 3-64 ASCII characters long";
+
+/// Message for [`InvalidUsecaseName::InvalidChar`], without the position.
+const INVALID_CHAR: &str = "invalid usecase name: expected ASCII letters, digits, '_' or '-'";
+
+/// Storage for a validated [`Usecase`] name.
+#[derive(Clone)]
+enum Repr {
+    /// A name validated by [`Usecase::from_static`], stored without allocating.
+    Static(&'static str),
+    /// A name validated at runtime by [`Usecase::new`].
+    Dynamic(Arc<str>),
+}
+
 /// A validated, case-sensitive name for an Objectstore workload.
 ///
 /// Names must be 3–64 ASCII characters from `[A-Za-z0-9_-]`. Any permitted
@@ -35,17 +50,8 @@ pub const MAX_USECASE_NAME_LENGTH: usize = 64;
 ///
 /// Use [`Usecase::from_static`] for statically known names and [`Usecase::new`]
 /// for dynamic names.
-#[derive(Clone, Debug)]
-pub struct Usecase(Name);
-
-/// Storage for a validated [`Usecase`] name.
-#[derive(Clone, Debug)]
-enum Name {
-    /// A name validated by [`Usecase::from_static`], stored without allocating.
-    Static(&'static str),
-    /// A name validated at runtime by [`Usecase::new`].
-    Dynamic(Arc<str>),
-}
+#[derive(Clone)]
+pub struct Usecase(Repr);
 
 impl Usecase {
     /// Creates a validated usecase name from a borrowed or owned string.
@@ -56,37 +62,49 @@ impl Usecase {
     ///
     /// Returns [`InvalidUsecaseName`] if the name violates the rules on
     /// [`Usecase`].
-    pub fn new(name: impl Into<String>) -> Result<Self, InvalidUsecaseName> {
-        let name = name.into();
-        validate(&name)?;
-        Ok(Self(Name::Dynamic(name.into())))
+    pub fn new(name: impl AsRef<str>) -> Result<Self, InvalidUsecaseName> {
+        let name = name.as_ref();
+        validate(name)?;
+        Ok(Self(Repr::Dynamic(name.into())))
     }
 
     /// Creates a usecase name from a name known at compile time.
     ///
-    /// Use [`Self::new`] for dynamic names.
+    /// Use [`Self::new`] for dynamic names. The name is stored without
+    /// allocating, so the result can initialize a `static`:
+    ///
+    /// ```
+    /// use objectstore_types::usecase::Usecase;
+    ///
+    /// static ATTACHMENTS: Usecase = Usecase::from_static("attachments");
+    /// assert_eq!(ATTACHMENTS.as_str(), "attachments");
+    /// ```
     ///
     /// # Panics
     ///
     /// Panics if the name violates the rules on [`Usecase`]. In a const
-    /// context, this panic is reported as a compile error.
+    /// context, this panic is reported as a compile error:
+    ///
+    /// ```compile_fail
+    /// use objectstore_types::usecase::Usecase;
+    ///
+    /// static BROKEN: Usecase = Usecase::from_static("attachments/v2");
+    /// ```
+    #[track_caller]
     pub const fn from_static(name: &'static str) -> Self {
         match validate(name) {
-            Ok(()) => Self(Name::Static(name)),
-            Err(InvalidUsecaseName::InvalidLength) => {
-                panic!("invalid usecase name: must be 3–64 ASCII characters long")
-            }
-            Err(InvalidUsecaseName::InvalidChar(_)) => {
-                panic!("invalid usecase name: expected only ASCII letters, digits, '_' or '-'")
-            }
+            Ok(()) => Self(Repr::Static(name)),
+            // Const panics only accept a single `&str`, so the position is omitted.
+            Err(InvalidUsecaseName::InvalidLength) => panic!("{}", INVALID_LENGTH),
+            Err(InvalidUsecaseName::InvalidChar(_)) => panic!("{}", INVALID_CHAR),
         }
     }
 
     /// Returns the usecase name as a string slice.
     pub fn as_str(&self) -> &str {
         match &self.0 {
-            Name::Static(name) => name,
-            Name::Dynamic(name) => name,
+            Repr::Static(name) => name,
+            Repr::Dynamic(name) => name,
         }
     }
 }
@@ -101,12 +119,17 @@ const fn validate(name: &str) -> Result<(), InvalidUsecaseName> {
     while i < bytes.len() {
         let b = bytes[i];
         if !b.is_ascii_alphanumeric() && b != b'_' && b != b'-' {
-            // All preceding bytes are ASCII, so `i` is a char boundary.
-            return Err(InvalidUsecaseName::InvalidChar(decode_char(bytes, i)));
+            return Err(InvalidUsecaseName::InvalidChar(i));
         }
         i += 1;
     }
     Ok(())
+}
+
+impl fmt::Debug for Usecase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Usecase").field(&self.as_str()).finish()
+    }
 }
 
 impl PartialEq for Usecase {
@@ -197,27 +220,25 @@ impl<'de> Deserialize<'de> for Usecase {
     where
         D: Deserializer<'de>,
     {
-        Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+        deserializer.deserialize_str(UsecaseVisitor)
     }
 }
 
-/// Decodes the UTF-8 encoded char starting at byte index `i` of a valid `str`.
-const fn decode_char(bytes: &[u8], i: usize) -> char {
-    let lead = bytes[i] as u32;
-    let (len, mut code) = match lead {
-        0x00..0x80 => (1, lead),
-        0xC0..0xE0 => (2, lead & 0x1F),
-        0xE0..0xF0 => (3, lead & 0x0F),
-        _ => (4, lead & 0x07),
-    };
-    let mut j = 1;
-    while j < len {
-        code = (code << 6) | (bytes[i + j] as u32 & 0x3F);
-        j += 1;
+/// Deserializes a [`Usecase`] from a string, borrowing it where possible.
+struct UsecaseVisitor;
+
+impl serde::de::Visitor<'_> for UsecaseVisitor {
+    type Value = Usecase;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a usecase name")
     }
-    match char::from_u32(code) {
-        Some(c) => c,
-        None => char::REPLACEMENT_CHARACTER,
+
+    fn visit_str<E>(self, name: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Usecase::new(name).map_err(E::custom)
     }
 }
 
@@ -225,11 +246,12 @@ const fn decode_char(bytes: &[u8], i: usize) -> char {
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum InvalidUsecaseName {
     /// The name is outside the permitted length range.
-    #[error("usecase name must be 3–64 ASCII characters long")]
+    #[error("{message}", message = INVALID_LENGTH)]
     InvalidLength,
-    /// The name contains a character outside the permitted set.
-    #[error("invalid character {0:?} in usecase name; expected ASCII letters, digits, '_' or '-'")]
-    InvalidChar(char),
+    /// The name contains a character outside the permitted set, starting at
+    /// this byte position.
+    #[error("{message}, at position {0}", message = INVALID_CHAR)]
+    InvalidChar(usize),
 }
 
 #[cfg(test)]
@@ -247,23 +269,23 @@ mod tests {
         for name in ["", "_", "ab", &"a".repeat(65)] {
             assert_eq!(Usecase::new(name), Err(InvalidUsecaseName::InvalidLength));
         }
-        for (name, character) in [
-            ("testing/org=999/injected", '/'),
-            ("test.name", '.'),
-            ("test name", ' '),
-            ("café", 'é'),
-            ("ab€cd", '€'),
-            ("ab🦀cd", '🦀'),
+        for (name, position) in [
+            ("testing/org=999/injected", 7),
+            ("test.name", 4),
+            ("test name", 4),
+            ("café", 3),
+            ("ab€cd", 2),
+            ("ab🦀cd", 2),
         ] {
             assert_eq!(
                 Usecase::new(name),
-                Err(InvalidUsecaseName::InvalidChar(character))
-            );
-            assert_eq!(
-                validate(name),
-                Err(InvalidUsecaseName::InvalidChar(character))
+                Err(InvalidUsecaseName::InvalidChar(position))
             );
         }
+        assert_eq!(
+            InvalidUsecaseName::InvalidChar(7).to_string(),
+            "invalid usecase name: expected ASCII letters, digits, '_' or '-', at position 7"
+        );
     }
 
     #[test]
@@ -286,6 +308,8 @@ mod tests {
         let static_ = Usecase::from_static("debug-files");
         assert_eq!(dynamic, static_);
         assert_eq!(dynamic.cmp(&static_), Ordering::Equal);
+        assert_eq!(format!("{dynamic:?}"), r#"Usecase("debug-files")"#);
+        assert_eq!(format!("{static_:?}"), r#"Usecase("debug-files")"#);
         let set = HashSet::from([dynamic]);
         assert!(set.contains(&static_));
         assert!(set.contains("debug-files"));
@@ -297,6 +321,9 @@ mod tests {
         let serialized = serde_json::to_string(&name).unwrap();
         assert_eq!(serialized, r#""Debug_Files-123""#);
         assert_eq!(serde_json::from_str::<Usecase>(&serialized).unwrap(), name);
+        // Escapes can't be borrowed from the input, so this takes the transient path.
+        let escaped = r#""Debug\u005fFiles-123""#;
+        assert_eq!(serde_json::from_str::<Usecase>(escaped).unwrap(), name);
         assert!(serde_json::from_str::<Usecase>(r#""_""#).is_err());
     }
 
