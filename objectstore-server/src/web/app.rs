@@ -116,6 +116,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        deprecated,
+        reason = "matches the legacy combined layer used by objectstore-log"
+    )]
     fn body_task_preserves_sentry_context() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()

@@ -19,6 +19,10 @@ include!(concat!(env!("OUT_DIR"), "/constants.gen.rs"));
 /// spans are ignored.
 pub fn init(config: &LoggingConfig) {
     #[cfg(feature = "sentry")]
+    #[expect(
+        deprecated,
+        reason = "legacy combined layer; migrating to SpanLayer/LogLayer/ErrorLayer is a separate decision"
+    )]
     let sentry_layer = sentry::Hub::current()
         .client()
         .filter(|c| c.is_enabled())
