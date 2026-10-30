@@ -98,7 +98,6 @@ impl App {
 mod tests {
     use axum::body::{Body, to_bytes};
     use axum::http::StatusCode;
-    use objectstore_log::tracing;
     use objectstore_service::backend::local_fs::FileSystemConfig;
     use sentry::protocol::{Context, EnvelopeItem, TraceContext, Transaction};
     use tower::ServiceExt;
@@ -116,10 +115,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(
-        deprecated,
-        reason = "matches the legacy combined layer used by objectstore-log"
-    )]
     fn body_task_preserves_sentry_context() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -127,8 +122,8 @@ mod tests {
             .unwrap();
         let _subscriber = tracing_subscriber::registry()
             .with(
-                sentry::integrations::tracing::layer()
-                    .span_filter(|metadata| *metadata.level() != tracing::Level::TRACE),
+                sentry::integrations::tracing::SpanLayer::new()
+                    .with_filter(tracing_subscriber::filter::LevelFilter::DEBUG),
             )
             .set_default();
         let trace_id = "11111111111111111111111111111111";
