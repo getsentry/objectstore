@@ -236,7 +236,7 @@ const fn validate(name: &str) -> Result<(), InvalidUsecaseName> {
     Ok(())
 }
 
-/// Deserializes a [`Usecase`] from a string, borrowing it where possible.
+/// Deserializes a [`Usecase`] from a string or UTF-8 bytes.
 struct UsecaseVisitor;
 
 impl serde::de::Visitor<'_> for UsecaseVisitor {
@@ -251,6 +251,15 @@ impl serde::de::Visitor<'_> for UsecaseVisitor {
         E: serde::de::Error,
     {
         Usecase::new(name).map_err(E::custom)
+    }
+
+    fn visit_bytes<E>(self, bytes: &[u8]) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        let name = std::str::from_utf8(bytes)
+            .map_err(|_| E::invalid_value(serde::de::Unexpected::Bytes(bytes), &self))?;
+        self.visit_str(name)
     }
 }
 
