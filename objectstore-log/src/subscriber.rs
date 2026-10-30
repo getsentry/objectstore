@@ -21,25 +21,7 @@ pub fn init(config: &LoggingConfig) {
     let sentry_layer = sentry::Hub::current()
         .client()
         .filter(|c| c.is_enabled())
-        .map(|_| {
-            use sentry::integrations::tracing::{ErrorLayer, LogLayer, SpanLayer};
-            use tracing_subscriber::filter::{FilterExt, LevelFilter, filter_fn};
-
-            SpanLayer::new()
-                .with_filter(LevelFilter::DEBUG)
-                .and_then(
-                    ErrorLayer::new()
-                        .enable_span_attributes()
-                        // Span attributes come only from spans that pass both the span layer's
-                        // and the event layer's filter, so the error layer accepts all spans.
-                        .with_filter(LevelFilter::WARN.or(filter_fn(|m| m.is_span()))),
-                )
-                .and_then(
-                    LogLayer::new()
-                        .enable_span_attributes()
-                        .with_filter(LevelFilter::DEBUG),
-                )
-        });
+        .map(|_| sentry_layers());
 
     let format = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
@@ -80,6 +62,31 @@ pub fn init(config: &LoggingConfig) {
         .with(sentry_layer)
         .with(env_filter)
         .init();
+}
+
+/// Builds the Sentry tracing layers that [`init`] attaches when the Sentry client is enabled.
+#[cfg(feature = "sentry")]
+fn sentry_layers<S>() -> impl tracing_subscriber::Layer<S>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    use sentry::integrations::tracing::{ErrorLayer, LogLayer, SpanLayer};
+    use tracing_subscriber::filter::{FilterExt, LevelFilter, filter_fn};
+
+    SpanLayer::new()
+        .with_filter(LevelFilter::DEBUG)
+        .and_then(
+            ErrorLayer::new()
+                .enable_span_attributes()
+                // Span attributes come only from spans that pass both the span layer's
+                // and the event layer's filter, so the error layer accepts all spans.
+                .with_filter(LevelFilter::WARN.or(filter_fn(|m| m.is_span()))),
+        )
+        .and_then(
+            LogLayer::new()
+                .enable_span_attributes()
+                .with_filter(LevelFilter::DEBUG),
+        )
 }
 
 /// Builds the default [`EnvFilter`] when `RUST_LOG` is not set.
