@@ -151,15 +151,16 @@ session.put("payload")
     .send().await?;
 ```
 
-### Automatic Resumable Uploads
+### Resumable Uploads
 
-Large PUTs automatically use resumable uploads, resending only what the server hasn't
-stored after a failed request.
-See [`PutBuilder`] for eligibility, configuration, and recovery behavior, and
-[`Session::put_path`] for the path stability requirement.
-Enable the `tracing` feature to log resumable session creation failures at debug level.
+The Objectstore server supports an additional API to perform PUT operations in a way
+that allows resuming. After a failed request, the upload can resume from the
+server's persisted offset.
 
-### Resumable Upload API
+Large PUTs automatically use resumable uploads.
+See [`PutBuilder`] for eligibility, configuration, and recovery behavior.
+
+### Manual Resumable Uploads
 
 > **Feature flag required:** Enable `resumable-upload-api` to use this API.
 >
@@ -167,12 +168,12 @@ Enable the `tracing` feature to log resumable session creation failures at debug
 > objectstore-client = { version = "...", features = ["resumable-upload-api"] }
 > ```
 
-The resumable upload API allows you to upload an object across multiple requests.
-It is particularly suitable for large objects, where restarting an upload from
-scratch would be expensive.
+Use this API only if you need granular control over resumable upload operations.
+Most users should not need this, and instead rely on automatic behavior implemented by [`PutBuilder`].
+If you need more controls to customize that behavior, please open an issue.
+
 It's recommended to always try to upload the whole object in a single request if
 possible, as that's always the more efficient approach.
-If the request fails midway, it will be possible to resume it from the persisted offset.
 
 **Important:** resumable uploads do not automatically compress chunk contents. The `compression`
 setting only records how the object is encoded; the caller must compress the payload accordingly.
@@ -321,6 +322,11 @@ let client = Client::builder("http://localhost:8888/")
 
 To create a token with narrower permissions or a different expiry, use the
 methods on the token request returned from `create_token`.
+
+## Feature flags
+
+- `tracing`: enables diagnostic tracing events and spans
+- `resumable-upload-api`: enables the manual Resumable Uploads API (see above)
 
 ## Configuration
 
