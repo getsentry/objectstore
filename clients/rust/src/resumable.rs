@@ -5,6 +5,9 @@
 //! low-level protocol calls.
 //! The client also uses this API internally for eligible `Session::put` calls.
 
+// Automatic uploads use only part of this module when the public API is disabled.
+#![cfg_attr(not(feature = "resumable-upload-api"), allow(dead_code))]
+
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;

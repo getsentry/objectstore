@@ -349,10 +349,6 @@ impl PutBuilder {
             None => reqwest::Method::POST,
         };
 
-        let mut builder = self
-            .session
-            .request(method, self.key.as_deref().unwrap_or_default())?;
-
         self.metadata.compression = self.compression.map(CompressionMode::compression);
         let headers = self.metadata.to_headers("")?;
         let prepared = payload::prepare(
@@ -375,6 +371,9 @@ impl PutBuilder {
         }
 
         let body = prepared.into_reqwest_body(self.compression).await?;
+        let mut builder = self
+            .session
+            .request(method, self.key.as_deref().unwrap_or_default())?;
         builder = builder.headers(headers);
         let response = builder.body(body).send().await?;
         Ok(response.error_for_status_and_drain().await?.json().await?)
