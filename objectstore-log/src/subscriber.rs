@@ -25,16 +25,14 @@ pub fn init(config: &LoggingConfig) {
             use sentry::integrations::tracing::{ErrorLayer, LogLayer, SpanLayer};
             use tracing_subscriber::filter::{FilterExt, LevelFilter, filter_fn};
 
-            // Span attributes come only from spans that pass both the span layer's
-            // and the event layer's filter, so the error layer accepts all spans.
-            let error_filter = LevelFilter::WARN.or(filter_fn(|metadata| metadata.is_span()));
-
             SpanLayer::new()
                 .with_filter(LevelFilter::DEBUG)
                 .and_then(
                     ErrorLayer::new()
                         .enable_span_attributes()
-                        .with_filter(error_filter),
+                        // Span attributes come only from spans that pass both the span layer's
+                        // and the event layer's filter, so the error layer accepts all spans.
+                        .with_filter(LevelFilter::WARN.or(filter_fn(|m| m.is_span()))),
                 )
                 .and_then(
                     LogLayer::new()
