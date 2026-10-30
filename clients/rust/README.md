@@ -157,6 +157,7 @@ Large PUTs automatically use resumable uploads, resending only what the server h
 stored after a failed request.
 See [`PutBuilder`] for eligibility, configuration, and recovery behavior, and
 [`Session::put_path`] for the path stability requirement.
+Enable the `tracing` feature to log resumable session creation failures at debug level.
 
 ### Resumable Upload API
 
