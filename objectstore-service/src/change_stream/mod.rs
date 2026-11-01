@@ -20,7 +20,6 @@ use crate::id::ObjectId;
 #[cfg(feature = "storage-cogs")]
 mod cost_tracker;
 mod factory;
-mod garbage_collector_sqlite;
 
 #[cfg(feature = "storage-cogs")]
 pub use cost_tracker::CostTrackerStream;
