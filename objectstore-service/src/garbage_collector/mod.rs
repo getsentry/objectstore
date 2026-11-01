@@ -67,5 +67,11 @@ pub trait GcStorage: Send + Sync + Debug {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum GarbageCollectorConfig {
+    /// SQLite-backed index, serialized as `type: sqlite`.
+    ///
+    /// Stores one row per object in a local SQLite database, see
+    /// [`SqliteGarbageCollectorConfig`] for its fields. The database file must live on
+    /// storage that survives restarts and is shared by every server that writes objects,
+    /// otherwise the index diverges from the objects actually stored.
     Sqlite(SqliteGarbageCollectorConfig),
 }
