@@ -151,7 +151,7 @@ mod tests {
         };
 
         let context = ObjectContext {
-            usecase: "any".to_string(),
+            usecase: "any".parse().unwrap(),
             scopes: Scopes::from_iter([Scope::create("any", "value").unwrap()]),
         };
 
@@ -161,20 +161,20 @@ mod tests {
     #[test]
     fn test_matches_usecase() {
         let switch = Killswitch {
-            usecase: Some("test".to_string()),
+            usecase: Some("test".parse().unwrap()),
             scopes: BTreeMap::new(),
             service: None,
         };
 
         let context = ObjectContext {
-            usecase: "test".to_string(),
+            usecase: "test".parse().unwrap(),
             scopes: Scopes::from_iter([Scope::create("any", "value").unwrap()]),
         };
         assert!(matches(&switch, &context, Some("anyservice"), &mut cache()));
 
         // usecase differs
         let context = ObjectContext {
-            usecase: "other".to_string(),
+            usecase: "other".parse().unwrap(),
             scopes: Scopes::from_iter([Scope::create("any", "value").unwrap()]),
         };
         assert!(!matches(
@@ -198,7 +198,7 @@ mod tests {
 
         // match, ignoring extra scope
         let context = ObjectContext {
-            usecase: "any".to_string(),
+            usecase: "any".parse().unwrap(),
             scopes: Scopes::from_iter([
                 Scope::create("org", "123").unwrap(),
                 Scope::create("project", "456").unwrap(),
@@ -209,7 +209,7 @@ mod tests {
 
         // project differs
         let context = ObjectContext {
-            usecase: "any".to_string(),
+            usecase: "any".parse().unwrap(),
             scopes: Scopes::from_iter([
                 Scope::create("org", "123").unwrap(),
                 Scope::create("project", "999").unwrap(),
@@ -224,7 +224,7 @@ mod tests {
 
         // missing project
         let context = ObjectContext {
-            usecase: "any".to_string(),
+            usecase: "any".parse().unwrap(),
             scopes: Scopes::from_iter([Scope::create("org", "123").unwrap()]),
         };
         assert!(!matches(
@@ -238,14 +238,14 @@ mod tests {
     #[test]
     fn test_matches_full() {
         let switch = Killswitch {
-            usecase: Some("test".to_string()),
+            usecase: Some("test".parse().unwrap()),
             scopes: BTreeMap::from([("org".to_string(), "123".to_string())]),
             service: Some("myservice-*".to_string()),
         };
 
         // match with all filters
         let context = ObjectContext {
-            usecase: "test".to_string(),
+            usecase: "test".parse().unwrap(),
             scopes: Scopes::from_iter([Scope::create("org", "123").unwrap()]),
         };
         assert!(matches(
@@ -257,7 +257,7 @@ mod tests {
 
         // usecase differs
         let context = ObjectContext {
-            usecase: "other".to_string(),
+            usecase: "other".parse().unwrap(),
             scopes: Scopes::from_iter([Scope::create("org", "123").unwrap()]),
         };
         assert!(!matches(
@@ -269,7 +269,7 @@ mod tests {
 
         // scope differs
         let context = ObjectContext {
-            usecase: "test".to_string(),
+            usecase: "test".parse().unwrap(),
             scopes: Scopes::from_iter([Scope::create("org", "999").unwrap()]),
         };
         assert!(!matches(
@@ -281,7 +281,7 @@ mod tests {
 
         // service differs
         let context = ObjectContext {
-            usecase: "test".to_string(),
+            usecase: "test".parse().unwrap(),
             scopes: Scopes::from_iter([Scope::create("org", "123").unwrap()]),
         };
         assert!(!matches(
@@ -293,7 +293,7 @@ mod tests {
 
         // missing service header
         let context = ObjectContext {
-            usecase: "test".to_string(),
+            usecase: "test".parse().unwrap(),
             scopes: Scopes::from_iter([Scope::create("org", "123").unwrap()]),
         };
         assert!(!matches(&switch, &context, None, &mut cache()));
@@ -308,7 +308,7 @@ mod tests {
         };
 
         let context = ObjectContext {
-            usecase: "any".to_string(),
+            usecase: "any".parse().unwrap(),
             scopes: Scopes::from_iter([Scope::create("any", "value").unwrap()]),
         };
 
@@ -331,7 +331,7 @@ mod tests {
         };
 
         let context = ObjectContext {
-            usecase: "any".to_string(),
+            usecase: "any".parse().unwrap(),
             scopes: Scopes::from_iter([Scope::create("any", "value").unwrap()]),
         };
 
@@ -382,7 +382,7 @@ mod tests {
         };
 
         let context = ObjectContext {
-            usecase: "any".to_string(),
+            usecase: "any".parse().unwrap(),
             scopes: Scopes::from_iter([Scope::create("any", "value").unwrap()]),
         };
 

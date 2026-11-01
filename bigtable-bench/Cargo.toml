@@ -12,7 +12,6 @@ publish = false
 [dependencies]
 anyhow = { workspace = true }
 argh = { workspace = true }
-bytes = { workspace = true }
 bytesize = { workspace = true }
 objectstore-service = { workspace = true }
 objectstore-types = { workspace = true }

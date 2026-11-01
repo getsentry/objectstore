@@ -10,7 +10,6 @@ pub mod encryption;
 pub mod error;
 mod gcp_auth;
 pub mod id;
-pub mod multipart;
 pub mod resumable;
 pub mod service;
 pub mod stream;

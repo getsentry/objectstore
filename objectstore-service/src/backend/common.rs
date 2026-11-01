@@ -13,10 +13,6 @@ use bytes::Bytes;
 
 use crate::error::{Error, ErrorKind, Result};
 use crate::id::ObjectId;
-use crate::multipart::{
-    AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
-    ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
-};
 use crate::resumable::{BackendToken, Session};
 use crate::stream::{ClientStream, PayloadStream};
 
@@ -256,14 +252,6 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
     /// to wait for those tasks to complete.
     async fn join(&self) {}
 
-    /// Borrows this backend as a [`MultipartUploadBackend`] if supported.
-    ///
-    /// The default returns an [`ErrorKind::Unsupported`]. Backends that implement
-    /// [`MultipartUploadBackend`] should override this to return `Ok(self)`.
-    fn as_multipart_upload_backend(&self) -> Result<&dyn MultipartUploadBackend> {
-        Err(ErrorKind::Unsupported.into())
-    }
-
     /// Creates a resumable upload session for the object at `id`.
     ///
     /// Object metadata and its total length are declared upfront and cannot be mutated
@@ -337,60 +325,6 @@ pub trait Backend: fmt::Debug + Send + Sync + 'static {
         let _ = session;
         Err(ErrorKind::Unsupported.into())
     }
-}
-
-/// Trait for backends that support our S3-style multipart upload protocol.
-#[async_trait::async_trait]
-pub trait MultipartUploadBackend: Backend + fmt::Debug + Send + Sync + 'static {
-    /// Initiates a new multipart upload at `id` with the given metadata.
-    async fn initiate_multipart(
-        &self,
-        id: &ObjectId,
-        metadata: &Metadata,
-    ) -> Result<InitiateMultipartResponse>;
-
-    /// Uploads a single part of the upload identified by `(id, upload_id)`.
-    async fn upload_part(
-        &self,
-        id: &ObjectId,
-        upload_id: &UploadId,
-        part_number: PartNumber,
-        content_length: u64,
-        content_md5: Option<&str>,
-        body: ClientStream,
-    ) -> Result<UploadPartResponse>;
-
-    /// Lists the parts uploaded so far for `(id, upload_id)`.
-    async fn list_parts(
-        &self,
-        id: &ObjectId,
-        upload_id: &UploadId,
-        max_parts: Option<u32>,
-        part_number_marker: Option<PartNumber>,
-    ) -> Result<ListPartsResponse>;
-
-    /// Aborts the upload identified by `(id, upload_id)`.
-    async fn abort_multipart(
-        &self,
-        id: &ObjectId,
-        upload_id: &UploadId,
-    ) -> Result<AbortMultipartResponse>;
-
-    /// Finalizes the upload identified by `(id, upload_id)` with the given
-    /// ordered list of parts.
-    ///
-    /// Note that this returns `Result<Option<CompleteMultipartError>>`.
-    /// It's therefore possible to get `Ok(Some(err))`, meaning that at the server level this will
-    /// translate to HTTP `200 OK` with an error contained in the response body.
-    /// We need to do it this way to mirror backends that also behave like this (namely S3 and
-    /// GCS).
-    async fn complete_multipart(
-        &self,
-        id: &ObjectId,
-        upload_id: &UploadId,
-        parts: Vec<CompletedPart>,
-        access_time: Timestamp,
-    ) -> Result<CompleteMultipartResponse>;
 }
 
 /// Trait for backends that support tombstone-conditional operations.

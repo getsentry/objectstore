@@ -35,7 +35,6 @@ Each entry in `workloads` configures an independent, concurrent workload:
 | `mode`          | no       | `weighted` | Scheduling mode: `weighted`, `throughput`, or `batch`              |
 | `file_sizes`    | yes      | —          | File size distribution (see below)                                 |
 | `actions`       | no       | 97/2/1     | Operation distribution (see below)                                 |
-| `multipart`     | no       | —          | Multipart upload configuration (see below)                         |
 
 ### File sizes
 
@@ -61,22 +60,6 @@ Controls the mix of operations. Interpretation depends on the mode:
 - In **throughput** mode: values are target operations per second.
 - In **batch** mode: `writes` is the number of puts per batch request; `reads`
   and `deletes` must be `0`.
-
-### Multipart
-
-Enables multipart uploads for `actions.writes` ops of objects larger than 1 KiB.
-Cannot be used in `batch` mode, but can be combined with `throughput` or `weighted`.
-
-| Field         | Required | Description                                              |
-|---------------|----------|----------------------------------------------------------|
-| `concurrency` | yes      | Max concurrent part uploads per object                   |
-| `part_size`   | yes      | Size of each part (min `5 MiB`); last part may be smaller |
-
-```yaml
-multipart:
-  concurrency: 4
-  part_size: 10 MiB
-```
 
 ## Modes
 

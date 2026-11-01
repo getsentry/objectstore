@@ -48,7 +48,8 @@ the default (`objectstore`).
 
 ## Sandbox / interactive testing
 
-The production Docker image uses `gcr.io/distroless/cc-debian13:nonroot`, which
-has no shell. For interactive testing inside a container, change the base image
-to `gcr.io/distroless/cc-debian13:debug-nonroot`, which includes a busybox
-shell and allows you to `exec` into the container and run the binary manually.
+The production Docker image uses a Docker Hardened Image as its base, which has
+no shell. For interactive testing inside a container, build with
+`--build-arg BASE_IMAGE=gcr.io/distroless/cc-debian13:debug-nonroot`, which
+includes a busybox shell and allows you to `exec` into the container and run
+the binary manually.

@@ -129,6 +129,15 @@ pub enum ExpiryAnchor {
     Now,
 }
 
+/// A content type is not a valid [IANA Media
+/// Type](https://www.iana.org/assignments/media-types/media-types.xhtml).
+///
+/// The message describes which part is malformed. The underlying parser is an implementation
+/// detail and not part of the public API.
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+pub struct InvalidContentType(mediatype::MediaTypeError);
+
 /// Errors that can happen dealing with metadata
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -143,7 +152,7 @@ pub enum Error {
     Compression,
     /// The content type is invalid.
     #[error("invalid content type")]
-    ContentType(#[from] mediatype::MediaTypeError),
+    ContentType(#[from] InvalidContentType),
     /// The creation time is invalid.
     #[error("invalid creation time")]
     CreationTime(#[from] humantime::TimestampError),
@@ -283,16 +292,14 @@ impl FromStr for ExpirationPolicy {
 
 /// The compression algorithm applied to an object's payload.
 ///
-/// Transmitted via the standard `Content-Encoding` HTTP header. Currently only
-/// Zstandard (`zstd`) is supported.
+/// Transmitted via the standard `Content-Encoding` HTTP header. Supported
+/// algorithms are Zstandard (`zstd`) and `gzip`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Compression {
     /// Compressed using `zstd`.
     Zstd,
-    // /// Compressed using `gzip`.
-    // Gzip,
-    // /// Compressed using `lz4`.
-    // Lz4,
+    /// Compressed using `gzip`.
+    Gzip,
 }
 
 impl Compression {
@@ -300,8 +307,7 @@ impl Compression {
     pub fn as_str(&self) -> &str {
         match self {
             Compression::Zstd => "zstd",
-            // Compression::Gzip => "gzip",
-            // Compression::Lz4 => "lz4",
+            Compression::Gzip => "gzip",
         }
     }
 }
@@ -318,8 +324,7 @@ impl FromStr for Compression {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "zstd" => Ok(Compression::Zstd),
-            // "gzip" => Compression::Gzip,
-            // "lz4" => Compression::Lz4,
+            "gzip" => Ok(Compression::Gzip),
             _ => Err(Error::Compression),
         }
     }
@@ -375,9 +380,7 @@ pub struct Metadata {
 
     /// An optional filename associated with this object (header: `x-sn-filename`).
     ///
-    /// When present, the server includes a `Content-Disposition: attachment; filename="<filename>"`
-    /// header in GET responses, prompting browsers and download tools to save the file
-    /// under this name. Non-ASCII filenames additionally get an RFC 8187 `filename*` parameter.
+    /// This filename is returned when downloading the object.
     ///
     /// This is a logical string and may contain arbitrary Unicode; it is escaped only on the
     /// wire (see [the module docs](self#escaping-free-form-values)).
@@ -604,7 +607,7 @@ impl Metadata {
 /// Validates that `content_type` is a valid [IANA Media
 /// Type](https://www.iana.org/assignments/media-types/media-types.xhtml).
 fn validate_content_type(content_type: &str) -> Result<(), Error> {
-    mediatype::MediaType::parse(content_type)?;
+    mediatype::MediaType::parse(content_type).map_err(InvalidContentType)?;
     Ok(())
 }
 
@@ -1244,15 +1247,17 @@ mod tests {
 
     #[test]
     fn compression_display_roundtrip() {
-        let displayed = Compression::Zstd.to_string();
-        assert_eq!(displayed, "zstd");
-        let parsed: Compression = displayed.parse().unwrap();
-        assert_eq!(parsed, Compression::Zstd);
+        for (compression, expected) in [(Compression::Zstd, "zstd"), (Compression::Gzip, "gzip")] {
+            let displayed = compression.to_string();
+            assert_eq!(displayed, expected);
+            let parsed: Compression = displayed.parse().unwrap();
+            assert_eq!(parsed, compression);
+        }
     }
 
     #[test]
     fn compression_parse_invalid() {
-        assert!(Compression::from_str("gzip").is_err());
+        assert!(Compression::from_str("lz4").is_err());
         assert!(Compression::from_str("").is_err());
     }
 

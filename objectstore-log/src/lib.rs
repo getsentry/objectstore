@@ -6,7 +6,7 @@
 //!    `objectstore_log::info!()`. Never import the macros; always qualify at the call site.
 //! 2. [`LoggingConfig`] and [`LogFormat`] for configuring log level and output format, and
 //!    (behind the `init` feature) an [`init`] function to wire up a `tracing-subscriber` stack.
-//!    When built with the `sentry` feature, `init` also attaches a Sentry tracing layer if the
+//!    When built with the `sentry` feature, `init` also attaches Sentry tracing layers if the
 //!    Sentry client has already been initialized.
 //! 3. Custom level macros (`error!`, `warn!`, etc.) that extend their `tracing` equivalents with
 //!    an optional `!<error>` first argument for ergonomic error field attachment, plus [`event_dyn!`]

@@ -125,8 +125,8 @@ COGS pipelines). To calculate, for example, the compute costs for the
 ## Compute COGS
 
 Objectstore emits the `objectstore.cogs.usage` counter with an `app_feature`
-label derived from the usecase once per operation. Multipart and batch
-operations are also counted. This counter can be straightforwardly summed by
+label derived from the usecase once per operation. Batch operations are also
+counted. This counter can be straightforwardly summed by
 `app_feature`.
 
 The counter is incremented in the [`CountingBackend`](backend::counting::CountingBackend)
@@ -194,7 +194,7 @@ three operations:
 Writes and updates are reported twice: `begin_*` before the storage operation
 and `commit_*` after it succeeds. Deletes are only committed. A failed
 `begin_*` fails the request before storage is touched, while `commit_*` cannot
-fail. Resumable and multipart uploads call `begin_write` when they are created.
+fail. Resumable uploads call `begin_write` when they are created.
 A `begin_*` is not always followed by a `commit_*`, so `begin_*` gives an upper
 bound on what is stored, e.g. for cleaning up expired data.
 
@@ -346,14 +346,6 @@ advance by the submitted `Content-Length` on its own. Non-empty, non-final chunk
 granularity unit are rejected; the final chunk is exempt. Clients should use granularity-sized
 multiples and continue from the preceding response's offset, or perform an explicit offset query
 after an ambiguous failure.
-
-## Multipart Uploads
-
-When the configured backend supports it, [`StorageService`] exposes multipart
-upload operations (initiate, upload part, list parts, complete, abort). These
-delegate to the [`MultipartUploadBackend`](backend::common::MultipartUploadBackend)
-trait, accessed via [`Backend::as_multipart_upload_backend`](backend::common::Backend::as_multipart_upload_backend).
-Multipart operations share the same concurrency limiter as regular operations.
 
 ## Streaming Concurrency
 

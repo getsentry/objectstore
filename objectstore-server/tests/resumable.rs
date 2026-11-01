@@ -151,7 +151,7 @@ async fn unknown_upload_type_is_rejected() -> Result<()> {
     let server = test_server().await;
 
     let response = reqwest::Client::new()
-        .put(server.url("/v1/objects/test/org=1/my-key?upload_type=multipart"))
+        .put(server.url("/v1/objects/test/org=1/my-key?upload_type=unknown"))
         .header(HEADER_UPLOAD_LENGTH, "1048576")
         .send()
         .await?;

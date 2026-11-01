@@ -11,8 +11,6 @@ mod get;
 mod head;
 mod key;
 mod many;
-#[cfg(feature = "multipart")]
-mod multipart;
 mod put;
 mod response;
 #[cfg(feature = "resumable-upload-api")]
@@ -20,6 +18,7 @@ mod resumable;
 pub mod utils;
 
 pub use objectstore_types::metadata::{Compression, ExpirationPolicy};
+pub use objectstore_types::usecase::InvalidUsecaseName;
 
 pub use auth::*;
 pub use client::*;
@@ -30,8 +29,6 @@ pub use get::*;
 pub use head::*;
 pub use key::*;
 pub use many::*;
-#[cfg(feature = "multipart")]
-pub use multipart::*;
 pub use put::*;
 #[cfg(feature = "resumable-upload-api")]
 pub use resumable::*;

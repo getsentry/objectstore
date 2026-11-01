@@ -76,7 +76,7 @@ where
     async fn commit_write(&self, id: &ObjectId, size: u64, expires_at: Option<Timestamp>) {
         let result = self.tracker.write(
             &id.as_storage_path().to_string(),
-            id.usecase(),
+            id.usecase().as_str(),
             size,
             SystemTime::now(),
             expires_at.map(Into::into),
@@ -89,7 +89,7 @@ where
     async fn commit_update(&self, id: &ObjectId, expires_at: Option<Timestamp>) {
         let result = self.tracker.update(
             &id.as_storage_path().to_string(),
-            id.usecase(),
+            id.usecase().as_str(),
             SystemTime::now(),
             expires_at.map(Into::into),
             scope_id(id, SCOPE_ORGANIZATION),
@@ -101,7 +101,7 @@ where
     async fn commit_delete(&self, id: &ObjectId) {
         let result = self.tracker.delete(
             &id.as_storage_path().to_string(),
-            id.usecase(),
+            id.usecase().as_str(),
             SystemTime::now(),
         );
         self.swallow("delete", result);

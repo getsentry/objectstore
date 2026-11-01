@@ -6,7 +6,7 @@ import urllib3
 class RequestError(Exception):
     """Exception raised if an API call to Objectstore fails."""
 
-    def __init__(self, message: str, status: int, response: str):
+    def __init__(self, message: str, status: int | None, response: str | None):
         super().__init__(message)
         self.status = status
         self.response = response

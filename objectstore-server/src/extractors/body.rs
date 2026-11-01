@@ -1,7 +1,6 @@
 //! Axum extractor for bandwidth-metered request bodies.
 
-use std::convert::Infallible;
-
+use axum::extract::rejection::PathRejection;
 use axum::extract::{FromRequest, FromRequestParts, Path, Request};
 use futures_util::{StreamExt, TryStreamExt};
 use objectstore_service::id::ObjectContext;
@@ -23,7 +22,7 @@ impl std::fmt::Debug for MeteredBody {
 }
 
 impl FromRequest<ServiceState> for MeteredBody {
-    type Rejection = Infallible;
+    type Rejection = PathRejection;
 
     async fn from_request(request: Request, state: &ServiceState) -> Result<Self, Self::Rejection> {
         let (mut parts, body) = request.into_parts();
@@ -31,8 +30,7 @@ impl FromRequest<ServiceState> for MeteredBody {
             <Path<ContextParams> as FromRequestParts<ServiceState>>::from_request_parts(
                 &mut parts, state,
             )
-            .await
-            .expect("MeteredBody must be used on routes with {usecase} and {scopes} path params");
+            .await?;
         let context = ObjectContext {
             usecase: params.usecase,
             scopes: params.scopes,
