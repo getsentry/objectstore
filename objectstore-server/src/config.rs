@@ -68,6 +68,7 @@ use objectstore_service::backend::local_fs::FileSystemConfig;
 #[cfg(feature = "storage-cogs")]
 use objectstore_service::change_stream::CostTrackerConfig;
 use objectstore_service::encryption::Cipher;
+use objectstore_service::garbage_collector::GarbageCollectorConfig;
 use objectstore_types::auth::Permission;
 use secrecy::{CloneableSecret, SecretBox, SerializableSecret, zeroize::Zeroize};
 use serde::{Deserialize, Serialize};
@@ -550,6 +551,32 @@ pub struct Config {
     #[serde(default)]
     pub storage_cogs: Option<CostTrackerConfig>,
 
+    /// Garbage collector configuration.
+    ///
+    /// Selects the backend of the garbage collector's expiration index, which records, per
+    /// object, the deadline at which that object becomes eligible for deletion. The index is
+    /// kept in sync on the write path and read back by the collector to find expired objects,
+    /// so it must be configured with the same lifetime as the storage backend: an index that
+    /// is lost or reset leaves objects behind with nothing scheduling their deletion.
+    ///
+    /// `None` is the default: no expiration index is configured.
+    ///
+    /// # Environment Variables
+    ///
+    /// - `OS__GARBAGE_COLLECTOR__TYPE=sqlite`
+    /// - `OS__GARBAGE_COLLECTOR__PATH=/data/objectstore.db`
+    ///
+    /// # Example
+    ///
+    /// ```yaml
+    /// garbage_collector:
+    ///   type: sqlite
+    ///   path: /data/objectstore.db
+    /// ```
+    ///
+    /// See [`GarbageCollectorConfig`] for the available backends and their fields.
+    pub garbage_collector: Option<GarbageCollectorConfig>,
+
     /// Configuration of the internal task runtime.
     ///
     /// Controls the thread pool size and behavior of the async runtime powering the server.
@@ -858,6 +885,7 @@ impl Default for Config {
 
             #[cfg(feature = "storage-cogs")]
             storage_cogs: None,
+            garbage_collector: None,
             runtime: Runtime::default(),
             logging: LoggingConfig::default(),
             sentry: Sentry::default(),
