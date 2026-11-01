@@ -56,7 +56,8 @@ impl GcStorage for SqliteGarbageCollector {
     ) -> Result<(), ChangeStreamError> {
         let pool = self.pool.clone();
         let id = id.clone();
-        let query_result = sqlx::query("INSERT INTO garbage_collector (object_id, expires_at) VALUES (?, ?) ON CONFLICT (object_id) DO UPDATE SET expires_at = excluded.expires_at")
+
+        let query_result = sqlx::query("INSERT INTO garbage_collector (object_id, expires_at) VALUES (?, ?) ON CONFLICT (object_id) DO UPDATE SET expires_at = excluded.expires_at WHERE excluded.expires_at IS NULL OR garbage_collector.expires_at IS NULL OR garbage_collector.expires_at < excluded.expires_at")
             .bind(id.as_storage_path().to_string())
             .bind(expires_at.map(|t| i64::try_from(t.as_secs()).ok()))
             .execute(&pool)
@@ -112,5 +113,279 @@ impl GcStorage for SqliteGarbageCollector {
             }
             Err(error) => Err(ChangeStreamError::Failure(Box::new(error))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use objectstore_types::scope::{Scope, Scopes};
+
+    use super::*;
+    use crate::id::ObjectContext;
+
+    /// The latest representable [`Timestamp`](objectstore_types::time::Timestamp), used as
+    /// "infinitely far in the future" for expiration checks.
+    const MAX_SECS: u64 = 253_402_300_799;
+
+    fn ts(secs: u64) -> objectstore_types::time::Timestamp {
+        objectstore_types::time::Timestamp::from_unix_secs(secs).unwrap()
+    }
+
+    fn id_for(key: &str) -> ObjectId {
+        ObjectId::new(
+            ObjectContext {
+                usecase: "testing".parse().unwrap(),
+                scopes: Scopes::from_iter([
+                    Scope::create("organization", "17").unwrap(),
+                    Scope::create("project", "42").unwrap(),
+                ]),
+            },
+            key.to_owned(),
+        )
+    }
+
+    fn config_in(dir: &tempfile::TempDir) -> SqliteGarbageCollectorConfig {
+        SqliteGarbageCollectorConfig {
+            path: dir
+                .path()
+                .join("objectstore.db")
+                .to_string_lossy()
+                .into_owned(),
+        }
+    }
+
+    async fn collector_in(dir: &tempfile::TempDir) -> SqliteGarbageCollector {
+        SqliteGarbageCollector::new(&config_in(dir)).await.unwrap()
+    }
+
+    /// Creates a collector backed by a database in a fresh temporary directory. The directory is
+    /// returned so that it outlives the collector.
+    async fn make_collector() -> (tempfile::TempDir, SqliteGarbageCollector) {
+        let dir = tempfile::tempdir().unwrap();
+        let collector = collector_in(&dir).await;
+        (dir, collector)
+    }
+
+    #[tokio::test]
+    async fn new_runs_migrations_on_empty_database() {
+        let (_dir, collector) = make_collector().await;
+
+        assert!(
+            collector
+                .list_expired(ts(MAX_SECS), 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn upsert_and_list_expired_roundtrip_the_full_id() {
+        let (_dir, collector) = make_collector().await;
+        let id = id_for("key");
+
+        collector.upsert(&id, Some(ts(100))).await.unwrap();
+
+        // Equality covers usecase, scopes, and key, so this also proves the storage path
+        // roundtrips through `from_storage_path`.
+        assert_eq!(collector.list_expired(ts(100), 10).await.unwrap(), vec![id]);
+    }
+
+    #[tokio::test]
+    async fn list_expired_excludes_deadlines_after_now() {
+        let (_dir, collector) = make_collector().await;
+        let id = id_for("key");
+
+        collector.upsert(&id, Some(ts(200))).await.unwrap();
+
+        assert!(
+            collector
+                .list_expired(ts(199), 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn list_expired_ignores_objects_without_expiration() {
+        let (_dir, collector) = make_collector().await;
+
+        collector.upsert(&id_for("key"), None).await.unwrap();
+
+        assert!(
+            collector
+                .list_expired(ts(MAX_SECS), 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn upsert_extends_an_earlier_deadline() {
+        let (_dir, collector) = make_collector().await;
+        let id = id_for("key");
+
+        collector.upsert(&id, Some(ts(100))).await.unwrap();
+        collector.upsert(&id, Some(ts(300))).await.unwrap();
+
+        assert!(
+            collector
+                .list_expired(ts(100), 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(collector.list_expired(ts(300), 10).await.unwrap(), vec![id]);
+    }
+
+    #[tokio::test]
+    async fn upsert_does_not_shorten_an_existing_deadline() {
+        let (_dir, collector) = make_collector().await;
+        let id = id_for("key");
+
+        collector.upsert(&id, Some(ts(300))).await.unwrap();
+        collector.upsert(&id, Some(ts(100))).await.unwrap();
+
+        assert_eq!(collector.list_expired(ts(300), 10).await.unwrap(), vec![id]);
+        assert!(
+            collector
+                .list_expired(ts(200), 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn upsert_none_clears_an_existing_deadline() {
+        let (_dir, collector) = make_collector().await;
+        let id = id_for("key");
+
+        collector.upsert(&id, Some(ts(100))).await.unwrap();
+        collector.upsert(&id, None).await.unwrap();
+
+        assert!(
+            collector
+                .list_expired(ts(MAX_SECS), 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn upsert_after_no_expiration_records_a_deadline() {
+        let (_dir, collector) = make_collector().await;
+        let id = id_for("key");
+
+        collector.upsert(&id, None).await.unwrap();
+        collector.upsert(&id, Some(ts(100))).await.unwrap();
+
+        assert_eq!(collector.list_expired(ts(100), 10).await.unwrap(), vec![id]);
+    }
+
+    #[tokio::test]
+    async fn upserting_the_same_id_twice_does_not_duplicate_it() {
+        let (_dir, collector) = make_collector().await;
+        let id = id_for("key");
+
+        collector.upsert(&id, Some(ts(100))).await.unwrap();
+        collector.upsert(&id, Some(ts(100))).await.unwrap();
+
+        assert_eq!(collector.list_expired(ts(100), 10).await.unwrap(), vec![id]);
+    }
+
+    #[tokio::test]
+    async fn remove_forgets_the_object() {
+        let (_dir, collector) = make_collector().await;
+        let id = id_for("key");
+
+        collector.upsert(&id, Some(ts(100))).await.unwrap();
+        collector.remove(&id).await;
+
+        assert!(
+            collector
+                .list_expired(ts(MAX_SECS), 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_of_unknown_object_is_a_noop() {
+        let (_dir, collector) = make_collector().await;
+
+        collector.remove(&id_for("missing")).await;
+
+        assert!(
+            collector
+                .list_expired(ts(MAX_SECS), 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn list_expired_orders_by_earliest_deadline_first() {
+        let (_dir, collector) = make_collector().await;
+        let (late, early, middle) = (id_for("late"), id_for("early"), id_for("middle"));
+
+        collector.upsert(&late, Some(ts(300))).await.unwrap();
+        collector.upsert(&early, Some(ts(100))).await.unwrap();
+        collector.upsert(&middle, Some(ts(200))).await.unwrap();
+
+        assert_eq!(
+            collector.list_expired(ts(300), 10).await.unwrap(),
+            vec![early, middle, late]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_expired_respects_the_limit() {
+        let (_dir, collector) = make_collector().await;
+        let (first, second, third) = (id_for("first"), id_for("second"), id_for("third"));
+
+        collector.upsert(&first, Some(ts(100))).await.unwrap();
+        collector.upsert(&second, Some(ts(200))).await.unwrap();
+        collector.upsert(&third, Some(ts(300))).await.unwrap();
+
+        assert_eq!(
+            collector.list_expired(ts(300), 2).await.unwrap(),
+            vec![first, second]
+        );
+        assert!(collector.list_expired(ts(300), 0).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_expired_with_limit_above_row_count_returns_everything() {
+        let (_dir, collector) = make_collector().await;
+        let (first, second) = (id_for("first"), id_for("second"));
+
+        collector.upsert(&first, Some(ts(100))).await.unwrap();
+        collector.upsert(&second, Some(ts(200))).await.unwrap();
+
+        assert_eq!(
+            collector.list_expired(ts(300), 1_000).await.unwrap(),
+            vec![first, second]
+        );
+    }
+
+    #[tokio::test]
+    async fn reopening_an_existing_database_keeps_its_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = id_for("key");
+
+        {
+            let collector = collector_in(&dir).await;
+            collector.upsert(&id, Some(ts(100))).await.unwrap();
+        }
+
+        // Re-running the migrations must be a no-op, and the row must still be there.
+        let collector = collector_in(&dir).await;
+        assert_eq!(collector.list_expired(ts(100), 10).await.unwrap(), vec![id]);
     }
 }

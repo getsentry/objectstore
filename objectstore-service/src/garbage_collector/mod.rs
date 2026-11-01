@@ -25,7 +25,9 @@ use crate::id::ObjectId;
 pub trait GcStorage: Send + Sync + Debug {
     /// Records that `id` expires at `expires_at`, replacing any previous deadline.
     ///
-    /// `None` marks the object as never expiring.
+    /// A later deadline replaces an earlier one; a shorter deadline is ignored, so concurrent
+    /// writers cannot pull an expiration forward. `None` clears the recorded deadline and marks
+    /// the object as never expiring.
     async fn upsert(
         &self,
         id: &ObjectId,
