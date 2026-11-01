@@ -966,6 +966,7 @@ mod tests {
     use objectstore_inventory_tracker::{OpType, test_utils::DummyProducer};
     use objectstore_types::metadata::ExpirationPolicy;
     use objectstore_types::scope::{Scope, Scopes};
+    use objectstore_types::usecase::Usecase;
 
     use super::*;
     use crate::backend::common::ExpiryTarget;
@@ -974,7 +975,7 @@ mod tests {
 
     fn make_id() -> ObjectId {
         ObjectId::random(ObjectContext {
-            usecase: "testing".into(),
+            usecase: Usecase::from_static("testing"),
             scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
         })
     }
