@@ -46,8 +46,6 @@ impl StdError for Panic {}
 pub enum ErrorKind {
     /// Object metadata supplied by a client is invalid.
     InvalidMetadata,
-    /// A multipart upload identifier is invalid.
-    InvalidUploadId,
     /// A client-provided request stream failed.
     ClientStream,
     /// A requested byte range cannot be resolved against the object size.
@@ -62,6 +60,8 @@ pub enum ErrorKind {
     },
     /// A resumable upload session expired or was canceled.
     UploadSessionGone,
+    /// A resumable upload session token could not be decrypted or authenticated.
+    InvalidUploadSessionToken,
     /// The backend does not recognize a resumable upload session.
     UnknownUploadSession,
     /// A resumable chunk would exceed the total upload length.
@@ -106,7 +106,6 @@ impl fmt::Display for ErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidMetadata => f.write_str("invalid object metadata"),
-            Self::InvalidUploadId => f.write_str("invalid upload id"),
             Self::ClientStream => f.write_str("invalid client stream"),
             Self::RangeNotSatisfiable { total } => {
                 write!(f, "range not satisfiable (object size: {total} bytes)")
@@ -115,6 +114,9 @@ impl fmt::Display for ErrorKind {
                 write!(f, "upload offset mismatch (server holds {offset} bytes)")
             }
             Self::UploadSessionGone => f.write_str("upload session gone"),
+            Self::InvalidUploadSessionToken => {
+                f.write_str("invalid upload session token: could not decrypt or authenticate it")
+            }
             Self::UnknownUploadSession => f.write_str("unknown upload session"),
             Self::ChunkExceedsUploadLength {
                 offset,
@@ -202,11 +204,11 @@ impl Error {
         match self.kind {
             // Malformed client input at DEBUG level
             ErrorKind::InvalidMetadata => Level::DEBUG,
-            ErrorKind::InvalidUploadId => Level::DEBUG,
             ErrorKind::ClientStream => Level::DEBUG,
             ErrorKind::RangeNotSatisfiable { .. } => Level::DEBUG,
             ErrorKind::UploadOffsetMismatch { .. } => Level::DEBUG,
             ErrorKind::UploadSessionGone => Level::DEBUG,
+            ErrorKind::InvalidUploadSessionToken => Level::DEBUG,
             ErrorKind::UnknownUploadSession => Level::DEBUG,
             ErrorKind::ChunkExceedsUploadLength { .. } => Level::DEBUG,
             ErrorKind::ChunkTooSmall { .. } => Level::DEBUG,
@@ -334,12 +336,6 @@ impl From<std::io::Error> for Error {
 impl From<crate::stream::ClientError> for Error {
     fn from(source: crate::stream::ClientError) -> Self {
         Self::with_source(ErrorKind::ClientStream, source)
-    }
-}
-
-impl From<objectstore_types::multipart::InvalidUploadId> for Error {
-    fn from(source: objectstore_types::multipart::InvalidUploadId) -> Self {
-        Self::with_source(ErrorKind::InvalidUploadId, source)
     }
 }
 

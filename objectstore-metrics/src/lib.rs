@@ -90,7 +90,8 @@ impl AsF64 for std::time::Duration {
 /// Call [`success()`](TimerGuard::success) to override this behavior and record
 /// with `success:true` even on drop.
 ///
-/// Tags can be added after creation via [`tag()`](TimerGuard::tag).
+/// Tags can be added after creation via [`tag()`](TimerGuard::tag), or updated
+/// via [`set_tag()`](TimerGuard::set_tag).
 #[must_use = "timer! returns a guard that records the metric on guard.record() or on drop, bind it to a variable"]
 pub struct TimerGuard {
     start: std::time::Instant,
@@ -123,6 +124,14 @@ impl TimerGuard {
     pub fn tag(mut self, key: &'static str, value: impl Into<metrics::SharedString>) -> Self {
         self.labels.push(metrics::Label::new(key, value));
         self
+    }
+
+    /// Sets a tag, replacing any existing tags with the same key.
+    ///
+    /// The updated tag is included when the guard records, including on drop.
+    pub fn set_tag(&mut self, key: &'static str, value: impl Into<metrics::SharedString>) {
+        self.labels.retain(|label| label.key() != key);
+        self.labels.push(metrics::Label::new(key, value));
     }
 
     /// Changes the behavior of this guard to always record the metric

@@ -27,6 +27,6 @@ pub fn test_session(server: &TestServer) -> Session {
         .token(test_token_generator())
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     client.session(usecase.for_organization(12345)).unwrap()
 }

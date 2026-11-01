@@ -6,6 +6,7 @@ use bytes::Bytes;
 use futures_util::stream::BoxStream;
 use objectstore_types::metadata::{Compression, ExpirationPolicy};
 use objectstore_types::scope;
+use objectstore_types::usecase::{InvalidUsecaseName, Usecase as UsecaseName};
 use reqwest::RequestBuilder;
 use url::Url;
 
@@ -151,27 +152,64 @@ impl ClientBuilder {
 /// Usecases need to be statically defined in Objectstore's configuration server-side.
 /// Objectstore can make decisions based on the Usecase. For example, choosing the most
 /// suitable storage backend.
+///
+/// Names must be 3–64 ASCII characters from `[A-Za-z0-9_-]`. Any permitted
+/// character may appear in any position. Names are case-sensitive and are never
+/// normalized.
 #[derive(Debug, Clone)]
 pub struct Usecase {
-    name: Arc<str>,
+    name: UsecaseName,
     compression: Option<Compression>,
     expiration_policy: ExpirationPolicy,
 }
 
 impl Usecase {
-    /// Creates a new Usecase.
-    pub fn new(name: &str) -> Self {
+    /// Creates a Usecase, returning an error if the name is invalid.
+    ///
+    /// Use [`Self::from_static`] for statically defined names.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidUsecaseName`] if the name violates the naming rules on
+    /// [`Usecase`].
+    pub fn new(name: &str) -> Result<Self, InvalidUsecaseName> {
+        Ok(Self::with_name(UsecaseName::new(name)?))
+    }
+
+    /// Creates a Usecase for a statically defined name.
+    ///
+    /// Use [`Self::new`] for dynamic names. The result can initialize a `static`:
+    ///
+    /// ```
+    /// use objectstore_client::Usecase;
+    ///
+    /// static ATTACHMENTS: Usecase = Usecase::from_static("attachments");
+    /// assert_eq!(ATTACHMENTS.name(), "attachments");
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if the name violates the naming rules on [`Usecase`]. In a const
+    /// context, this panic is reported as a compile error.
+    #[track_caller]
+    pub const fn from_static(name: &'static str) -> Self {
+        Self::with_name(UsecaseName::from_static(name))
+    }
+
+    /// Creates a Usecase with the default compression and expiration policy.
+    const fn with_name(name: UsecaseName) -> Self {
         Self {
-            name: name.into(),
+            name,
             compression: Some(Compression::Zstd),
-            expiration_policy: ExpirationPolicy::default(),
+            // `ExpirationPolicy::default()` isn't callable in a const fn.
+            expiration_policy: ExpirationPolicy::Manual,
         }
     }
 
     /// Returns the name of this usecase.
     #[inline]
     pub fn name(&self) -> &str {
-        &self.name
+        self.name.as_str()
     }
 
     /// Returns the compression algorithm to use for operations within this usecase.
@@ -356,7 +394,7 @@ pub(crate) struct ClientInner {
 /// use objectstore_client::{Client, SecretKey, TokenGenerator, Usecase};
 ///
 /// # fn example() -> objectstore_client::Result<()> {
-/// let scope = Usecase::new("my_app").for_project(42, 1337);
+/// let scope = Usecase::from_static("my_app").for_project(42, 1337);
 /// let token = TokenGenerator::new(SecretKey {
 ///     secret_key: "<private key>".into(),
 ///     kid: "my-service".into(),
@@ -448,7 +486,7 @@ impl Session {
         segments
             .push("v1")
             .push("objects")
-            .push(&self.scope.usecase.name)
+            .push(self.scope.usecase.name())
             .push(&self.scope.scopes.as_api_path().to_string())
             .extend(object_key.split('/'));
         drop(segments);
@@ -479,12 +517,6 @@ impl Session {
             Some(TokenProvider::Static(ref token)) => Ok(Some(token.clone())),
             None => Ok(None),
         }
-    }
-
-    /// Deprecated. Use [`get_token`](Self::get_token) instead.
-    #[deprecated(note = "Use `get_token` instead.")]
-    pub fn mint_token(&self) -> crate::Result<Option<String>> {
-        self.get_token()
     }
 
     /// Creates a new token with configurable permissions and expiry.
@@ -524,41 +556,6 @@ impl Session {
         url
     }
 
-    #[cfg(feature = "multipart")]
-    fn multipart_url(
-        &self,
-        suffix: Option<&'static str>,
-        object_key: Option<&str>,
-        query_pairs: Option<Vec<(&str, String)>>,
-    ) -> Url {
-        let mut url = self.client.service_url.clone();
-
-        // `path_segments_mut` can only error if the url is cannot-be-a-base,
-        // and we check that in `ClientBuilder::new`, therefore this will never panic.
-        let mut segments = url.path_segments_mut().unwrap();
-        segments
-            .push("v1")
-            .push(match suffix {
-                Some("parts") => "objects:multipart:parts",
-                Some("complete") => "objects:multipart:complete",
-                _ => "objects:multipart",
-            })
-            .push(&self.scope.usecase.name)
-            .push(&self.scope.scopes.as_api_path().to_string());
-        if let Some(object_key) = object_key.filter(|key| !key.is_empty()) {
-            segments.extend(object_key.split('/'));
-        }
-        drop(segments);
-        if let Some(query_pairs) = query_pairs {
-            let mut pairs = url.query_pairs_mut();
-            for (key, value) in query_pairs {
-                pairs.append_pair(key, &value);
-            }
-        }
-
-        url
-    }
-
     fn prepare_builder(&self, mut builder: RequestBuilder) -> crate::Result<RequestBuilder> {
         if let Some(token) = self.get_token()? {
             builder = builder.header("x-os-auth", format!("Bearer {token}"));
@@ -588,19 +585,6 @@ impl Session {
         let builder = self.client.reqwest.post(url);
         self.prepare_builder(builder)
     }
-
-    #[cfg(feature = "multipart")]
-    pub(crate) fn multipart_request(
-        &self,
-        method: reqwest::Method,
-        action: Option<&'static str>,
-        object_key: Option<&str>,
-        query_pairs: Option<Vec<(&str, String)>>,
-    ) -> crate::Result<RequestBuilder> {
-        let url = self.multipart_url(action, object_key, query_pairs);
-        let builder = self.client.reqwest.request(method, url);
-        self.prepare_builder(builder)
-    }
 }
 
 #[cfg(test)]
@@ -608,9 +592,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_usecase_construction() {
+        let name = "Debug_Files-123";
+        assert_eq!(Usecase::from_static(name).name(), name);
+        assert_eq!(Usecase::new(name).unwrap().name(), name);
+        assert!(matches!(
+            Usecase::new("_"),
+            Err(InvalidUsecaseName::InvalidLength)
+        ));
+        assert!(matches!(
+            Usecase::new("testing/org=999/injected"),
+            Err(InvalidUsecaseName::InvalidChar(7))
+        ));
+    }
+
+    #[test]
+    fn test_usecase_from_static_const() {
+        const USECASE: Usecase = Usecase::from_static("testing");
+        assert_eq!(USECASE.name(), "testing");
+        assert_eq!(USECASE.compression(), Some(Compression::Zstd));
+        assert_eq!(USECASE.expiration_policy(), ExpirationPolicy::default());
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid usecase name")]
+    fn test_invalid_usecase_panics() {
+        Usecase::from_static("testing/org=999/injected");
+    }
+
+    #[test]
     fn test_object_url() {
         let client = Client::new("http://127.0.0.1:8888/").unwrap();
-        let usecase = Usecase::new("testing");
+        let usecase = Usecase::from_static("testing");
         let scope = usecase
             .for_project(12345, 1337)
             .push("app_slug", "email_app");
@@ -625,7 +638,7 @@ mod tests {
     #[test]
     fn test_object_url_with_base_path() {
         let client = Client::new("http://127.0.0.1:8888/api/prefix").unwrap();
-        let usecase = Usecase::new("testing");
+        let usecase = Usecase::from_static("testing");
         let scope = usecase.for_project(12345, 1337);
         let session = client.session(scope).unwrap();
 

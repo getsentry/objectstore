@@ -1,22 +1,21 @@
 from __future__ import annotations
 
 import math
-import warnings
 from collections.abc import Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from importlib.metadata import version
 from io import BytesIO
+from os import PathLike
 from typing import IO, Any, Literal, NamedTuple, cast
 from urllib.parse import urlparse
 
-import sentry_sdk
 import urllib3
-import zstandard
 from urllib3.connectionpool import HTTPConnectionPool
 
-from objectstore_client import _resumable, presign, utils
-from objectstore_client.auth import Permission, SecretKey, TokenProvider
+from objectstore_client import _compression, _resumable, presign, utils
+from objectstore_client.auth import Permission, TokenGenerator, TokenProvider
 from objectstore_client.errors import (
     ExpiryExtensionRejected,
     ObjectNotFound,
@@ -39,7 +38,6 @@ from objectstore_client.metrics import (
     NoOpMetricsBackend,
     measure_storage_operation,
 )
-from objectstore_client.multipart import MultipartUpload
 from objectstore_client.scope import Scope
 from objectstore_client.tracing import storage_span
 
@@ -48,6 +46,15 @@ PARAM_AUTH = "os_auth"
 
 # Identifies this library to the server, mirroring the Rust client's user agent.
 USER_AGENT = f"objectstore-client/{version('objectstore-client')}"
+
+
+def _response_options_query(
+    disposition: Literal["inline", "attachment"],
+) -> str:
+    """Validate and encode the response-content-disposition query parameter."""
+    if disposition not in ("inline", "attachment"):
+        raise ValueError(f"unsupported response content disposition {disposition!r}")
+    return utils.encode_query(f"response-content-disposition={disposition}")
 
 
 class GetResponse(NamedTuple):
@@ -63,9 +70,13 @@ class Usecase:
     Usecases need to be statically defined in Objectstore's configuration server-side.
     Objectstore can make decisions based on the Usecase. For example, choosing the most
     suitable storage backend.
+
+    Names must be 3–64 ASCII characters from ``[A-Za-z0-9_-]``. Any permitted
+    character may appear in any position. Names are case-sensitive and are never
+    normalized. The name is read-only after construction.
     """
 
-    name: str
+    _name: str
     _compression: Compression
     _expiration_policy: ExpirationPolicy | None
 
@@ -74,10 +85,36 @@ class Usecase:
         name: str,
         compression: Compression = "zstd",
         expiration_policy: ExpirationPolicy | None = None,
+        resumable_threshold_bytes: int | Literal["none"] = 256 * 1024 * 1024,
     ):
-        self.name = name
+        """Create a usecase.
+
+        Raises ``ValueError`` if the name violates the naming rules on ``Usecase``,
+        or if either ``compression`` or ``resumable_threshold_bytes`` is invalid.
+        """
+        if not 3 <= len(name) <= 64:
+            raise ValueError("usecase name must be 3–64 ASCII characters long")
+        if any(not (c.isascii() and c.isalnum()) and c not in "_-" for c in name):
+            raise ValueError(
+                "usecase name must contain only ASCII letters, digits, '_' or '-'"
+            )
+        self._name = name
+
+        if resumable_threshold_bytes != "none" and (
+            type(resumable_threshold_bytes) is not int or resumable_threshold_bytes < 0
+        ):
+            raise ValueError(
+                'resumable_threshold_bytes must be a non-negative integer or "none"'
+            )
+        self._resumable_threshold_bytes = resumable_threshold_bytes
+        _compression.validate(compression)
         self._compression = compression
         self._expiration_policy = expiration_policy
+
+    @property
+    def name(self) -> str:
+        """The validated usecase name."""
+        return self._name
 
 
 # Connect timeout used unless overridden in connection parameters.
@@ -111,13 +148,6 @@ class Client:
             "http://objectstore:8888"). metrics_backend: Optional metrics backend for
             tracking storage operations. Defaults to ``NoOpMetricsBackend`` if not
             provided.
-        propagate_traces: **Deprecated.** Use Sentry's ``StdlibIntegration``
-            instead; it propagates traces on the underlying HTTP request
-            regardless of this flag, unless the host application's Sentry SDK
-            is configured to opt out.
-
-            This only controls headers this client adds itself. Defaults to
-            ``False``.
         retries: Number of connection retries for failed requests.
             Defaults to ``3`` if not specified. **Note:** only connection failures are
             retried, not read failures (as compression streams cannot be rewound).
@@ -141,31 +171,25 @@ class Client:
             timeouts). By default, requests carry a ``User-Agent`` header of
             ``objectstore-client/{version}``; pass a ``headers`` mapping with a
             ``User-Agent`` key here to override it.
-        token: A ``SecretKey`` that signs a fresh JWT for each request
+        token: A ``TokenGenerator`` that signs a fresh JWT for each request
             using an EdDSA keypair, or a static pre-signed JWT string used
-            as-is for every request. Use a ``SecretKey`` for internal
+            as-is for every request. Use a ``TokenGenerator`` for internal
             services that have access to the signing key, and a string for
             external services that receive a token from another source.
+        spool_dir: Directory that temporary files are created in when preparing
+            resumable uploads. ``None`` uses Python's default temporary directory.
     """
 
     def __init__(
         self,
         base_url: str,
         metrics_backend: MetricsBackend | None = None,
-        propagate_traces: bool = False,
         retries: int | None = None,
         timeout_ms: float | None = None,
         connection_kwargs: Mapping[str, Any] | None = None,
         token: TokenProvider | None = None,
+        spool_dir: str | PathLike[str] | None = None,
     ):
-        if propagate_traces:
-            warnings.warn(
-                "`propagate_traces` is deprecated; Sentry's `StdlibIntegration` "
-                "already propagates traces on the underlying HTTP request",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-
         connection_kwargs_to_use = asdict(_ConnectionDefaults())
 
         if retries is not None:
@@ -193,8 +217,8 @@ class Client:
         )
         self._base_path = urlparse(base_url).path
         self._metrics_backend = metrics_backend or NoOpMetricsBackend()
-        self._propagate_traces = propagate_traces
         self._token = token
+        self._spool_dir = spool_dir
 
     def session(self, usecase: Usecase, **scopes: str | int | bool) -> Session:
         """
@@ -226,10 +250,10 @@ class Client:
             self._pool,
             self._base_path,
             self._metrics_backend,
-            self._propagate_traces,
             usecase,
             Scope(**scopes),
             self._token,
+            self._spool_dir,
         )
 
 
@@ -245,18 +269,18 @@ class Session:
         pool: HTTPConnectionPool,
         base_path: str,
         metrics_backend: MetricsBackend,
-        propagate_traces: bool,
         usecase: Usecase,
         scope: Scope,
         token: TokenProvider | None = None,
+        spool_dir: str | PathLike[str] | None = None,
     ):
         self._pool = pool
         self._base_path = base_path
         self._metrics_backend = metrics_backend
-        self._propagate_traces = propagate_traces
         self._usecase = usecase
         self._scope = scope
         self._token = token
+        self._spool_dir = spool_dir
 
     def mint_token(
         self,
@@ -273,11 +297,11 @@ class Session:
         When ``expiry_seconds`` is ``None``, the generator's default
         expiry is used.
 
-        Raises ``ValueError`` if no ``SecretKey`` is configured
-        or if any requested permission is not granted to the key.
+        Raises ``ValueError`` if no ``TokenGenerator`` is configured
+        or if any requested permission is not granted to the generator.
         """
-        if not isinstance(self._token, SecretKey):
-            raise ValueError("no secret key configured on this session")
+        if not isinstance(self._token, TokenGenerator):
+            raise ValueError("no token generator configured on this session")
 
         resolved_expiry = (
             expiry_seconds if expiry_seconds is not None else self._token.expiry_seconds
@@ -304,7 +328,7 @@ class Session:
 
     def _auth_token(self) -> str | None:
         """Returns a token for internal auth headers."""
-        if isinstance(self._token, SecretKey):
+        if isinstance(self._token, TokenGenerator):
             return self._token.token_for_scope(self._usecase.name, self._scope)
         elif isinstance(self._token, str):
             return self._token
@@ -312,10 +336,6 @@ class Session:
 
     def _make_headers(self) -> dict[str, str]:
         headers = dict(self._pool.headers)
-        if self._propagate_traces:
-            headers.update(
-                dict(sentry_sdk.get_current_scope().iter_trace_propagation_headers())
-            )
         if token := self._auth_token():
             headers["x-os-auth"] = f"Bearer {token}"
         return headers
@@ -362,37 +382,18 @@ class Session:
             return f"{self._base_url()}{path}"
         return path
 
-    def _make_multipart_url(
-        self,
-        action: str | None,
-        key: str | None,
-        query: str | None = None,
-    ) -> str:
-        if action == "parts":
-            resource = "objects:multipart:parts"
-        elif action == "complete":
-            resource = "objects:multipart:complete"
-        else:
-            resource = "objects:multipart"
-
-        relative_path = f"/v1/{resource}/{self._usecase.name}/{self._scope}/{key or ''}"
-        path = utils.encode_path(self._base_path.rstrip("/") + relative_path)
-        if query:
-            return f"{path}?{query}"
-        return path
-
     def put(
         self,
         contents: bytes | IO[bytes],
         key: str | None = None,
         compress: Compression | None = None,
-        compression: Compression | Literal["none"] | None = None,
         precompressed: Compression | None = None,
         content_type: str | None = None,
         metadata: dict[str, str] | None = None,
         expiration_policy: ExpirationPolicy | None = None,
         origin: str | None = None,
         filename: str | None = None,
+        resumable_threshold_bytes: int | Literal["none"] | None = None,
     ) -> str:
         """
         Uploads the given `contents` to blob storage.
@@ -400,7 +401,7 @@ class Session:
         If no `key` is provided, one will be automatically generated and returned
         from this function.
 
-        The client will select the configured `default_compression` if none is given
+        The client will select the Usecase's configured compression if none is given
         explicitly. This can be overridden by explicitly giving a `compress` argument.
         Providing `"none"` as the argument will instruct the client to not apply
         any compression to this upload, which is useful for uncompressible formats.
@@ -412,35 +413,49 @@ class Session:
         You can use the utility function `objectstore_client.utils.guess_mime_type`
         to attempt to guess a `content_type` based on magic bytes.
 
-        `compression` is deprecated in favor of `compress`.
-        """
-        if compression is not None:
-            warnings.warn(
-                "`compression` is deprecated, use `compress` instead",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            if compress is not None:
-                raise ValueError("Cannot pass both `compress` and `compression`")
-            compress = compression
+        .. rubric:: Resumable Uploads
 
+        This method uses Objectstore's Resumable Uploads API when the size of
+        ``contents`` is at least ``resumable_threshold_bytes``.
+        Pass ``resumable_threshold_bytes="none"`` to disable Resumable Uploads.
+        When not overridden, this threshold defaults to the one set on the Usecase.
+
+        Transient failures and writes that make no progress are retried up to
+        twice. The retry count resets whenever the server reports a higher offset.
+
+        For seekable binary streams, the remaining size is measured by seeking to
+        the end and restoring the original position. Prefer streams with efficient
+        seeking: transforming streams may read their entire input to find the end.
+        Non-seekable streams and streams whose size cannot be determined use a
+        regular upload without spooling.
+
+        Resumable uploads reuse the input unless compression is needed, in which
+        case the compressed payload is spooled in a temporary file
+        (``tempfile.TemporaryFile``) on disk before sending.
+        Set ``Client(spool_dir=<path>)`` if you wish to customize the directory where
+        the temporary files are created in.
+        """
         if compress is not None and precompressed is not None:
             raise ValueError("Cannot pass both `compress` and `precompressed`")
-        if compress and compress not in ("none", "zstd"):
-            raise ValueError(f"Invalid compression: {compress}")
-        if precompressed and precompressed != "zstd":
-            raise ValueError(f"Invalid compression: {precompressed}")
+        _compression.validate(compress)
+        _compression.validate(precompressed, allow_none=False)
 
-        body = BytesIO(contents) if isinstance(contents, bytes) else contents
-        original_body: IO[bytes] = body
+        if resumable_threshold_bytes is None:
+            resumable_threshold_bytes = self._usecase._resumable_threshold_bytes
+        if resumable_threshold_bytes != "none" and (
+            type(resumable_threshold_bytes) is not int or resumable_threshold_bytes < 0
+        ):
+            raise ValueError(
+                'resumable_threshold_bytes must be a non-negative integer or "none"'
+            )
+
+        source_size = None
+        if resumable_threshold_bytes != "none":
+            source_size = _resumable.get_size(contents)
 
         encoding = precompressed or compress or self._usecase._compression
 
         compress_with = encoding if precompressed is None else "none"
-        if compress_with == "zstd":
-            cctx = zstandard.ZstdCompressor()
-            body = cctx.stream_reader(original_body)
-            body = cast(IO[bytes], utils._ZstdCompressionReaderWrapper(body))
 
         headers = self._metadata_headers(
             compression=encoding,
@@ -460,37 +475,56 @@ class Session:
                 self._metrics_backend, "put", self._usecase.name
             ) as metrics,
         ):
-            retries = None  # by default use the pool's value, set by the Client
-            if compress_with != "none":
-                # For on-the-fly compression, don't attempt read retries,
-                # as the stream cannot be rewound after data has been consumed.
-                pool_retries = self._pool.retries
-                if isinstance(pool_retries, urllib3.Retry):
-                    retries = pool_retries.new(read=0)
-                elif isinstance(pool_retries, int):
-                    retries = urllib3.Retry(pool_retries, read=0)
+            result_key: str | None
+            if (
+                resumable_threshold_bytes != "none"
+                and source_size is not None
+                and source_size >= resumable_threshold_bytes
+            ):
+                with _resumable.prepare_body(
+                    contents,
+                    source_size,
+                    compress_with,
+                    self._spool_dir,
+                ) as prepared:
+                    if prepared is None:
+                        # Temporary-file creation failed before consuming the input.
+                        result_key, source_size, compressed_size = self._put_direct(
+                            contents, key, headers, compression=compress_with
+                        )
+                    else:
+                        body, source_size, compressed_size = prepared
+                        result_key = _resumable.upload(
+                            self,
+                            body,
+                            compressed_size,
+                            key=key,
+                            compression=encoding,
+                            content_type=content_type,
+                            metadata=metadata,
+                            expiration_policy=expiration_policy,
+                            origin=origin,
+                            filename=filename,
+                        )
+                        if result_key is None:
+                            # Session creation failed or resumables are unsupported.
+                            # Send the prepared body without compressing it again.
+                            headers["Content-Length"] = str(compressed_size)
+                            result_key, _, _ = self._put_direct(
+                                body, key, headers, compression="none"
+                            )
+            else:
+                result_key, source_size, compressed_size = self._put_direct(
+                    contents, key, headers, compression=compress_with
+                )
 
-            response = self._pool.request(
-                "POST" if not key else "PUT",
-                self._make_url(key),
-                body=body,
-                headers=headers,
-                preload_content=True,
-                decode_content=True,
-                retries=retries,
-            )
-            raise_for_status(response)
-            res = response.json()
-
-            # Must do this after streaming `body` as that's what is responsible
-            # for advancing the seek position in both streams
-            if precompressed is None:
-                metrics.record_uncompressed_size(original_body.tell())
-            if encoding != "none":
-                metrics.record_compressed_size(body.tell(), encoding)
+            if precompressed is None and source_size is not None:
+                metrics.record_uncompressed_size(source_size)
+            if encoding != "none" and compressed_size is not None:
+                metrics.record_compressed_size(compressed_size, encoding)
 
             # Set after the response, since the key may be server-generated.
-            span.set_attribute("objectstore.key", res["key"])
+            span.set_attribute("objectstore.key", result_key)
             span.set_attribute("objectstore.compression", encoding)
             if metrics.uncompressed_size is not None:
                 span.set_attribute(
@@ -500,7 +534,58 @@ class Session:
                 span.set_attribute(
                     "objectstore.compressed_size", metrics.compressed_size
                 )
-            return res["key"]
+            return result_key
+
+    def _put_direct(
+        self,
+        contents: bytes | IO[bytes],
+        key: str | None,
+        headers: dict[str, str],
+        compression: Compression,
+    ) -> tuple[str, int | None, int | None]:
+        """Return the key and final source/body positions when available."""
+        with (
+            BytesIO(contents) if isinstance(contents, bytes) else nullcontext(contents)
+        ) as original_body:
+            body = original_body
+            retries = None  # by default use the pool's value, set by the Client
+            try:
+                if compression != "none":
+                    body = _compression.compressing_reader(original_body, compression)
+                    # For on-the-fly compression, don't attempt read retries,
+                    # as the stream cannot be rewound after data has been consumed.
+                    pool_retries = self._pool.retries
+                    if isinstance(pool_retries, urllib3.Retry):
+                        retries = pool_retries.new(read=0)
+                    elif isinstance(pool_retries, int):
+                        retries = urllib3.Retry(pool_retries, read=0)
+
+                response = self._pool.request(
+                    "POST" if not key else "PUT",
+                    self._make_url(key),
+                    body=body,
+                    headers=headers,
+                    preload_content=True,
+                    decode_content=True,
+                    retries=retries,
+                )
+                raise_for_status(response)
+                res = response.json()
+
+                # Read positions after streaming, without failing an upload if
+                # the source does not support tell().
+                try:
+                    source_size = original_body.tell()
+                except (AttributeError, OSError, ValueError):
+                    source_size = None
+                try:
+                    compressed_size = body.tell()
+                except (AttributeError, OSError, ValueError):
+                    compressed_size = None
+                return res["key"], source_size, compressed_size
+            finally:
+                if body is not original_body:
+                    body.close()
 
     def get(
         self,
@@ -554,21 +639,19 @@ class Session:
             )
             decompressed = False
             if metadata.compression and decompress and not encoding_accepted:
-                if metadata.compression != "zstd":
-                    raise NotImplementedError(
-                        "Transparent decoding of anything but `zstd` is not "
-                        "implemented yet"
-                    )
-
+                stream = _compression.decompressing_reader(stream, metadata.compression)
                 metadata.compression = None
-                dctx = zstandard.ZstdDecompressor()
-                stream = dctx.stream_reader(stream, read_across_frames=True)
                 decompressed = True
 
             span.set_attribute("objectstore.decompressed", decompressed)
             return GetResponse(metadata, stream)
 
-    def object_url(self, key: str, token_validity: timedelta | None = None) -> str:
+    def object_url(
+        self,
+        key: str,
+        token_validity: timedelta | None = None,
+        response_content_disposition: Literal["inline", "attachment"] | None = None,
+    ) -> str:
         """
         Generates a GET url to the object with the given `key`.
 
@@ -580,10 +663,18 @@ class Session:
         information is embedded in the returned URL's query string, valid
         for the given duration.
 
+        ``response_content_disposition`` selects ``attachment`` (default) or ``inline``
+        for successful GET/HEAD responses, retaining the stored filename.
+
+        These options are not bound by the auth token and can be changed by recipients.
+        Use :meth:`presigned_object_url` to bind the options to a signature.
+
         Raises ``ValueError`` if ``token_validity`` is provided but no
-        ``SecretKey`` is configured on this session.
+        ``TokenGenerator`` is configured on this session, or if disposition is invalid.
         """
         url = self._make_url(key, full=True)
+        if response_content_disposition is not None:
+            url = f"{url}?{_response_options_query(response_content_disposition)}"
         if token_validity is None:
             return url
 
@@ -593,13 +684,15 @@ class Session:
         )
         # A JWT's compact serialization is base64url, whose alphabet is URL-safe,
         # so it can go in the query string as-is with no further encoding.
-        return f"{url}?{PARAM_AUTH}={token}"
+        separator = "&" if response_content_disposition is not None else "?"
+        return f"{url}{separator}{PARAM_AUTH}={token}"
 
     def presigned_object_url(
         self,
         method: Literal["GET", "HEAD"],
         key: str,
         duration: timedelta = timedelta(hours=1),
+        response_content_disposition: Literal["inline", "attachment"] | None = None,
     ) -> str:
         """
         Generates a pre-signed URL authorizing a single ``method`` request on the
@@ -609,13 +702,18 @@ class Session:
             Experimental: pre-signed URLs are an experimental feature and this
             API may change in a future release.
 
-        Raises ``ValueError`` if no ``SecretKey`` is configured on this
+        Raises ``ValueError`` if no ``TokenGenerator`` is configured on this
         session's client, if ``method`` is not supported, or if ``duration``
-        is above the one-week maximum.
+        is above the one-week maximum, or if disposition is invalid.
 
         The returned URL carries a signature that allows the recipient to perform
         a request without an auth token. It can be handed to any HTTP client;
         the URL is already percent-encoded, and must be transmitted verbatim.
+
+        ``response_content_disposition`` selects ``attachment`` (default) or ``inline``
+        for successful GET/HEAD responses, retaining the stored filename.
+
+        Response options are included in the signature when supplied.
 
         Note that `HEAD` and `GET` are considered equivalent from the point of view
         of signatures, meaning that a signature for `GET` can also be used for
@@ -627,8 +725,8 @@ class Session:
                 f"expected one of {presign.SUPPORTED_METHODS}"
             )
 
-        if not isinstance(self._token, SecretKey):
-            raise ValueError("no secret key configured on this session")
+        if not isinstance(self._token, TokenGenerator):
+            raise ValueError("no token generator configured on this session")
 
         if duration > presign.MAX_PRESIGN_DURATION:
             raise ValueError(
@@ -649,15 +747,20 @@ class Session:
             encoded_path = self._make_url(key)
             timestamp = datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
             encoded_query = utils.encode_query(
-                f"{presign.PARAM_KID}={self._token.kid}"
+                f"{presign.PARAM_KID}={self._token.key.kid}"
                 f"&{presign.PARAM_TIMESTAMP}={timestamp}"
                 f"&{presign.PARAM_DURATION}={duration_secs}"
             )
 
+            if response_content_disposition is not None:
+                encoded_query += (
+                    f"&{_response_options_query(response_content_disposition)}"
+                )
+
             canonical = presign.build_canonical_form(
                 method, encoded_path, encoded_query
             )
-            signature = self._token.signature_for_canonical_form(canonical)
+            signature = self._token.key.signature_for_canonical_form(canonical)
 
             return (
                 f"{self._base_url()}"
@@ -817,8 +920,7 @@ class Session:
         """
         if object_length < 0:
             raise ValueError("Object length must not be negative")
-        if compression is not None and compression not in ("none", "zstd"):
-            raise ValueError(f"Invalid compression: {compression}")
+        _compression.validate(compression)
 
         headers = self._metadata_headers(
             compression=compression,
@@ -862,73 +964,3 @@ class Session:
     def _resume_upload(self, key: str, token: str) -> _resumable.ResumableUpload:
         """Reconstruct a resumable upload handle, without contacting the server."""
         return _resumable.ResumableUpload(self, key, token)
-
-    def initiate_multipart_upload(
-        self,
-        *,
-        key: str | None = None,
-        compression: Compression | Literal["none"] | None = None,
-        content_type: str | None = None,
-        metadata: dict[str, str] | None = None,
-        expiration_policy: ExpirationPolicy | None = None,
-        origin: str | None = None,
-        filename: str | None = None,
-    ) -> MultipartUpload:
-        """
-        Initiates a multipart upload.
-
-        Returns a :class:`~objectstore_client.multipart.MultipartUpload` handle
-        that can be used to upload parts, list parts, complete, or abort.
-
-        **Important:** unlike :meth:`put`, the ``compression`` parameter only
-        records the compression algorithm in the object's metadata.
-        The caller is responsible for compressing each part in accordance with the
-        chosen algorithm before passing it to
-        :meth:`~objectstore_client.multipart.MultipartUpload.upload_part`.
-        """
-        if compression and compression not in ("none", "zstd"):
-            raise ValueError(f"Invalid compression: {compression}")
-
-        headers = self._metadata_headers(
-            compression=compression or self._usecase._compression,
-            content_type=content_type,
-            metadata=metadata,
-            expiration_policy=expiration_policy,
-            origin=origin,
-            filename=filename,
-        )
-
-        if key == "":
-            key = None
-
-        with (
-            storage_span(
-                "multipart.initiate", self._usecase, self._scope, key=key
-            ) as span,
-            measure_storage_operation(
-                self._metrics_backend, "multipart.initiate", self._usecase.name
-            ),
-        ):
-            response = self._pool.request(
-                "POST" if not key else "PUT",
-                self._make_multipart_url(None, key),
-                headers=headers,
-                preload_content=True,
-                decode_content=True,
-            )
-            raise_for_status(response)
-            res = response.json()
-            # Set after the response, since the key may be server-generated.
-            span.set_attribute("objectstore.key", res["key"])
-            span.set_attribute("objectstore.upload_id", res["upload_id"])
-            return MultipartUpload(self, res["key"], res["upload_id"])
-
-    def resume_multipart_upload(self, key: str, upload_id: str) -> MultipartUpload:
-        """
-        Reconstructs a multipart upload handle.
-
-        This does not make any network calls.
-        Use it to resume an upload after a process restart or to
-        continue an upload started elsewhere.
-        """
-        return MultipartUpload(self, key, upload_id)

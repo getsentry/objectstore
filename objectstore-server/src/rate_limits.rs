@@ -4,6 +4,9 @@
 //! levels of granularity — global, per-usecase, and per-scope — for both request
 //! throughput (requests/s) and upload/download bandwidth (bytes/s).
 //!
+//! General capacity limits reject with HTTP 503, while explicit throughput rules
+//! reject with HTTP 429. The first exceeded limit determines the rejection.
+//!
 //! Throughput is enforced using token buckets. Bandwidth uses debt-based GCRA
 //! (Generic Cell Rate Algorithm) buckets that track a theoretical arrival time
 //! (TAT). All rate-limit checks are synchronous, non-blocking, and lock-free.
@@ -16,11 +19,59 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
+use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use futures_util::Stream;
+use http::{HeaderValue, StatusCode};
 use objectstore_service::id::ObjectContext;
 use objectstore_types::scope::Scopes;
+use objectstore_types::usecase::Usecase;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+/// Response header that prevents Envoy from retrying a response.
+///
+/// Envoy does not retry a response with this header, even if the route retries on
+/// `gateway-error` or `5xx`. Only the `envoy-ratelimited` retry condition retries it. Outlier
+/// detection still counts the response. See the [Envoy router
+/// documentation](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/router_filter#x-envoy-ratelimited).
+pub const HEADER_ENVOY_RATELIMITED: &str = "x-envoy-ratelimited";
+
+/// Classifies a rejected request as capacity protection or an exceeded traffic allowance.
+///
+/// This is the single conversion for rate limit and capacity rejections into HTTP responses.
+/// Its [`IntoResponse`] implementation sets the status from [`status`](Self::status) and marks
+/// the response with [`HEADER_ENVOY_RATELIMITED`], so that Envoy does not retry a rejection and
+/// add load to an instance that is already at capacity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum LimitExceeded {
+    /// A general capacity protection limit was exceeded.
+    #[error("service at capacity")]
+    Capacity,
+    /// An explicit traffic allowance was exceeded.
+    #[error("rate limit exceeded")]
+    Allowance,
+}
+
+impl LimitExceeded {
+    /// Returns the HTTP status for capacity protection or an exceeded traffic allowance.
+    pub fn status(self) -> StatusCode {
+        match self {
+            Self::Capacity => StatusCode::SERVICE_UNAVAILABLE,
+            Self::Allowance => StatusCode::TOO_MANY_REQUESTS,
+        }
+    }
+}
+
+impl IntoResponse for LimitExceeded {
+    fn into_response(self) -> Response {
+        let mut response = (self.status(), self.to_string()).into_response();
+        response
+            .headers_mut()
+            .insert(HEADER_ENVOY_RATELIMITED, HeaderValue::from_static("true"));
+        response
+    }
+}
 
 /// Identifies which rate limit triggered a rejection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +93,19 @@ enum RateLimitRejection {
 }
 
 impl RateLimitRejection {
+    /// Classifies the rejection without exposing the specific limit.
+    fn error(self) -> LimitExceeded {
+        match self {
+            Self::ThroughputRule => LimitExceeded::Allowance,
+            Self::BandwidthGlobal
+            | Self::BandwidthUsecase
+            | Self::BandwidthScope
+            | Self::ThroughputGlobal
+            | Self::ThroughputUsecase
+            | Self::ThroughputScope => LimitExceeded::Capacity,
+        }
+    }
+
     /// Returns a static string identifier suitable for use as a metric tag.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -75,6 +139,8 @@ pub struct RateLimits {
 ///
 /// All limits are optional. When a limit is `None`, that level of limiting is not enforced.
 /// Per-usecase and per-scope limits are expressed as a percentage of the global limit.
+///
+/// These general capacity limits return HTTP 503; explicit [`ThroughputRule`]s return HTTP 429.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct ThroughputLimits {
     /// The overall maximum number of requests per second per service instance.
@@ -111,12 +177,14 @@ pub struct ThroughputLimits {
 /// A rule matches when all specified fields match the request context. Fields not set match
 /// any value. When multiple rules match, each is enforced independently via its own token
 /// bucket — all matching rules must admit the request.
+///
+/// Exceeding a rule returns HTTP 429, whether its allowance uses [`Self::rps`] or [`Self::pct`].
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ThroughputRule {
-    /// Optional usecase to match.
+    /// Optional validated usecase name to match exactly.
     ///
     /// If `None`, matches any usecase.
-    pub usecase: Option<String>,
+    pub usecase: Option<Usecase>,
 
     /// Scopes to match.
     ///
@@ -161,6 +229,8 @@ impl ThroughputRule {
 ///
 /// Bandwidth is measured as bytes transferred per second (upload + download combined)
 /// and tracked using debt-based GCRA buckets. All limits are optional.
+///
+/// Exceeding an enforced bandwidth limit returns HTTP 503.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct BandwidthLimits {
     /// The overall maximum bandwidth (in bytes per second) per service instance.
@@ -243,10 +313,11 @@ impl RateLimiter {
 
     /// Checks if the given context is within the rate limits.
     ///
-    /// Returns `true` if the request is admitted, `false` if it was rejected. On rejection, emits a
-    /// `server.request.rate_limited` metric counter and a `warn!` log. Bandwidth is checked before
-    /// throughput so that rejected requests are never counted toward admitted traffic.
-    pub fn check(&self, context: &ObjectContext, key: Option<&str>) -> bool {
+    /// Returns a capacity or allowance error on rejection, emitting the detailed reason in a
+    /// `server.request.rate_limited` metric counter and a `warn!` log. Bandwidth is checked
+    /// before throughput, then global, usecase, scope, and explicit throughput rules are checked
+    /// in order. General limits take precedence over explicit rules.
+    pub fn check(&self, context: &ObjectContext, key: Option<&str>) -> Result<(), LimitExceeded> {
         // Bandwidth is checked first because it is a pure read (no token consumption).
         // Throughput counts admitted requests, so checking it second ensures rejected
         // requests are never counted toward admitted traffic.
@@ -256,22 +327,22 @@ impl RateLimiter {
             .or_else(|| self.throughput.check(context));
 
         let Some(rejection) = rejection else {
-            return true;
+            return Ok(());
         };
 
         objectstore_metrics::count!(
             "server.request.rate_limited",
             reason = rejection.as_str(),
-            usecase = context.usecase.clone()
+            usecase = context.usecase.to_string()
         );
         objectstore_log::warn!(
             reason = rejection.as_str(),
-            usecase = &context.usecase,
+            usecase = %context.usecase,
             scopes = %context.scopes.as_api_path(),
             key,
             "Request rejected: rate limit exceeded"
         );
-        false
+        Err(rejection.error())
     }
 
     /// Returns bandwidth buckets and the total-bytes counter for the given context.
@@ -381,7 +452,7 @@ struct BandwidthRateLimiter {
     total_bytes: Arc<AtomicU64>,
     // NB: These maps grow unbounded but we accept this as we expect an overall limited
     // number of usecases and scopes. We emit gauge metrics to monitor their size.
-    usecases: Arc<papaya::HashMap<String, Arc<BandwidthBucket>>>,
+    usecases: Arc<papaya::HashMap<Usecase, Arc<BandwidthBucket>>>,
     scopes: Arc<papaya::HashMap<Scopes, Arc<BandwidthBucket>>>,
 }
 
@@ -531,7 +602,7 @@ struct ThroughputRateLimiter {
     total_admitted: Arc<AtomicU64>,
     // NB: These maps grow unbounded but we accept this as we expect an overall limited
     // number of usecases and scopes. We emit gauge metrics to monitor their size.
-    usecases: Arc<papaya::HashMap<String, Mutex<TokenBucket>>>,
+    usecases: Arc<papaya::HashMap<Usecase, Mutex<TokenBucket>>>,
     scopes: Arc<papaya::HashMap<Scopes, Mutex<TokenBucket>>>,
     rules: papaya::HashMap<usize, Mutex<TokenBucket>>,
 }
@@ -765,9 +836,36 @@ mod tests {
 
     fn make_context() -> ObjectContext {
         ObjectContext {
-            usecase: "testing".into(),
+            usecase: "testing".parse().unwrap(),
             scopes: Scopes::from_iter([Scope::create("org", "1").unwrap()]),
         }
+    }
+
+    #[test]
+    fn throughput_rule_deserialization_validates_usecase() {
+        let rule: ThroughputRule = serde_json::from_value(serde_json::json!({
+            "usecase": "testing",
+            "scopes": [],
+            "rps": 10,
+        }))
+        .unwrap();
+        assert!(rule.matches(&make_context()));
+        assert_eq!(serde_json::to_value(&rule).unwrap()["usecase"], "testing");
+
+        let wildcard: ThroughputRule = serde_json::from_value(serde_json::json!({
+            "scopes": [],
+            "rps": 10,
+        }))
+        .unwrap();
+        assert!(wildcard.matches(&make_context()));
+        assert!(
+            serde_json::from_value::<ThroughputRule>(serde_json::json!({
+                "usecase": "test/name",
+                "scopes": [],
+                "rps": 10,
+            }))
+            .is_err()
+        );
     }
 
     // --- BandwidthBucket unit tests (explicit `now`, no sleeps) ---
@@ -921,7 +1019,7 @@ mod tests {
         let handle = limiter.bandwidth_handle(&context);
         handle.record(1_000_000);
 
-        assert!(!limiter.check(&context, None));
+        assert_eq!(limiter.check(&context, None), Err(LimitExceeded::Capacity));
 
         assert_eq!(limiter.throughput.total_admitted.load(Ordering::Relaxed), 0);
     }

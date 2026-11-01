@@ -23,6 +23,11 @@
 //! Object metadata travels in request and response headers; see
 //! [`objectstore_types::metadata`] for the mapping and the separate JSON update contract.
 //!
+//! GET and HEAD accept `response-content-disposition=inline|attachment` (default attachment).
+//! Response options apply only to successful object responses, including ranged GETs. See
+//! [`crate::extractors::response_options`] for validation. The object handlers construct
+//! download headers with browser safeguards and filename formatting.
+//!
 //! # Resumable Upload Endpoints
 //!
 //! A resumable upload transfers a single object across several requests.
@@ -76,33 +81,11 @@
 //!
 //! | Status | Meaning | Client action |
 //! |--------|---------|---------------|
-//! | `400`  | Malformed session token, missing `Upload-Length`, nonempty offset query, chunk exceeding the declared length, or non-final chunk shorter than the granularity | Correct the request |
+//! | `400`  | Malformed session token or one that cannot be decrypted or authenticated, missing `Upload-Length`, nonempty offset query, chunk exceeding the declared length, or non-final chunk shorter than the granularity | Correct the request |
 //! | `404`  | The upload session is unknown or does not belong to this object | Start a new session or correct the request |
 //! | `409`  | A chunk's offset does not match the authoritative offset | Query the offset and continue from there |
 //! | `410`  | The session expired or was canceled | Start a new session |
 //! | `501`  | The server declined the resumable upload session creation for the requested object | Fall back to a regular upload |
-//!
-//! # Multipart Upload Endpoints
-//!
-//! Multipart uploads are being replaced by [resumable
-//! uploads](#resumable-upload-endpoints) and will be removed once all consumers have
-//! migrated. See [`objectstore_types::multipart`] for the protocol types.
-//!
-//! | Method    | Path                                                         | Description                          |
-//! |-----------|--------------------------------------------------------------|--------------------------------------|
-//! | `POST`    | `/v1/objects:multipart/{usecase}/{scopes}/`                  | Initiate upload (server-generated key) |
-//! | `PUT`     | `/v1/objects:multipart/{usecase}/{scopes}/{*key}`            | Initiate upload (user-provided key)  |
-//! | `PUT`     | `/v1/objects:multipart:parts/{usecase}/{scopes}/{*key}`      | Upload a part (`upload_id`, `part_number` query params) |
-//! | `GET`     | `/v1/objects:multipart:parts/{usecase}/{scopes}/{*key}`      | List uploaded parts (`upload_id` query param) |
-//! | `POST`    | `/v1/objects:multipart:complete/{usecase}/{scopes}/{*key}`   | Complete upload (`upload_id` query param) |
-//! | `DELETE`  | `/v1/objects:multipart/{usecase}/{scopes}/{*key}`            | Abort upload (`upload_id` query param) |
-//!
-//! The initiate POST endpoint accepts both trailing-slash and non-trailing-slash forms.
-//!
-//! The complete endpoint returns `200 OK` immediately, with a streaming body that will
-//! contain the error (if any) as JSON. Whitespace is sent in the streaming body to keep the
-//! connection open. Clients must parse the body to determine the actual outcome, and not rely
-//! on the status code.
 //!
 //! # Internal Endpoints
 //!
@@ -113,7 +96,7 @@
 //! | Method | Path | Description |
 //! |--------|------|-------------|
 //! | `GET` | `/health` | Liveness probe (always returns 200) |
-//! | `GET` | `/ready` | Readiness probe (returns 503 when `/tmp/objectstore.down` exists, enabling graceful drain) |
+//! | `GET` | `/ready` | Readiness probe (remains healthy during shutdown) |
 //! | `GET` | `/keda` | Prometheus text-format gauges for KEDA autoscaling (see [KEDA Metrics](crate#keda-metrics)) |
 //!
 //! # Code Usage
@@ -128,7 +111,6 @@ mod batch;
 pub mod common;
 pub mod health;
 mod keda;
-mod multipart;
 mod objects;
 #[cfg(all(target_os = "linux", feature = "profiling"))]
 mod profiling;
@@ -146,8 +128,7 @@ pub fn is_internal_route(route: &str) -> bool {
 pub fn routes() -> Router<ServiceState> {
     let routes_v1 = Router::new()
         .merge(objects::router())
-        .merge(batch::router())
-        .merge(multipart::router());
+        .merge(batch::router());
 
     let router = Router::new()
         .merge(health::router())

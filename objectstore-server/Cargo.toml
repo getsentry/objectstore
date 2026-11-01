@@ -33,12 +33,12 @@ num_cpus = { workspace = true }
 objectstore-log = { workspace = true, features = ["init", "sentry"] }
 objectstore-metrics = { workspace = true }
 objectstore-options = { workspace = true }
-objectstore-service = { workspace = true, features = ["storage-cogs"] }
+objectstore-service = { workspace = true }
 objectstore-types = { workspace = true }
 papaya = { workspace = true }
 pin-project-lite = { workspace = true }
 rand = { workspace = true }
-reqwest = { workspace = true, features = ["charset", "http2", "system-proxy", "native-tls-no-alpn"] }
+reqwest = { workspace = true, features = ["charset", "http2", "system-proxy", "native-tls-vendored-no-alpn"] }
 rustls = { workspace = true }
 secrecy = { workspace = true, features = ["serde"] }
 sentry = { workspace = true, features = ["tower-axum-matched-path", "tracing", "logs"] }
@@ -50,6 +50,7 @@ thread_local = { workspace = true }
 tokio = { workspace = true, features = ["fs", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tower = { workspace = true }
 tower-http = { workspace = true, features = ["catch-panic", "metrics", "set-header", "trace"] }
+url = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 jemalloc_pprof = { workspace = true, optional = true }
@@ -58,6 +59,9 @@ tikv-jemalloc-ctl = { workspace = true }
 
 [features]
 profiling = ["dep:jemalloc_pprof", "tikv-jemallocator/profiling"]
+# Publishes the storage COGS change stream to Kafka. Off by default because it builds
+# librdkafka from source; release builds enable it.
+storage-cogs = ["objectstore-service/storage-cogs"]
 
 [dev-dependencies]
 nix = { workspace = true, features = ["signal"] }
