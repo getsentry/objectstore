@@ -53,6 +53,14 @@ class NoUploadProgress(Exception):
         super().__init__("Upload made no progress")
 
 
+class UploadBodyTruncated(OSError):
+    """The upload source ended before its declared length, e.g. a file shrank."""
+
+    def __init__(self, missing: int) -> None:
+        super().__init__(f"Upload source ended {missing} bytes early")
+        self.missing = missing
+
+
 @dataclass(frozen=True)
 class UploadIncomplete:
     """The upload expects more bytes, starting at the given offset."""
@@ -302,10 +310,14 @@ class _BoundedReader(io.RawIOBase):
     A readable stream over the next `length` bytes of `source`.
 
     This keeps a body within its declared `Content-Length`, even if `source` grows
-    during the upload. Positions are those of `source`, so urllib3 can rewind a
-    seekable body for retries and redirects. The stream covers positions from the
-    start of the bound to its end; seeking before the start fails. If `source` is
-    not seekable, neither is this reader. Closing this reader leaves `source` open.
+    during the upload. If `source` ends early instead, reading raises
+    `UploadBodyTruncated`, which aborts the request rather than leaving the server
+    waiting for the missing bytes.
+
+    Positions are those of `source`, so urllib3 can rewind a seekable body for
+    retries and redirects. The stream covers positions from the start of the bound
+    to its end; seeking before the start fails. If `source` is not seekable,
+    neither is this reader. Closing this reader leaves `source` open.
     """
 
     def __init__(self, source: IO[bytes], length: int) -> None:
@@ -339,6 +351,8 @@ class _BoundedReader(io.RawIOBase):
         self._check_open()
         view = memoryview(buffer).cast("B")
         data = self._source.read(min(len(view), self._remaining))
+        if not data and view and self._remaining:
+            raise UploadBodyTruncated(self._remaining)
         view[: len(data)] = data
         self._remaining -= len(data)
         return len(data)
@@ -382,6 +396,12 @@ def is_transient(error: Exception) -> bool:
         )
     if isinstance(error, RequestError):
         return error.status in (408, 429, 502, 503, 504)
+    if isinstance(error, urllib3.exceptions.ProtocolError) and any(
+        isinstance(arg, UploadBodyTruncated) for arg in error.args
+    ):
+        # urllib3 wraps errors from reading the body. A local source that ended
+        # early fails the same way on every attempt, so it is not retried.
+        return False
     return isinstance(
         error,
         (
