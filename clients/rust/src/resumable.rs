@@ -10,9 +10,10 @@
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
-use std::fmt;
+use std::{fmt, io};
 
 use bytes::Bytes;
+use futures_util::{StreamExt, TryStreamExt, future, stream};
 use objectstore_types::metadata::Metadata;
 use objectstore_types::resumable::{
     CompleteUploadResponse, CreateSessionResponse, HEADER_UPLOAD_LENGTH, HEADER_UPLOAD_OFFSET,
@@ -132,29 +133,33 @@ impl ResumableUpload {
     /// subsequent requests.
     pub fn put(&self, offset: u64, chunk: impl Into<Bytes>) -> PutChunkBuilder {
         let chunk = chunk.into();
-        self.put_body(offset, chunk.len() as u64, chunk.into())
+        self.put_body(offset, chunk.len() as u64, ChunkBody::Buffer(chunk))
     }
 
     /// Builds a request to write a streaming chunk of `length` bytes at `offset`.
     ///
-    /// The stream must yield exactly `length` bytes. If this upload records compression,
-    /// those bytes must come from the object after it has been compressed in full.
+    /// The stream must yield exactly `length` bytes and then end successfully. The client
+    /// checks this before sending the final bytes (before the request for zero-length uploads).
+    ///
+    /// If this upload records compression, those bytes must come from the object after it
+    /// has been compressed in full.
     pub fn put_stream(&self, offset: u64, length: u64, stream: ClientStream) -> PutChunkBuilder {
-        self.put_body(offset, length, Body::wrap_stream(stream))
+        self.put_body(offset, length, ChunkBody::Stream(stream))
     }
 
     /// Builds a request to write an [`AsyncRead`] chunk of `length` bytes at `offset`.
     ///
-    /// The reader must produce exactly `length` bytes. If this upload records compression,
+    /// The reader must produce exactly `length` bytes and then reach EOF successfully,
+    /// with the same validation as [`Self::put_stream`]. If this upload records compression,
     /// those bytes must come from the object after it has been compressed in full.
     pub fn put_read<R>(&self, offset: u64, length: u64, reader: R) -> PutChunkBuilder
     where
         R: AsyncRead + Send + Sync + 'static,
     {
-        self.put_body(offset, length, Body::wrap_stream(ReaderStream::new(reader)))
+        self.put_stream(offset, length, ReaderStream::new(reader).boxed())
     }
 
-    fn put_body(&self, offset: u64, length: u64, body: Body) -> PutChunkBuilder {
+    fn put_body(&self, offset: u64, length: u64, body: ChunkBody) -> PutChunkBuilder {
         PutChunkBuilder {
             upload: self.clone(),
             offset,
@@ -357,7 +362,50 @@ pub struct PutChunkBuilder {
     upload: ResumableUpload,
     offset: u64,
     length: u64,
-    body: Body,
+    body: ChunkBody,
+}
+
+enum ChunkBody {
+    Buffer(Bytes),
+    Stream(ClientStream),
+}
+
+/// Keep the final bytes until the source has confirmed EOF, since HTTP may stop polling
+/// the body once Content-Length bytes have been sent.
+async fn streaming_body(stream: ClientStream, length: u64) -> io::Result<Body> {
+    let stream = stream
+        .try_filter(|chunk| future::ready(!chunk.is_empty()))
+        .fuse();
+    let stream = stream::try_unfold((stream, length), |(mut stream, remaining)| async move {
+        let Some(chunk) = stream.try_next().await? else {
+            return if remaining == 0 {
+                Ok(None)
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "upload stream is too short",
+                ))
+            };
+        };
+        let remaining = remaining.checked_sub(chunk.len() as u64).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "upload stream is too long")
+        })?;
+        if remaining == 0 && stream.try_next().await?.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "upload stream is too long",
+            ));
+        }
+        Ok(Some((chunk, (stream, remaining))))
+    });
+
+    // A zero-length HTTP body may never be polled at all.
+    if length == 0 {
+        futures_util::pin_mut!(stream);
+        stream.try_next().await?;
+        return Ok(Body::default());
+    }
+    Ok(Body::wrap_stream(stream))
 }
 
 impl fmt::Debug for PutChunkBuilder {
@@ -394,12 +442,16 @@ impl PutChunkBuilder {
     pub async fn send(self) -> crate::Result<UploadProgress> {
         self.upload
             .validate_chunk_length(self.offset, self.length)?;
+        let body = match self.body {
+            ChunkBody::Buffer(bytes) => Body::from(bytes),
+            ChunkBody::Stream(stream) => streaming_body(stream, self.length).await?,
+        };
         let response = self
             .upload
             .request(Method::PUT)?
             .header(HEADER_UPLOAD_OFFSET, self.offset.to_string())
             .header(reqwest::header::CONTENT_LENGTH, self.length)
-            .body(self.body)
+            .body(body)
             .send()
             .await?;
         parse_progress_response(response).await
@@ -484,5 +536,69 @@ fn parse_offset(response: &Response) -> Option<u64> {
     match value.parse().ok()? {
         UploadOffset::At(offset) => Some(offset),
         UploadOffset::Unknown => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures_util::FutureExt;
+    use http_body_util::BodyExt;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn streaming_body_checks_length() {
+        let cases: &[(u64, &[&[u8]], bool)] = &[
+            (0, &[], true),
+            (0, &[b"", b""], true),
+            (0, &[b"x"], false),
+            (5, &[], false),
+            (5, &[b"hell"], false),
+            (5, &[b"hello!"], false),
+            (5, &[b"hello", b"!"], false),
+            (5, &[b"hello"], true),
+            (5, &[b"", b"he", b"", b"llo", b""], true),
+        ];
+        for &(length, chunks, valid) in cases {
+            let stream = stream::iter(chunks.iter().map(|c| Ok(Bytes::from_static(c)))).boxed();
+            let result = async {
+                let body = streaming_body(stream, length).await?;
+                Ok::<_, Error>(body.collect().await?.to_bytes())
+            }
+            .await;
+            assert_eq!(
+                result.is_ok(),
+                valid,
+                "length={length}, chunks={chunks:?}: {result:?}"
+            );
+            if valid {
+                assert_eq!(result.unwrap().as_ref(), chunks.concat());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_body_waits_for_eof_only_before_final_chunk() {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let stream = stream::unfold(receiver, |mut receiver| async {
+            receiver.recv().await.map(|chunk| (Ok(chunk), receiver))
+        })
+        .boxed();
+        let mut body = streaming_body(stream, 5).await.unwrap();
+
+        sender.send(Bytes::from_static(b"he")).unwrap();
+        let first = body
+            .frame()
+            .now_or_never()
+            .expect("first chunk must not wait");
+        assert_eq!(first.unwrap().unwrap().into_data().unwrap(), b"he"[..]);
+
+        sender.send(Bytes::from_static(b"llo")).unwrap();
+        assert!(
+            body.frame().now_or_never().is_none(),
+            "final chunk must wait for EOF"
+        );
+        drop(sender);
+        assert_eq!(body.collect().await.unwrap().to_bytes(), b"llo"[..]);
     }
 }
