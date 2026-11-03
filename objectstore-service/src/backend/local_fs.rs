@@ -44,6 +44,10 @@
 //! observe either the previous or next complete file. Unpublished drafts are removed automatically
 //! when dropped.
 //!
+//! Deleting an object also removes its directories while they are empty. This is not synchronized
+//! with writers: directory removal only succeeds on empty directories, and writers recreate a
+//! directory removed before they placed their file in it.
+//!
 //! To avoid races on metadata, expiry, and upload updates, this backend uses locks placed under
 //! `.locks/` to synchronize mutations across backend instances and cooperating processes. The first
 //! two bytes of the BLAKE3 hash of an object's storage path select one of 65,536 permanent lock
@@ -96,6 +100,9 @@ use crate::error::{Error, ErrorKind, Result, ResultExt as _};
 use crate::id::ObjectId;
 use crate::resumable::{BackendToken, Session};
 use crate::stream::{self, ClientStream};
+
+/// Number of times [`run_in_directory`] creates the directory before giving up.
+const MAX_DIRECTORY_ATTEMPTS: usize = 3;
 
 /// Options for owner-only files on Unix, further restricted by umask.
 fn file_options() -> std::fs::OpenOptions {
@@ -164,13 +171,73 @@ fn encode_key(key: &str) -> String {
     encoded
 }
 
-/// Creates owner-only directories on Unix without changing existing permissions.
-async fn create_directories(path: &Path) -> io::Result<()> {
-    let mut builder = tokio::fs::DirBuilder::new();
+/// Builder for owner-only directories on Unix that leaves existing permissions unchanged.
+fn directory_builder() -> std::fs::DirBuilder {
+    let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
-    builder.mode(0o700);
-    builder.create(path).await
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    builder
+}
+
+/// Creates owner-only directories on Unix without changing existing permissions.
+async fn create_directories(path: &Path) -> io::Result<()> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || directory_builder().create(path))
+        .await
+        .map_err(io::Error::other)?
+}
+
+/// Creates `dir` and runs `f` to place a new entry in it.
+///
+/// [`remove_empty_directories`] can remove `dir` after it is created but before `f` places its
+/// entry. When `f` fails with [`io::ErrorKind::NotFound`], the directory is created again and `f`
+/// retried, up to [`MAX_DIRECTORY_ATTEMPTS`] times.
+fn run_in_directory<T>(dir: &Path, mut f: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    let mut attempt = 1;
+    loop {
+        directory_builder().create(dir)?;
+        match f() {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                if attempt == MAX_DIRECTORY_ATTEMPTS {
+                    return Err(error);
+                }
+                attempt += 1;
+            }
+            result => return result,
+        }
+    }
+}
+
+/// Removes the directories of a deleted object below `root` as long as they are empty.
+///
+/// Stops at the first directory that cannot be removed, typically because it still holds other
+/// objects. Removal is atomic and only succeeds on empty directories, so this never races with
+/// stored objects. Writers handle directories removed under them with [`run_in_directory`].
+async fn remove_empty_directories(root: &Path, object_path: &Path) -> Result<()> {
+    let root = root.to_path_buf();
+    let object_path = object_path.to_path_buf();
+    let task = tokio::task::spawn_blocking(move || {
+        object_path
+            .ancestors()
+            .skip(1)
+            .take_while(|dir| *dir != root && dir.starts_with(&root))
+            .try_for_each(std::fs::remove_dir)
+    });
+
+    let result = task.await.context(
+        ErrorKind::Internal,
+        "waiting to remove empty local-fs directories",
+    )?;
+
+    if let Err(error) = result {
+        objectstore_log::debug!(!!&error, "Stopped removing empty local-fs directories");
+    }
+
+    Ok(())
 }
 
 /// Configuration for [`LocalFsBackend`].
@@ -275,10 +342,6 @@ impl Backend for LocalFsBackend {
         self.change_stream
             .begin_write(id, metadata.time_expires)
             .await?;
-        create_directories(path.parent().unwrap()).await.context(
-            ErrorKind::BackendFailure,
-            "creating local-fs object directory",
-        )?;
 
         let mut draft = Draft::create(&path, metadata).await?;
         let mut reader = pin!(StreamReader::new(stream));
@@ -404,12 +467,16 @@ impl Backend for LocalFsBackend {
         id: &ObjectId,
         _access_time: Timestamp,
     ) -> Result<DeleteResponse> {
-        let _guard = self.locks.acquire(id).await?;
+        let guard = self.locks.acquire(id).await?;
 
         objectstore_log::debug!("Deleting from local_fs backend");
         let path = self.path(id);
-        match tokio::fs::remove_file(path).await {
-            Ok(()) => self.change_stream.commit_delete(id).await,
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => {
+                self.change_stream.commit_delete(id).await;
+                drop(guard);
+                remove_empty_directories(&self.path, &path).await?;
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 objectstore_log::debug!("Object not found");
             }
@@ -482,12 +549,6 @@ impl Backend for LocalFsBackend {
         }
 
         let object_path = self.path(&session.object_id);
-        create_directories(object_path.parent().unwrap())
-            .await
-            .context(
-                ErrorKind::BackendFailure,
-                "creating local-fs object directory",
-            )?;
         let (stored_size, expires_at) = upload.publish(object_path).await?;
         self.change_stream
             .commit_write(&session.object_id, stored_size, expires_at)
@@ -705,10 +766,27 @@ impl UploadFile {
             ..
         } = self;
         drop(file);
-        tokio::fs::rename(path, target).await.context(
-            ErrorKind::BackendFailure,
-            "publishing local-fs resumable upload",
-        )?;
+
+        let task = tokio::task::spawn_blocking(move || {
+            let rename = || std::fs::rename(&path, &target);
+            // A concurrent delete can remove the empty target directory before the rename.
+            if let Some(parent) = target.parent() {
+                run_in_directory(parent, rename)
+            } else {
+                rename()
+            }
+        });
+
+        task.await
+            .context(
+                ErrorKind::Internal,
+                "waiting to publish local-fs resumable upload",
+            )?
+            .context(
+                ErrorKind::BackendFailure,
+                "publishing local-fs resumable upload",
+            )?;
+
         Ok((stored_size, expires_at))
     }
 }
@@ -871,7 +949,7 @@ fn create_tempfile(parent: &Path) -> io::Result<tempfile::NamedTempFile> {
     let mut builder = tempfile::Builder::new();
     builder.suffix(".draft");
 
-    builder.tempfile_in(parent)
+    run_in_directory(parent, || builder.tempfile_in(parent))
 }
 
 #[cfg(test)]
@@ -1331,6 +1409,13 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stream::read_to_vec(payload).await.unwrap(), b"a/b");
+
+        // Deleting the remaining objects removes their empty directories up to the root.
+        for id in [&child, &suffixed] {
+            backend.delete_object(id, Timestamp::now()).await.unwrap();
+        }
+        assert!(!backend.path.join("testing").exists());
+        assert!(backend.path.exists());
     }
 
     #[test]
