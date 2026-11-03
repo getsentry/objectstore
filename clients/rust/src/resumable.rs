@@ -595,7 +595,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upload_chunk_waits_for_eof_only_before_final_chunk() {
+    async fn upload_chunk_checks_eof() {
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         let stream = stream::unfold(receiver, |mut receiver| async {
             receiver.recv().await.map(|chunk| (Ok(chunk), receiver))
