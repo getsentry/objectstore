@@ -632,3 +632,36 @@ fn upload_futures_are_send() {
     assert_send(session.put_path("data").send());
     assert_send(session.many().push(session.put("data")).send());
 }
+
+#[cfg(feature = "resumable-upload-api")]
+#[tokio::test]
+async fn resumable_stream_rejects_error_after_declared_length() {
+    for data in [b"hello".as_slice(), b""] {
+        for reader in [false, true] {
+            let server = Server::new([Reply::Complete]).await;
+            let upload = server
+                .session(None)
+                .resume_upload("key", objectstore_client::SessionToken::new(b"token"));
+            let body = stream::iter([
+                Ok(Bytes::from_static(data)),
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "checksum mismatch",
+                )),
+            ]);
+            let request = if reader {
+                upload.put_read(
+                    0,
+                    data.len() as u64,
+                    tokio_util::io::StreamReader::new(body),
+                )
+            } else {
+                upload.put_stream(0, data.len() as u64, body.boxed())
+            };
+
+            let result = request.send().await;
+            assert!(result.is_err(), "accepted an invalid source: {result:?}");
+            assert!(server.script.lock().unwrap().received.is_empty());
+        }
+    }
+}
