@@ -562,18 +562,19 @@ mod tests {
 
     #[tokio::test]
     async fn upload_chunk_checks_length() {
-        let cases: &[(u64, &[&[u8]], bool)] = &[
-            (0, &[], true),
-            (0, &[b"", b""], true),
-            (0, &[b"x"], false),
-            (5, &[], false),
-            (5, &[b"hell"], false),
-            (5, &[b"hello!"], false),
-            (5, &[b"hello", b"!"], false),
-            (5, &[b"hello"], true),
-            (5, &[b"", b"he", b"", b"llo", b""], true),
+        type Expected = Result<&'static [u8], ()>;
+        let cases: &[(u64, &[&[u8]], Expected)] = &[
+            (0, &[], Ok(b"")),
+            (0, &[b"", b""], Ok(b"")),
+            (0, &[b"x"], Err(())),
+            (5, &[], Err(())),
+            (5, &[b"hell"], Err(())),
+            (5, &[b"hello!"], Err(())),
+            (5, &[b"hello", b"!"], Err(())),
+            (5, &[b"hello"], Ok(b"hello")),
+            (5, &[b"", b"he", b"", b"llo", b""], Ok(b"hello")),
         ];
-        for &(length, chunks, valid) in cases {
+        for &(length, chunks, expected) in cases {
             let stream = stream::iter(chunks.iter().map(|c| Ok(Bytes::from_static(c)))).boxed();
             let result = async {
                 let body = UploadChunk::Stream {
@@ -586,13 +587,10 @@ mod tests {
             }
             .await;
             assert_eq!(
-                result.is_ok(),
-                valid,
+                result.as_deref().map_err(|_| ()),
+                expected,
                 "length={length}, chunks={chunks:?}: {result:?}"
             );
-            if valid {
-                assert_eq!(result.unwrap().as_ref(), chunks.concat());
-            }
         }
     }
 
