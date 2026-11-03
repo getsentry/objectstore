@@ -372,7 +372,7 @@ enum ChunkBody {
 
 /// Keep the final bytes until the source has confirmed EOF, since HTTP may stop polling
 /// the body once Content-Length bytes have been sent.
-async fn streaming_body(stream: ClientStream, length: u64) -> io::Result<Body> {
+async fn validated_stream_body(stream: ClientStream, length: u64) -> io::Result<Body> {
     let stream = stream
         .try_filter(|chunk| future::ready(!chunk.is_empty()))
         .fuse();
@@ -444,7 +444,7 @@ impl PutChunkBuilder {
             .validate_chunk_length(self.offset, self.length)?;
         let body = match self.body {
             ChunkBody::Buffer(bytes) => Body::from(bytes),
-            ChunkBody::Stream(stream) => streaming_body(stream, self.length).await?,
+            ChunkBody::Stream(stream) => validated_stream_body(stream, self.length).await?,
         };
         let response = self
             .upload
@@ -547,7 +547,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn streaming_body_checks_length() {
+    async fn validated_stream_body_checks_length() {
         let cases: &[(u64, &[&[u8]], bool)] = &[
             (0, &[], true),
             (0, &[b"", b""], true),
@@ -562,7 +562,7 @@ mod tests {
         for &(length, chunks, valid) in cases {
             let stream = stream::iter(chunks.iter().map(|c| Ok(Bytes::from_static(c)))).boxed();
             let result = async {
-                let body = streaming_body(stream, length).await?;
+                let body = validated_stream_body(stream, length).await?;
                 Ok::<_, Error>(body.collect().await?.to_bytes())
             }
             .await;
@@ -578,13 +578,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn streaming_body_waits_for_eof_only_before_final_chunk() {
+    async fn validated_stream_body_waits_for_eof_only_before_final_chunk() {
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         let stream = stream::unfold(receiver, |mut receiver| async {
             receiver.recv().await.map(|chunk| (Ok(chunk), receiver))
         })
         .boxed();
-        let mut body = streaming_body(stream, 5).await.unwrap();
+        let mut body = validated_stream_body(stream, 5).await.unwrap();
 
         sender.send(Bytes::from_static(b"he")).unwrap();
         let first = body
