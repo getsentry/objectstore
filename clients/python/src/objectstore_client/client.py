@@ -509,6 +509,7 @@ class Session:
                         if result_key is None:
                             # Session creation failed or resumables are unsupported.
                             # Send the prepared body without compressing it again.
+                            headers["Content-Length"] = str(compressed_size)
                             result_key, _, _ = self._put_direct(
                                 body, key, headers, compression="none"
                             )
@@ -558,16 +559,10 @@ class Session:
                         retries = pool_retries.new(read=0)
                     elif isinstance(pool_retries, int):
                         retries = urllib3.Retry(pool_retries, read=0)
-                else:
-                    # Uncompressed bodies are sent verbatim, so buffers and seekable
-                    # files know their size upfront and avoid chunked encoding. The
-                    # body is capped in case the file grows during the upload. A size
-                    # of zero is not trusted, since virtual files such as those in
-                    # /proc report zero bytes but still have content.
-                    size = _resumable.get_size(original_body)
-                    if size:
-                        body = _resumable.bounded_reader(original_body, size)
-                        headers = {**headers, "Content-Length": str(size)}
+                elif isinstance(contents, bytes):
+                    # Buffers are sent verbatim and their size cannot change, so they
+                    # declare it upfront instead of using chunked encoding.
+                    headers = {**headers, "Content-Length": str(len(contents))}
 
                 response = self._pool.request(
                     "POST" if not key else "PUT",

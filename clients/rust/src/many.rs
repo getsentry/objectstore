@@ -165,9 +165,9 @@ impl BatchOperation {
                 metadata.compression = compression.map(CompressionMode::compression);
                 headers.extend(metadata.to_headers("")?);
 
-                // Batched parts are small, so compressing them up front is cheap. A known length
-                // for every part lets the entire batch request carry a `Content-Length`.
-                let encoded = put::encode_body_buffered(body, compression).await?;
+                // The batch request carries a `Content-Length` only if every part's length is
+                // known up front. Compressed parts are streamed, so their length is unknown.
+                let encoded = put::encode_body(body, compression).await?;
                 let part = match encoded.length {
                     Some(length) => Part::stream_with_length(encoded.body, length),
                     None => Part::stream(encoded.body),

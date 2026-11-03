@@ -8,7 +8,7 @@ use async_compression::tokio::bufread::{GzipEncoder, ZstdEncoder};
 use bytes::{Bytes, BytesMut};
 use futures_util::{StreamExt, TryStreamExt, stream};
 use tokio::fs::File;
-use tokio::io::{AsyncBufRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
 use tokio_util::io::ReaderStream;
 
 use crate::put::{CompressionMode, EncodedBody, PutBody, encode_body};
@@ -195,11 +195,10 @@ fn read_exact_at(file: &std::fs::File, buffer: &mut [u8], position: u64) -> io::
     }
 }
 
-/// Compresses `reader` into `output`, returning the number of compressed bytes written.
-pub(crate) async fn compress_into(
+async fn compress_into(
     reader: impl AsyncBufRead + Unpin,
     compression: Compression,
-    output: &mut (impl AsyncWrite + Unpin),
+    output: &mut File,
 ) -> io::Result<u64> {
     match compression {
         Compression::Zstd => tokio::io::copy(&mut ZstdEncoder::new(reader), output).await,

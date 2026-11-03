@@ -361,39 +361,6 @@ pub(crate) async fn encode_body(
     })
 }
 
-/// Turns the body into a request body of known length, compressing it in memory if needed.
-///
-/// Unlike [`encode_body`], this buffers the entire compressed payload before sending, so it
-/// must only be used for small bodies.
-pub(crate) async fn encode_body_buffered(
-    body: PutBody,
-    mode: Option<CompressionMode>,
-) -> io::Result<EncodedBody> {
-    let Some(CompressionMode::Compress(compression)) = mode else {
-        return encode_body(body, mode).await;
-    };
-
-    let mut compressed = Vec::new();
-    match body {
-        PutBody::Buffer(bytes) => {
-            payload::compress_into(Cursor::new(bytes), compression, &mut compressed).await?
-        }
-        PutBody::Stream(stream) => {
-            payload::compress_into(StreamReader::new(stream), compression, &mut compressed).await?
-        }
-        PutBody::File(file) => {
-            payload::compress_into(BufReader::new(file), compression, &mut compressed).await?
-        }
-        PutBody::Path(path) => {
-            let reader = BufReader::new(File::open(path).await?);
-            payload::compress_into(reader, compression, &mut compressed).await?
-        }
-    };
-
-    let length = compressed.len() as u64;
-    Ok(EncodedBody::sized(length, compressed))
-}
-
 /// Streams the remainder of a file from its current position.
 ///
 /// For regular files, the length is taken from the file's metadata and the stream is capped to
