@@ -342,9 +342,6 @@ fn compress(reader: impl AsyncBufRead + Send + 'static, compression: Compression
     }
 }
 
-// TODO: instead of a separate `send` method, it would be nice to just implement `IntoFuture`.
-// However, `IntoFuture` needs to define the resulting future as an associated type,
-// and "impl trait in associated type position" is not yet stable :-(
 impl PutBuilder {
     /// Sends the built put request to the upstream service.
     pub async fn send(mut self) -> crate::Result<PutResponse> {
