@@ -101,7 +101,7 @@ use crate::id::ObjectId;
 use crate::resumable::{BackendToken, Session};
 use crate::stream::{self, ClientStream};
 
-/// Number of times [`run_in_directory`] creates the directory before giving up.
+/// Number of times [`DraftDirectory::run`] creates the directories before giving up.
 const MAX_DIRECTORY_ATTEMPTS: usize = 3;
 
 /// Options for owner-only files on Unix, further restricted by umask.
@@ -191,51 +191,33 @@ async fn create_directories(path: &Path) -> io::Result<()> {
         .map_err(io::Error::other)?
 }
 
-/// Creates `dir` and runs `f` to place a new entry in it.
-///
-/// [`remove_empty_directories`] can remove `dir` or one of its parents while they are being
-/// created, or before `f` places its entry. When either step fails with
-/// [`io::ErrorKind::NotFound`], both are retried, up to [`MAX_DIRECTORY_ATTEMPTS`] times in total.
-fn run_in_directory<T>(dir: &Path, mut f: impl FnMut() -> io::Result<T>) -> io::Result<T> {
-    let mut attempt = || directory_builder().create(dir).and_then(|()| f());
-
-    // A concurrent delete can remove the empty directory before `f` places its entry in it.
-    for _ in 1..MAX_DIRECTORY_ATTEMPTS {
-        match attempt() {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            result => return result,
-        }
-    }
-
-    attempt()
-}
-
 /// Removes the directories of a deleted object below `root` as long as they are empty.
 ///
-/// Stops at the first directory that cannot be removed, typically because it still holds other
-/// objects. Removal is atomic and only succeeds on empty directories, so this never races with
-/// stored objects. Writers handle directories removed under them with [`run_in_directory`].
-async fn remove_empty_directories(root: &Path, object_path: &Path) -> Result<()> {
+/// Runs [`remove_empty_directories_sync`] on the blocking thread pool.
+async fn remove_empty_directories(root: &Path, object_path: &Path) {
     let root = root.to_path_buf();
     let object_path = object_path.to_path_buf();
     let task = tokio::task::spawn_blocking(move || {
-        object_path
-            .ancestors()
-            .skip(1)
-            .take_while(|dir| *dir != root && dir.starts_with(&root))
-            .try_for_each(std::fs::remove_dir)
+        remove_empty_directories_sync(&root, &object_path);
     });
 
-    let result = task.await.context(
-        ErrorKind::Internal,
-        "waiting to remove empty local-fs directories",
-    )?;
+    // A leftover empty directory is harmless, so a failed cleanup must not fail the delete.
+    let _ = task.await;
+}
 
-    if let Err(error) = result {
-        objectstore_log::debug!(!!&error, "Stopped removing empty local-fs directories");
-    }
+/// Removes the directories of an object below `root` as long as they are empty.
+///
+/// Stops at the first directory that cannot be removed, typically because it still holds other
+/// objects. Removal is atomic and only succeeds on empty directories, so this never races with
+/// stored objects. Writers handle directories removed under them with [`DraftDirectory::run`].
+fn remove_empty_directories_sync(root: &Path, object_path: &Path) {
+    let mut object_dirs = object_path
+        .ancestors()
+        .skip(1)
+        .take_while(|dir| *dir != root && dir.starts_with(root));
 
-    Ok(())
+    // A leftover empty directory is harmless, so cleanup ignores failures.
+    let _ = object_dirs.try_for_each(std::fs::remove_dir);
 }
 
 /// Configuration for [`LocalFsBackend`].
@@ -341,7 +323,7 @@ impl Backend for LocalFsBackend {
             .begin_write(id, metadata.time_expires)
             .await?;
 
-        let mut draft = Draft::create(&path, metadata).await?;
+        let mut draft = Draft::create(&self.path, &path, metadata).await?;
         let mut reader = pin!(StreamReader::new(stream));
         let payload_size = tokio::io::copy(&mut reader, draft.writer())
             .await
@@ -445,7 +427,7 @@ impl Backend for LocalFsBackend {
         metadata.time_expires = Some(expire_at);
         self.change_stream.begin_update(id, Some(expire_at)).await?;
 
-        let mut draft = Draft::create(&path, &metadata).await?;
+        let mut draft = Draft::create(&self.path, &path, &metadata).await?;
         tokio::io::copy(&mut reader, draft.writer()).await.context(
             ErrorKind::BackendFailure,
             "copying local-fs object payload for expiry extension",
@@ -473,7 +455,7 @@ impl Backend for LocalFsBackend {
             Ok(()) => {
                 self.change_stream.commit_delete(id).await;
                 drop(guard);
-                remove_empty_directories(&self.path, &path).await?;
+                remove_empty_directories(&self.path, &path).await;
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 objectstore_log::debug!("Object not found");
@@ -546,8 +528,8 @@ impl Backend for LocalFsBackend {
             });
         }
 
-        let object_path = self.path(&session.object_id);
-        let (stored_size, expires_at) = upload.publish(object_path).await?;
+        let directory = DraftDirectory::new(&self.path, &self.path(&session.object_id));
+        let (stored_size, expires_at) = upload.publish(directory).await?;
         self.change_stream
             .commit_write(&session.object_id, stored_size, expires_at)
             .await;
@@ -755,7 +737,7 @@ impl UploadFile {
     }
 
     /// Publishes the upload; requires a successful `append()` with no subsequent writes.
-    async fn publish(self, target: PathBuf) -> Result<(u64, Option<Timestamp>)> {
+    async fn publish(self, mut directory: DraftDirectory) -> Result<(u64, Option<Timestamp>)> {
         let Self {
             file,
             path,
@@ -765,26 +747,16 @@ impl UploadFile {
         } = self;
         drop(file);
 
-        let task = tokio::task::spawn_blocking(move || {
-            let rename = || std::fs::rename(&path, &target);
-            // A concurrent delete can remove the empty target directory before the rename.
-            if let Some(parent) = target.parent() {
-                run_in_directory(parent, rename)
-            } else {
-                rename()
-            }
-        });
-
-        task.await
-            .context(
-                ErrorKind::Internal,
-                "waiting to publish local-fs resumable upload",
-            )?
+        let target = directory.object_path().to_path_buf();
+        directory
+            .run(move || std::fs::rename(&path, &target))
+            .await
             .context(
                 ErrorKind::BackendFailure,
                 "publishing local-fs resumable upload",
             )?;
 
+        directory.keep();
         Ok((stored_size, expires_at))
     }
 }
@@ -868,23 +840,95 @@ impl ObjectFile {
     }
 }
 
+/// The directories of an object that is not published yet.
+///
+/// Writers create the directories and place their entry with [`run`](Self::run). When dropped
+/// before [`keep`](Self::keep), for example after a failed or cancelled write, this removes the
+/// directories again as long as they are empty.
+struct DraftDirectory {
+    root: PathBuf,
+    object_path: PathBuf,
+    kept: bool,
+}
+
+impl DraftDirectory {
+    fn new(root: &Path, object_path: &Path) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            object_path: object_path.to_path_buf(),
+            kept: false,
+        }
+    }
+
+    /// Returns the path the object is published at.
+    fn object_path(&self) -> &Path {
+        &self.object_path
+    }
+
+    /// Creates the directories and runs `f` on the blocking thread pool to place a new entry in them.
+    ///
+    /// [`remove_empty_directories`] can remove the directories while they are being created, or
+    /// before `f` places its entry. When either step fails with [`io::ErrorKind::NotFound`], both
+    /// are retried, up to [`MAX_DIRECTORY_ATTEMPTS`] times in total.
+    async fn run<T, F>(&self, mut f: F) -> io::Result<T>
+    where
+        T: Send + 'static,
+        F: FnMut() -> io::Result<T> + Send + 'static,
+    {
+        let dir = self.object_path.parent().map(Path::to_path_buf);
+        let task = tokio::task::spawn_blocking(move || {
+            let mut attempt = || {
+                if let Some(dir) = &dir {
+                    directory_builder().create(dir)?;
+                }
+                f()
+            };
+
+            // A concurrent delete can remove the empty directory before `f` places its entry in it.
+            for _ in 1..MAX_DIRECTORY_ATTEMPTS {
+                match attempt() {
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    result => return result,
+                }
+            }
+
+            attempt()
+        });
+
+        task.await.map_err(io::Error::other)?
+    }
+
+    /// Keeps the directories, since the published object now lives in them.
+    fn keep(&mut self) {
+        self.kept = true;
+    }
+}
+
+impl Drop for DraftDirectory {
+    fn drop(&mut self) {
+        if !self.kept {
+            remove_empty_directories_sync(&self.root, &self.object_path);
+        }
+    }
+}
+
 struct Draft {
     writer: BufWriter<tokio::fs::File>,
     path: tempfile::TempPath,
     target: PathBuf,
     /// Bytes the metadata preamble occupies, counted as it is written.
     preamble_len: u64,
+    /// Declared after `path`, so an unpublished draft's file is removed before its directories.
+    directory: DraftDirectory,
 }
 
 impl Draft {
-    async fn create(target: &Path, metadata: &Metadata) -> Result<Self> {
+    async fn create(root: &Path, target: &Path, metadata: &Metadata) -> Result<Self> {
+        let directory = DraftDirectory::new(root, target);
         let parent = target.parent().unwrap().to_path_buf();
-        let tempfile = tokio::task::spawn_blocking(move || create_tempfile(&parent))
+        let tempfile = directory
+            .run(move || create_tempfile(&parent))
             .await
-            .context(
-                ErrorKind::Internal,
-                "waiting for local-fs object draft creation",
-            )?
             .context(ErrorKind::BackendFailure, "creating local-fs object draft")?;
         let (file, path) = tempfile.into_parts();
 
@@ -896,6 +940,7 @@ impl Draft {
             path,
             target: target.to_path_buf(),
             preamble_len,
+            directory,
         })
     }
 
@@ -926,12 +971,17 @@ impl Draft {
             writer,
             path,
             target,
+            mut directory,
             ..
         } = self;
 
         drop(writer);
-        tokio::task::spawn_blocking(move || path.persist(target))
-            .await
+        let task = tokio::task::spawn_blocking(move || {
+            // The error contains the draft file. Drop it first so the directory gets cleaned up.
+            path.persist(target).map_err(|error| error.error)
+        });
+
+        task.await
             .context(
                 ErrorKind::Internal,
                 "waiting to publish local-fs object draft",
@@ -939,7 +989,10 @@ impl Draft {
             .context(
                 ErrorKind::BackendFailure,
                 "publishing local-fs object draft",
-            )
+            )?;
+
+        directory.keep();
+        Ok(())
     }
 }
 
@@ -947,7 +1000,7 @@ fn create_tempfile(parent: &Path) -> io::Result<tempfile::NamedTempFile> {
     let mut builder = tempfile::Builder::new();
     builder.suffix(".draft");
 
-    run_in_directory(parent, || builder.tempfile_in(parent))
+    builder.tempfile_in(parent)
 }
 
 #[cfg(test)]
