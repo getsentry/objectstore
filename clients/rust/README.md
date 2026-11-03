@@ -323,9 +323,20 @@ let client = Client::builder("http://localhost:8888/")
 To create a token with narrower permissions or a different expiry, use the
 methods on the token request returned from `create_token`.
 
+### Tracing
+
+With the `tracing` feature, every operation that talks to Objectstore runs in an
+`INFO` span, which Sentry's `sentry-tracing` integration captures with the op
+`objectstore.<operation>` and the name `<op> <usecase>`, for example
+`objectstore.get attachments`.
+
+```toml
+objectstore-client = { version = "...", features = ["tracing"] }
+```
+
 ## Feature flags
 
-- `tracing`: enables diagnostic tracing events and spans
+- `tracing`: enables spans for all operations (see Tracing above) and diagnostic events
 - `resumable-upload-api`: enables the manual Resumable Uploads API (see above)
 
 ## Configuration

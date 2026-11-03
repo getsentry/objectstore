@@ -42,8 +42,11 @@ futures-util = { workspace = true }
 http-body-util = { workspace = true }
 jsonwebtoken = { workspace = true }
 objectstore-test = { workspace = true }
+sentry = { workspace = true, features = ["test", "tracing"] }
 serde = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 zstd = { workspace = true }
 
 [features]
