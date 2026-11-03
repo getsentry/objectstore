@@ -117,6 +117,7 @@ impl From<PutBuilder> for BatchOperation {
             compression,
             body,
             session: _session,
+            resumable_threshold_bytes: _,
         } = value;
         BatchOperation::Insert {
             key,
@@ -660,6 +661,8 @@ async fn execute_individual(op: BatchOperation, session: &Session) -> OperationR
         } => {
             let error_key = key.clone().unwrap_or_else(|| "<unknown>".to_owned());
             let put = PutBuilder {
+                // Automatic resumables are currently limited to standalone uploads.
+                resumable_threshold_bytes: None,
                 session: session.clone(),
                 metadata,
                 compression,

@@ -2840,6 +2840,7 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-compression",
+ "axum",
  "bytes",
  "flate2",
  "futures-util",
@@ -2849,6 +2850,7 @@ dependencies = [
  "multer",
  "objectstore-test",
  "objectstore-types",
+ "rand 0.10.3",
  "reqwest 0.13.5",
  "sentry-core",
  "serde",
@@ -2856,6 +2858,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
+ "tracing",
  "url",
  "zstd",
  "zstd-safe",

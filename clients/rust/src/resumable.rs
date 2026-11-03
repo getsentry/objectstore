@@ -3,9 +3,10 @@
 //! Enable the `resumable-upload-api` feature to use this API.
 //! It maps directly to the server operations and is intended for advanced use cases that need
 //! low-level protocol calls.
-//! A future release of `objectstore-client` will use this API under the hood for eligible
-//! `Session::put` calls, so users can benefit from this feature without the need to interact with
-//! this API directly.
+//! The client also uses this API internally for eligible `Session::put` calls.
+
+// Automatic uploads use only part of this module when the public API is disabled.
+#![cfg_attr(not(feature = "resumable-upload-api"), allow(dead_code))]
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -56,6 +57,7 @@ pub struct ResumableUpload {
     granularity: Option<u64>,
 }
 
+#[cfg(feature = "resumable-upload-api")]
 impl Session {
     /// Starts building a resumable upload for an object with `object_length` bytes.
     ///
@@ -72,12 +74,7 @@ impl Session {
             ..Default::default()
         };
 
-        CreateResumableUploadBuilder {
-            session: self.clone(),
-            total_length: object_length,
-            key: None,
-            metadata,
-        }
+        CreateResumableUploadBuilder::new(self.clone(), object_length, None, metadata)
     }
 
     /// Reconstructs a resumable upload handle without contacting the server.
@@ -85,17 +82,21 @@ impl Session {
     /// The `key` and `token` must come from the same previously created upload and scope. The
     /// server rejects a mismatched or unknown token when an operation is sent.
     pub fn resume_upload(&self, key: impl Into<ObjectKey>, token: SessionToken) -> ResumableUpload {
-        ResumableUpload {
-            session: self.clone(),
-            key: key.into(),
+        ResumableUpload::new(self.clone(), key.into(), token)
+    }
+}
+
+impl ResumableUpload {
+    fn new(session: Session, key: ObjectKey, token: SessionToken) -> Self {
+        Self {
+            session,
+            key,
             token,
             total_length: None,
             granularity: None,
         }
     }
-}
 
-impl ResumableUpload {
     /// Returns the object key bound to this upload.
     pub fn key(&self) -> &str {
         &self.key
@@ -201,7 +202,7 @@ impl ResumableUpload {
     }
 }
 
-/// A builder for [`Session::create_upload`].
+/// A builder for creating a resumable upload.
 #[derive(Debug)]
 pub struct CreateResumableUploadBuilder {
     session: Session,
@@ -211,6 +212,20 @@ pub struct CreateResumableUploadBuilder {
 }
 
 impl CreateResumableUploadBuilder {
+    pub(crate) fn new(
+        session: Session,
+        total_length: u64,
+        key: Option<ObjectKey>,
+        metadata: Metadata,
+    ) -> Self {
+        Self {
+            session,
+            total_length,
+            key,
+            metadata,
+        }
+    }
+
     /// Sets an explicit object key instead of asking the server to generate one.
     pub fn key(mut self, key: impl Into<ObjectKey>) -> Self {
         self.key = Some(key.into()).filter(|key| !key.is_empty());
