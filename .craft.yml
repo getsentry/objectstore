@@ -1,4 +1,4 @@
-minVersion: 3.3.0
+minVersion: 3.9.0
 
 # Each workspace is released on its own, with its own version, tags, release
 # branch and changelog. Pick one with `--workspace <path>` or `CRAFT_WORKSPACE`.
