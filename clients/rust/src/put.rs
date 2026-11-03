@@ -113,6 +113,7 @@ impl Session {
     /// Creates or replaces an object using the contents of an opened file.
     ///
     /// Uploads from the current position using a direct request, regardless of the resumable threshold.
+    /// The file must stay readable and must not be modified until the upload completes.
     ///
     /// The file descriptor is held open from the moment this method is called until the
     /// upload completes. When enqueueing many files via [`Session::many`], prefer
