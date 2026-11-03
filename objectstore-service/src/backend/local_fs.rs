@@ -33,6 +33,7 @@
 //! - `%` itself and ASCII control characters, including NUL.
 //! - Characters reserved on Windows: `\ < > : " | ? *`.
 //! - A `.` at the start of a segment, so no segment is `.` or `..`, or a hidden file.
+//! - A `.` at the end of a segment, which Windows would strip.
 //! - The `.` of a trailing `.obj` (in any case), so no directory looks like an object file.
 //!
 //! Empty segments, such as in `a//b`, are stored as `%`.
@@ -57,8 +58,8 @@
 //! - Keys that differ only in case or Unicode normalization collide on filesystems that ignore
 //!   those differences, such as the macOS default.
 //! - Each encoded key segment must fit the filesystem's file name limit, typically 255 bytes.
-//! - Windows additionally rejects reserved device names such as `CON` or `NUL`, and names ending in
-//!   a space or `.`. These are stored unescaped.
+//! - Windows additionally rejects reserved device names such as `CON` or `NUL`, and strips trailing
+//!   spaces from names. These are stored unescaped.
 //!
 //! ## Permissions
 //!
@@ -146,7 +147,8 @@ fn encode_key(key: &str) -> String {
         for (index, c) in segment.char_indices() {
             let escape = match c {
                 '%' | '\\' | '<' | '>' | ':' | '"' | '|' | '?' | '*' => true,
-                '.' => index == 0 || Some(index) == suffix_start,
+                // Windows strips trailing dots, which would merge `a.` into `a`.
+                '.' => index == 0 || index == segment.len() - 1 || Some(index) == suffix_start,
                 c => c.is_ascii_control(),
             };
             if escape {
@@ -1348,7 +1350,7 @@ mod tests {
         for (key, escaped) in [
             ("a//b", "a/%/b"),    // empty segment
             ("a:b", "a%3Ab"),     // reserved character
-            ("..", "%2E."),       // dot segment
+            ("..", "%2E%2E"),     // dot segment
             ("a.obj", "a%2Eobj"), // object file suffix
         ] {
             assert_ne!(path(key), path(escaped), "{key:?} vs {escaped:?}");
