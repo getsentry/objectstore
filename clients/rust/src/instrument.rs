@@ -107,16 +107,19 @@ mod spans {
     /// The length is recorded once the stream ends. Streams that fail or are dropped early do not
     /// record anything. Use this for request bodies whose size is only known after sending them.
     pub fn record_stream_length(stream: ClientStream, field: &'static str) -> ClientStream {
-        let state = (stream, 0u64, Span::current());
+        // The span is dropped on the first error, so a partial length is never recorded.
+        let state = (stream, 0u64, Some(Span::current()));
         futures_util::stream::unfold(state, move |(mut stream, length, span)| async move {
             match stream.next().await {
                 Some(Ok(chunk)) => {
                     let length = length + chunk.len() as u64;
                     Some((Ok(chunk), (stream, length, span)))
                 }
-                Some(Err(error)) => Some((Err(error), (stream, length, span))),
+                Some(Err(error)) => Some((Err(error), (stream, length, None))),
                 None => {
-                    span.record(field, length);
+                    if let Some(span) = span {
+                        span.record(field, length);
+                    }
                     None
                 }
             }
