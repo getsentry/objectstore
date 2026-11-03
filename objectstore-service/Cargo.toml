@@ -12,14 +12,12 @@ publish = false
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
-base64 = { workspace = true }
 bigtable_rs = { workspace = true }
 blake3 = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 futures-util = { workspace = true }
 gcp_auth = { workspace = true }
-humantime = { workspace = true }
 humantime-serde = { workspace = true }
 objectstore-inventory-tracker = { workspace = true, features = ["kafka"], optional = true }
 objectstore-log = { workspace = true }
@@ -49,6 +47,7 @@ uuid = { workspace = true, features = ["v7"] }
 storage-cogs = ["dep:objectstore-inventory-tracker"]
 
 [dev-dependencies]
+flate2 = { workspace = true }
 futures = { workspace = true }
 objectstore-inventory-tracker = { workspace = true, features = ["test-utils"] }
 tokio = { workspace = true, features = ["test-util"] }

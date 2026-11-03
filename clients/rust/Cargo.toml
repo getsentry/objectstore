@@ -5,14 +5,16 @@ description = "Client SDK for Objectstore, the Sentry object storage platform"
 homepage = "https://getsentry.github.io/objectstore/"
 repository = "https://github.com/getsentry/objectstore"
 license-file = "../../LICENSE.md"
-version = "0.2.6"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.89"
 publish = true
 
+[package.metadata.docs.rs]
+features = ["resumable-upload-api"]
+
 [dependencies]
-async-compression = { workspace = true, features = ["tokio", "zstd"] }
-base64 = { workspace = true, optional = true }
+async-compression = { workspace = true, features = ["gzip", "tokio", "zstd"] }
 bytes = { workspace = true }
 futures-util = { workspace = true }
 infer = { workspace = true }
@@ -31,6 +33,7 @@ zstd-safe = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }
+flate2 = { workspace = true }
 futures-util = { workspace = true }
 http-body-util = { workspace = true }
 jsonwebtoken = { workspace = true }
@@ -42,14 +45,8 @@ zstd = { workspace = true }
 
 [features]
 default = ["native-tls", "hickory-dns"]
-multipart = ["dep:base64"]
 resumable-upload-api = []
 
 rustls = ["reqwest/rustls"]
 native-tls = ["reqwest/native-tls"]
 hickory-dns = ["reqwest/hickory-dns"]
-
-[[test]]
-name = "multipart"
-path = "tests/multipart.rs"
-required-features = ["multipart"]

@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 /// Errors that can happen within the objectstore-client
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     /// Any error emitted from the underlying [`reqwest`] client.
     #[error(transparent)]
@@ -19,8 +20,8 @@ pub enum Error {
     #[error("invalid scope: {0}")]
     InvalidScope(#[from] objectstore_types::scope::InvalidScopeError),
     /// Error when creating auth tokens, such as invalid keys.
-    #[error(transparent)]
-    TokenError(#[from] jsonwebtoken::errors::Error),
+    #[error("failed to create auth token: {0}")]
+    TokenError(#[from] crate::TokenError),
     /// Error when the permissions requested for a token exceed those granted to the
     /// [`TokenGenerator`](crate::TokenGenerator).
     #[error("requested permissions not granted to this token generator: {escalated:?}")]
@@ -55,24 +56,28 @@ pub enum Error {
         /// The error message.
         message: String,
     },
-    /// Error when part number validation fails (must be >= 1).
-    #[error("invalid part number: {0}")]
-    InvalidPartNumber(u32),
-    /// Error when upload ID validation fails.
-    #[error(transparent)]
-    InvalidUploadId(#[from] objectstore_types::multipart::InvalidUploadId),
-    /// Error returned when attempting to complete a multipart upload.
-    #[error("multipart complete failed ({code}): {message}")]
-    MultipartComplete {
-        /// The error code or kind.
-        code: String,
-        /// The error message.
-        message: String,
-    },
     /// A resumable upload session expired, was canceled, or could otherwise not be found.
     #[cfg(feature = "resumable-upload-api")]
     #[error("resumable upload session is not available")]
     ResumableUploadUnavailable,
+    /// A resumable chunk starts at a different offset than the server currently holds.
+    #[cfg(feature = "resumable-upload-api")]
+    #[error("upload offset mismatch (server holds {offset} bytes)")]
+    UploadOffsetMismatch {
+        /// The server's authoritative upload offset in bytes.
+        offset: u64,
+    },
+    /// A non-final chunk is shorter than the upload granularity.
+    #[cfg(feature = "resumable-upload-api")]
+    #[error(
+        "non-final chunk {chunk_length} is smaller than upload granularity {upload_granularity}"
+    )]
+    ChunkTooSmall {
+        /// The declared length of the chunk.
+        chunk_length: u64,
+        /// The upload granularity in bytes.
+        upload_granularity: u64,
+    },
 }
 
 /// A convenience alias that defaults our [`Error`] type.

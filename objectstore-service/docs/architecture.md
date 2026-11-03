@@ -80,7 +80,8 @@ and large, infrequently-accessed ones:
 
 The threshold is **1 MiB**. `TieredStorage` routes objects at or below this
 size to the high-volume backend; objects exceeding it go to the long-term
-backend.
+backend. The backend rejects Resumable Upload creation requests when the
+given object size is below this threshold.
 
 See [`backend::StorageConfig`] for available backend implementations.
 
@@ -124,8 +125,8 @@ COGS pipelines). To calculate, for example, the compute costs for the
 ## Compute COGS
 
 Objectstore emits the `objectstore.cogs.usage` counter with an `app_feature`
-label derived from the usecase once per operation. Multipart and batch
-operations are also counted. This counter can be straightforwardly summed by
+label derived from the usecase once per operation. Batch operations are also
+counted. This counter can be straightforwardly summed by
 `app_feature`.
 
 The counter is incremented in the [`CountingBackend`](backend::counting::CountingBackend)
@@ -181,14 +182,21 @@ See also: [`objectstore_inventory_tracker`] documentation.
 # Change Streams
 
 Every backend publishes the changes it makes to the objects it stores as a
-[`ChangeStream`](change_stream::ChangeStream). It is a fire-and-forget,
-per-backend feed of three operations:
+[`ChangeStream`](change_stream::ChangeStream). It is a per-backend feed of
+three operations:
 
 - `write(id, size, expires_at)`: `id` now occupies `size` bytes. Used for both
   new objects and overwrites.
 - `update(id, expires_at)`: `id`'s expiration moved while its stored size is
   unchanged. In practice this is a TTI bump.
 - `delete(id)`: `id` was deleted explicitly.
+
+Writes and updates are reported twice: `begin_*` before the storage operation
+and `commit_*` after it succeeds. Deletes are only committed. A failed
+`begin_*` fails the request before storage is touched, while `commit_*` cannot
+fail. Resumable uploads call `begin_write` when they are created.
+A `begin_*` is not always followed by a `commit_*`, so `begin_*` gives an upper
+bound on what is stored, e.g. for cleaning up expired data.
 
 The stream describes physical storage per backend. When using
 [`TieredStorage`](backend::tiered::TieredStorage), objects that are stored in
@@ -275,8 +283,10 @@ defaults to 1,000 and is configurable by the server through
 `service.background_queue`. Graceful shutdown drains all accepted extensions.
 
 Apart from the expiration policy, metadata during object creation must carry a
-`time_expires` field with the correct expiration timestamp. This is ensured
-during metadata creation by the server.
+`time_expires` field with the correct initial expiration timestamp. This is
+ensured during metadata creation by the server. Explicit deadline extensions
+can later increase `time_expires`. For TTL objects, this operation
+also updates the policy's duration.
 
 # Backpressure
 
@@ -329,18 +339,13 @@ Not all backends support resumable uploads. A backend returns no session when it
 particular upload; this is a routine outcome rather than an error. Acceptance can depend on the
 declared size, the metadata, or whether resuming is possible in principle.
 
-The offset returned by every chunk response is authoritative. A backend may accept the full
-request body but persist only a prefix (for example, up to an internal alignment boundary), so a
-client must not advance by the submitted `Content-Length` on its own. It continues from the
-preceding response's offset, or performs an explicit offset query after an ambiguous failure.
-
-## Multipart Uploads
-
-When the configured backend supports it, [`StorageService`] exposes multipart
-upload operations (initiate, upload part, list parts, complete, abort). These
-delegate to the [`MultipartUploadBackend`](backend::common::MultipartUploadBackend)
-trait, accessed via [`Backend::as_multipart_upload_backend`](backend::common::Backend::as_multipart_upload_backend).
-Multipart operations share the same concurrency limiter as regular operations.
+The offset returned by every chunk response is authoritative. Session creation reports each
+upload's granularity in bytes, or zero when it imposes none. For a positive granularity, a backend
+may accept the full request body but persist only the largest aligned prefix, so a client must not
+advance by the submitted `Content-Length` on its own. Non-empty, non-final chunks shorter than one
+granularity unit are rejected; the final chunk is exempt. Clients should use granularity-sized
+multiples and continue from the preceding response's offset, or perform an explicit offset query
+after an ambiguous failure.
 
 ## Streaming Concurrency
 

@@ -22,7 +22,6 @@ use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::sync::Arc;
-use std::time::SystemTime;
 
 use futures_util::StreamExt;
 use objectstore_types::metadata::Metadata;
@@ -38,18 +37,14 @@ use tokio_util::io::{ReaderStream, StreamReader};
 use uuid::Uuid;
 
 use crate::backend::common::{
-    Backend, DeleteResponse, GetResponse, MultipartUploadBackend, PutResponse,
+    self, Backend, DeleteResponse, ExpiryUpdate, GetResponse, PutResponse, SetExpiryResponse,
 };
 use crate::change_stream::{
     ChangeStream, ChangeStreamFactory, CostTrackerStreamConfig, flush_change_stream,
 };
 use crate::error::{Error, ErrorKind, Result, ResultExt as _};
 use crate::id::ObjectId;
-use crate::multipart::{
-    AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
-    ListPartsResponse, Part, PartNumber, UploadId, UploadPartResponse,
-};
-use crate::resumable::BackendToken;
+use crate::resumable::{BackendToken, Session};
 use crate::stream::{self, ClientStream};
 
 /// Options for owner-only files on Unix, further restricted by umask.
@@ -152,10 +147,6 @@ impl Backend for LocalFsBackend {
         "local-fs"
     }
 
-    fn as_multipart_upload_backend(&self) -> Result<&dyn MultipartUploadBackend> {
-        Ok(self)
-    }
-
     #[tracing::instrument(level = "debug", fields(?id), skip_all)]
     async fn put_object(
         &self,
@@ -166,6 +157,9 @@ impl Backend for LocalFsBackend {
     ) -> Result<PutResponse> {
         let path = self.path(id);
         objectstore_log::debug!(path=%path.display(), "Writing to local_fs backend");
+        self.change_stream
+            .begin_write(id, metadata.time_expires)
+            .await?;
         create_directories(path.parent().unwrap()).await.context(
             ErrorKind::BackendFailure,
             "creating local-fs object directory",
@@ -191,7 +185,8 @@ impl Backend for LocalFsBackend {
         draft.publish().await?;
 
         self.change_stream
-            .write(id, stored_size, metadata.time_expires);
+            .commit_write(id, stored_size, metadata.time_expires)
+            .await;
 
         Ok(())
     }
@@ -241,14 +236,14 @@ impl Backend for LocalFsBackend {
     async fn set_expiry(
         &self,
         id: &ObjectId,
-        expire_at: Timestamp,
+        target: ExpiryUpdate,
         access_time: Timestamp,
-    ) -> Result<bool> {
+    ) -> Result<SetExpiryResponse> {
         let _guard = self.locks.acquire(id).await?;
 
         let path = self.path(id);
         let Some(object) = ObjectFile::try_open(&path, access_time).await? else {
-            return Ok(false);
+            return Ok(SetExpiryResponse::NotFound);
         };
         let ObjectFile {
             mut metadata,
@@ -257,12 +252,22 @@ impl Backend for LocalFsBackend {
         } = object;
 
         let Some(current_expiry) = metadata.time_expires else {
-            return Ok(false);
+            return Ok(SetExpiryResponse::Rejected);
+        };
+        let Some(expire_at) = target.resolve(metadata.time_created, access_time)? else {
+            return Ok(SetExpiryResponse::Rejected);
         };
         if current_expiry >= expire_at {
-            return Ok(true); // already satisfied
+            return Ok(SetExpiryResponse::Satisfied(expire_at)); // already satisfied
         }
+        metadata.expiration_policy = common::extended_expiration_policy(
+            metadata.expiration_policy,
+            metadata.time_created,
+            current_expiry,
+            expire_at,
+        )?;
         metadata.time_expires = Some(expire_at);
+        self.change_stream.begin_update(id, Some(expire_at)).await?;
 
         let mut draft = Draft::create(&path, &metadata).await?;
         tokio::io::copy(&mut reader, draft.writer()).await.context(
@@ -273,9 +278,9 @@ impl Backend for LocalFsBackend {
         draft.prepare().await?;
         draft.publish().await?;
 
-        self.change_stream.update(id, Some(expire_at));
+        self.change_stream.commit_update(id, Some(expire_at)).await;
 
-        Ok(true)
+        Ok(SetExpiryResponse::Satisfied(expire_at))
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
@@ -289,7 +294,7 @@ impl Backend for LocalFsBackend {
         objectstore_log::debug!("Deleting from local_fs backend");
         let path = self.path(id);
         match tokio::fs::remove_file(path).await {
-            Ok(()) => self.change_stream.delete(id),
+            Ok(()) => self.change_stream.commit_delete(id).await,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 objectstore_log::debug!("Object not found");
             }
@@ -301,13 +306,16 @@ impl Backend for LocalFsBackend {
         Ok(())
     }
 
-    #[tracing::instrument(level = "debug", fields(?id, total_length), skip_all)]
+    #[tracing::instrument(level = "debug", fields(?id), skip_all)]
     async fn create_upload_session(
         &self,
         id: &ObjectId,
         metadata: &Metadata,
-        total_length: NonZeroU64,
+        _upload_length: NonZeroU64,
     ) -> Result<Option<BackendToken>> {
+        self.change_stream
+            .begin_write(id, metadata.time_expires)
+            .await?;
         let upload_id = uuid::Uuid::now_v7();
         let path = self.upload_path(upload_id);
         create_directories(path.parent().unwrap()).await.context(
@@ -315,32 +323,32 @@ impl Backend for LocalFsBackend {
             "creating local-fs object directory",
         )?;
         UploadFile::create(&path, metadata).await?;
-        Ok(Some(format!("{total_length}.{upload_id}")))
+        Ok(Some(upload_id.to_string()))
     }
 
     // In this backend, if all the bytes of a resumable upload have been written but publication failed,
     // an empty chunk or offset query will retry publication.
-    #[tracing::instrument(level = "debug", fields(?id, offset, content_length), skip_all)]
+    #[tracing::instrument(level = "debug", fields(?session, offset, content_length), skip_all)]
     async fn put_chunk(
         &self,
-        id: &ObjectId,
-        token: &BackendToken,
+        session: &Session,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
     ) -> Result<UploadProgress> {
-        let session = UploadSession::from_token(token)?;
+        let upload_id =
+            Uuid::parse_str(&session.backend_token).map_err(|_| ErrorKind::UnknownUploadSession)?;
         offset
             .checked_add(content_length)
-            .filter(|end| *end <= session.total_length.get())
+            .filter(|end| *end <= session.upload_length.get())
             .ok_or(ErrorKind::ChunkExceedsUploadLength {
                 offset,
                 content_length,
-                upload_length: session.total_length.get(),
+                upload_length: session.upload_length.get(),
             })?;
-        let _guard = self.locks.acquire(id).await?;
+        let _guard = self.locks.acquire(&session.object_id).await?;
 
-        let upload_path = self.upload_path(session.upload_id);
+        let upload_path = self.upload_path(upload_id);
         let mut upload = UploadFile::open(&upload_path).await?;
         if content_length != 0 && offset != upload.offset() {
             return Err(ErrorKind::UploadOffsetMismatch {
@@ -352,13 +360,13 @@ impl Backend for LocalFsBackend {
         let reader = StreamReader::new(stream).take(content_length);
         let persisted_offset = upload.append(reader).await?;
 
-        if persisted_offset != session.total_length.get() {
+        if persisted_offset != session.upload_length.get() {
             return Ok(UploadProgress::Incomplete {
                 offset: persisted_offset,
             });
         }
 
-        let object_path = self.path(id);
+        let object_path = self.path(&session.object_id);
         create_directories(object_path.parent().unwrap())
             .await
             .context(
@@ -366,21 +374,24 @@ impl Backend for LocalFsBackend {
                 "creating local-fs object directory",
             )?;
         let (stored_size, expires_at) = upload.publish(object_path).await?;
-        self.change_stream.write(id, stored_size, expires_at);
+        self.change_stream
+            .commit_write(&session.object_id, stored_size, expires_at)
+            .await;
         Ok(UploadProgress::Complete)
     }
 
-    #[tracing::instrument(level = "debug", fields(?id), skip_all)]
-    async fn upload_offset(&self, id: &ObjectId, token: &BackendToken) -> Result<UploadProgress> {
-        self.put_chunk(id, token, 0, 0, futures_util::stream::empty().boxed())
+    #[tracing::instrument(level = "debug", fields(?session), skip_all)]
+    async fn upload_offset(&self, session: &Session) -> Result<UploadProgress> {
+        self.put_chunk(session, 0, 0, futures_util::stream::empty().boxed())
             .await
     }
 
-    #[tracing::instrument(level = "debug", fields(?id), skip_all)]
-    async fn cancel_upload(&self, id: &ObjectId, token: &BackendToken) -> Result<()> {
-        let session = UploadSession::from_token(token)?;
-        let _guard = self.locks.acquire(id).await?;
-        let path = self.upload_path(session.upload_id);
+    #[tracing::instrument(level = "debug", fields(?session), skip_all)]
+    async fn cancel_upload(&self, session: &Session) -> Result<()> {
+        let upload_id =
+            Uuid::parse_str(&session.backend_token).map_err(|_| ErrorKind::UnknownUploadSession)?;
+        let _guard = self.locks.acquire(&session.object_id).await?;
+        let path = self.upload_path(upload_id);
         match tokio::fs::remove_file(&path).await {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -395,349 +406,6 @@ impl Backend for LocalFsBackend {
 
     async fn join(&self) {
         flush_change_stream(&self.change_stream).await;
-    }
-}
-
-impl LocalFsBackend {
-    fn multipart_dir(&self, id: &ObjectId, upload_id: &UploadId) -> PathBuf {
-        self.path
-            .join("__multipart__")
-            .join(id.as_storage_path().to_string())
-            .join(upload_id.as_str())
-    }
-}
-
-#[async_trait::async_trait]
-impl MultipartUploadBackend for LocalFsBackend {
-    async fn initiate_multipart(
-        &self,
-        id: &ObjectId,
-        metadata: &Metadata,
-    ) -> Result<InitiateMultipartResponse> {
-        let upload_id = UploadId::new(Uuid::now_v7().to_string())?;
-        let dir = self.multipart_dir(id, &upload_id);
-        create_directories(&dir).await.context(
-            ErrorKind::BackendFailure,
-            "creating local-fs multipart upload",
-        )?;
-
-        let meta_path = dir.join("metadata.json");
-        let metadata_json = serde_json::to_string(metadata)
-            .context(ErrorKind::Internal, "encoding local-fs multipart metadata")?;
-        let mut file = OpenOptions::from(file_options())
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(meta_path)
-            .await
-            .context(
-                ErrorKind::BackendFailure,
-                "creating local-fs multipart metadata",
-            )?;
-        file.write_all(metadata_json.as_bytes()).await.context(
-            ErrorKind::BackendFailure,
-            "writing local-fs multipart metadata",
-        )?;
-        file.flush().await.context(
-            ErrorKind::BackendFailure,
-            "flushing local-fs multipart metadata",
-        )?;
-
-        Ok(upload_id)
-    }
-
-    async fn upload_part(
-        &self,
-        id: &ObjectId,
-        upload_id: &UploadId,
-        part_number: PartNumber,
-        content_length: u64,
-        _content_md5: Option<&str>,
-        body: ClientStream,
-    ) -> Result<UploadPartResponse> {
-        let dir = self.multipart_dir(id, upload_id);
-        if !tokio::fs::try_exists(&dir).await.context(
-            ErrorKind::BackendFailure,
-            "checking local-fs multipart upload",
-        )? {
-            return Err(Error::new(
-                ErrorKind::BackendFailure,
-                "local-fs multipart upload not found",
-            ));
-        }
-
-        let etag = format!("\"etag-{part_number}-{content_length}\"");
-
-        let header = serde_json::json!({
-            "etag": etag,
-            "uploaded_at": SystemTime::now(),
-            "size": content_length,
-        });
-        let header_line = serde_json::to_string(&header)
-            .context(ErrorKind::Internal, "encoding local-fs part header")?;
-
-        let part_path = dir.join(format!("{part_number}.part"));
-        let file = OpenOptions::from(file_options())
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(part_path)
-            .await
-            .context(
-                ErrorKind::BackendFailure,
-                "opening local-fs multipart part for writing",
-            )?;
-
-        let mut reader = pin!(StreamReader::new(body));
-        let mut writer = BufWriter::new(file);
-        writer
-            .write_all(header_line.as_bytes())
-            .await
-            .context(ErrorKind::BackendFailure, "writing local-fs part header")?;
-        writer
-            .write_all(b"\n")
-            .await
-            .context(ErrorKind::BackendFailure, "writing local-fs part header")?;
-
-        let _bytes_copied = tokio::io::copy(&mut reader, &mut writer)
-            .await
-            .map_err(|e| match stream::unpack_client_error(&e) {
-                Some(ce) => Error::from(ce),
-                None => Error::with_context(
-                    ErrorKind::BackendFailure,
-                    "writing local-fs multipart part payload",
-                    e,
-                ),
-            })?;
-
-        // TODO: validate bytes_copied against content_length and return a BadRequest-style
-        // error. Needs a service-layer error variant that maps to HTTP 400 without abusing
-        // ClientError (which is meant for stream errors).
-
-        writer.flush().await.context(
-            ErrorKind::BackendFailure,
-            "flushing local-fs multipart part",
-        )?;
-        let file = writer.into_inner();
-        file.sync_data()
-            .await
-            .context(ErrorKind::BackendFailure, "syncing local-fs multipart part")?;
-        drop(file);
-
-        Ok(etag)
-    }
-
-    async fn list_parts(
-        &self,
-        id: &ObjectId,
-        upload_id: &UploadId,
-        max_parts: Option<u32>,
-        part_number_marker: Option<PartNumber>,
-    ) -> Result<ListPartsResponse> {
-        let dir = self.multipart_dir(id, upload_id);
-        if !tokio::fs::try_exists(&dir).await.context(
-            ErrorKind::BackendFailure,
-            "checking local-fs multipart upload",
-        )? {
-            return Err(Error::new(
-                ErrorKind::BackendFailure,
-                "local-fs multipart upload not found",
-            ));
-        }
-
-        let mut entries = tokio::fs::read_dir(&dir).await.context(
-            ErrorKind::BackendFailure,
-            "listing local-fs multipart parts",
-        )?;
-        let mut parts = Vec::new();
-
-        while let Some(entry) = entries.next_entry().await.context(
-            ErrorKind::BackendFailure,
-            "listing local-fs multipart parts",
-        )? {
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            let Some(pn_str) = name_str.strip_suffix(".part") else {
-                continue;
-            };
-            let Ok(pn) = pn_str.parse::<PartNumber>() else {
-                continue;
-            };
-
-            if part_number_marker.is_some_and(|marker| pn <= marker) {
-                continue;
-            }
-
-            let file = tokio::fs::File::open(entry.path())
-                .await
-                .context(ErrorKind::BackendFailure, "opening local-fs multipart part")?;
-            let mut reader = BufReader::new(file);
-            let mut header_line = String::new();
-            reader
-                .read_line(&mut header_line)
-                .await
-                .context(ErrorKind::BackendFailure, "reading local-fs part header")?;
-            let header: serde_json::Value = serde_json::from_str(header_line.trim_end())
-                .context(ErrorKind::CorruptData, "decoding local-fs part header")?;
-
-            parts.push(Part {
-                part_number: pn,
-                etag: header["etag"].as_str().unwrap_or("").to_string(),
-                last_modified: serde_json::from_value(header["uploaded_at"].clone())
-                    .unwrap_or(SystemTime::UNIX_EPOCH),
-                size: header["size"].as_u64().unwrap_or(0),
-            });
-        }
-
-        parts.sort_by_key(|p| p.part_number);
-
-        let max = max_parts.unwrap_or(u32::MAX) as usize;
-        let is_truncated = parts.len() > max;
-        parts.truncate(max);
-
-        let next_part_number_marker = if is_truncated {
-            parts.last().map(|p| p.part_number)
-        } else {
-            None
-        };
-
-        Ok(ListPartsResponse {
-            parts,
-            is_truncated,
-            next_part_number_marker,
-        })
-    }
-
-    async fn abort_multipart(
-        &self,
-        id: &ObjectId,
-        upload_id: &UploadId,
-    ) -> Result<AbortMultipartResponse> {
-        let dir = self.multipart_dir(id, upload_id);
-        if tokio::fs::try_exists(&dir).await.context(
-            ErrorKind::BackendFailure,
-            "checking local-fs multipart upload",
-        )? {
-            tokio::fs::remove_dir_all(dir).await.context(
-                ErrorKind::BackendFailure,
-                "removing local-fs multipart upload",
-            )?;
-        }
-        Ok(())
-    }
-
-    async fn complete_multipart(
-        &self,
-        id: &ObjectId,
-        upload_id: &UploadId,
-        parts: Vec<CompletedPart>,
-        _access_time: Timestamp,
-    ) -> Result<CompleteMultipartResponse> {
-        let dir = self.multipart_dir(id, upload_id);
-        if !tokio::fs::try_exists(&dir).await.context(
-            ErrorKind::BackendFailure,
-            "checking local-fs multipart upload",
-        )? {
-            return Err(Error::new(
-                ErrorKind::BackendFailure,
-                "local-fs multipart upload not found",
-            ));
-        }
-
-        // Read metadata
-        let meta_path = dir.join("metadata.json");
-        let meta_bytes = tokio::fs::read(&meta_path).await.context(
-            ErrorKind::BackendFailure,
-            "reading local-fs multipart metadata",
-        )?;
-        let metadata: Metadata = serde_json::from_slice(&meta_bytes).context(
-            ErrorKind::CorruptData,
-            "decoding local-fs multipart metadata",
-        )?;
-
-        // TODO: validate that parts are in ascending part_number order and reject with
-        // InvalidPartOrder if not (matches S3/GCS behavior). Needs a proper client error variant.
-
-        // Validate all parts (headers only) before writing anything
-        for completed in &parts {
-            let part_path = dir.join(format!("{}.part", completed.part_number));
-            if !tokio::fs::try_exists(&part_path).await.context(
-                ErrorKind::BackendFailure,
-                "checking local-fs multipart part",
-            )? {
-                return Ok(Some(crate::multipart::CompleteMultipartError {
-                    code: "InvalidPart".into(),
-                    message: format!("part number {} was not uploaded", completed.part_number),
-                }));
-            }
-
-            let file = tokio::fs::File::open(&part_path)
-                .await
-                .context(ErrorKind::BackendFailure, "opening local-fs multipart part")?;
-            let mut reader = BufReader::new(file);
-            let mut header_line = String::new();
-            reader
-                .read_line(&mut header_line)
-                .await
-                .context(ErrorKind::BackendFailure, "reading local-fs part header")?;
-            let header: serde_json::Value = serde_json::from_str(header_line.trim_end())
-                .context(ErrorKind::CorruptData, "decoding local-fs part header")?;
-
-            let stored_etag = header["etag"].as_str().unwrap_or("");
-            if stored_etag != completed.etag {
-                return Ok(Some(crate::multipart::CompleteMultipartError {
-                    code: "InvalidPart".into(),
-                    message: format!(
-                        "etag mismatch for part {}: expected {}, got {}",
-                        completed.part_number, stored_etag, completed.etag
-                    ),
-                }));
-            }
-        }
-
-        // Assemble the parts into a draft before publishing the object.
-        let path = self.path(id);
-        create_directories(path.parent().unwrap()).await.context(
-            ErrorKind::BackendFailure,
-            "creating local-fs object directory",
-        )?;
-        let mut draft = Draft::create(&path, &metadata).await?;
-
-        let mut payload_size = 0;
-        for completed in &parts {
-            let part_path = dir.join(format!("{}.part", completed.part_number));
-            let file = tokio::fs::File::open(&part_path)
-                .await
-                .context(ErrorKind::BackendFailure, "opening local-fs multipart part")?;
-            let mut reader = BufReader::new(file);
-            let mut header_line = String::new();
-            reader
-                .read_line(&mut header_line)
-                .await
-                .context(ErrorKind::BackendFailure, "reading local-fs part header")?;
-            payload_size += tokio::io::copy(&mut reader, draft.writer()).await.context(
-                ErrorKind::BackendFailure,
-                "assembling local-fs object payload",
-            )?;
-        }
-
-        let stored_size = draft.preamble_len() + payload_size;
-
-        draft.prepare().await?;
-        let guard = self.locks.acquire(id).await?;
-        draft.publish().await?;
-        drop(guard);
-
-        self.change_stream
-            .write(id, stored_size, metadata.time_expires);
-
-        // Clean up multipart state
-        tokio::fs::remove_dir_all(dir).await.context(
-            ErrorKind::BackendFailure,
-            "removing local-fs multipart upload",
-        )?;
-
-        Ok(None)
     }
 }
 
@@ -794,30 +462,6 @@ impl ObjectLocks {
         .await
         .context(ErrorKind::Internal, "waiting for local-fs object lock")?
         .context(ErrorKind::BackendFailure, "acquiring local-fs object lock")
-    }
-}
-
-#[derive(Debug)]
-struct UploadSession {
-    total_length: NonZeroU64,
-    upload_id: Uuid,
-}
-
-impl UploadSession {
-    fn from_token(token: &BackendToken) -> Result<Self> {
-        let (length, upload_id) = token
-            .split_once('.')
-            .ok_or(ErrorKind::UnknownUploadSession)?;
-        let total_length = length
-            .parse::<NonZeroU64>()
-            .map_err(|_| ErrorKind::UnknownUploadSession)?;
-        let upload_id_str = upload_id;
-        let upload_id =
-            Uuid::parse_str(upload_id_str).map_err(|_| ErrorKind::UnknownUploadSession)?;
-        Ok(Self {
-            total_length,
-            upload_id,
-        })
     }
 }
 
@@ -1118,7 +762,6 @@ fn create_tempfile(parent: &Path) -> io::Result<tempfile::NamedTempFile> {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::num::NonZeroU32;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -1134,15 +777,21 @@ mod tests {
     use objectstore_inventory_tracker::test_utils::DummyProducer;
 
     use super::*;
+    use crate::backend::common::ExpiryTarget;
     use crate::id::ObjectContext;
     use crate::stream;
 
-    async fn upload_token(backend: &LocalFsBackend, id: &ObjectId, length: u64) -> BackendToken {
-        backend
+    async fn upload_token(backend: &LocalFsBackend, id: &ObjectId, length: u64) -> Session {
+        let backend_token = backend
             .create_upload_session(id, &Metadata::default(), NonZeroU64::new(length).unwrap())
             .await
             .unwrap()
-            .unwrap()
+            .unwrap();
+        Session {
+            object_id: id.clone(),
+            upload_length: NonZeroU64::new(length).unwrap(),
+            backend_token,
+        }
     }
 
     #[tokio::test]
@@ -1155,14 +804,19 @@ mod tests {
         };
 
         // Create a session and verify its initial state on disk.
+        let upload_length = NonZeroU64::new(6).unwrap();
         let token = backend
-            .create_upload_session(&id, &metadata, NonZeroU64::new(6).unwrap())
+            .create_upload_session(&id, &metadata, upload_length)
             .await
             .unwrap()
             .unwrap();
-        let session = UploadSession::from_token(&token).unwrap();
-        assert_eq!(session.total_length.get(), 6);
-        let upload_path = backend.upload_path(session.upload_id);
+        let token = Session {
+            object_id: id.clone(),
+            upload_length,
+            backend_token: token,
+        };
+        let upload_id = Uuid::parse_str(&token.backend_token).unwrap();
+        let upload_path = backend.upload_path(upload_id);
         assert_eq!(
             upload_path.parent().unwrap().file_name().unwrap(),
             "uploads"
@@ -1171,39 +825,39 @@ mod tests {
 
         // Upload the first chunk and verify that only the session advances.
         assert_eq!(
-            backend.upload_offset(&id, &token).await.unwrap(),
+            backend.upload_offset(&token).await.unwrap(),
             UploadProgress::Incomplete { offset: 0 }
         );
         assert_eq!(
             backend
-                .put_chunk(&id, &token, 2, 0, stream::single(""))
+                .put_chunk(&token, 2, 0, stream::single(""))
                 .await
                 .unwrap(),
             UploadProgress::Incomplete { offset: 0 }
         );
         assert_eq!(
             backend
-                .put_chunk(&id, &token, 0, 3, stream::single("abc"))
+                .put_chunk(&token, 0, 3, stream::single("abc"))
                 .await
                 .unwrap(),
             UploadProgress::Incomplete { offset: 3 }
         );
         assert!(!backend.path(&id).exists());
         assert_eq!(
-            backend.upload_offset(&id, &token).await.unwrap(),
+            backend.upload_offset(&token).await.unwrap(),
             UploadProgress::Incomplete { offset: 3 }
         );
 
         // Zero-length chunks report current progress, while stale non-empty offsets fail.
         assert_eq!(
             backend
-                .put_chunk(&id, &token, 0, 0, stream::single(""))
+                .put_chunk(&token, 0, 0, stream::single(""))
                 .await
                 .unwrap(),
             UploadProgress::Incomplete { offset: 3 }
         );
         let error = backend
-            .put_chunk(&id, &token, 0, 3, stream::single("abc"))
+            .put_chunk(&token, 0, 3, stream::single("abc"))
             .await
             .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::UploadOffsetMismatch { offset: 3 });
@@ -1211,7 +865,7 @@ mod tests {
         // Upload the final chunk and verify atomic publication removes the session.
         assert_eq!(
             backend
-                .put_chunk(&id, &token, 3, 3, stream::single("def"))
+                .put_chunk(&token, 3, 3, stream::single("def"))
                 .await
                 .unwrap(),
             UploadProgress::Complete
@@ -1225,7 +879,7 @@ mod tests {
         assert_eq!(stored_metadata.content_type, metadata.content_type);
         assert_eq!(stream::read_to_vec(payload).await.unwrap(), b"abcdef");
         assert_eq!(
-            backend.upload_offset(&id, &token).await.unwrap_err().kind(),
+            backend.upload_offset(&token).await.unwrap_err().kind(),
             ErrorKind::UnknownUploadSession
         );
     }
@@ -1241,18 +895,16 @@ mod tests {
             // A directory at the destination prevents rename after all bytes are persisted.
             tokio::fs::create_dir_all(&object_path).await.unwrap();
             let error = backend
-                .put_chunk(&id, &token, 0, 4, stream::single("data"))
+                .put_chunk(&token, 0, 4, stream::single("data"))
                 .await
                 .unwrap_err();
             assert_eq!(error.kind(), ErrorKind::BackendFailure);
             tokio::fs::remove_dir(&object_path).await.unwrap();
 
             let progress = if query_offset {
-                backend.upload_offset(&id, &token).await
+                backend.upload_offset(&token).await
             } else {
-                backend
-                    .put_chunk(&id, &token, 4, 0, stream::single(""))
-                    .await
+                backend.put_chunk(&token, 4, 0, stream::single("")).await
             };
             assert_eq!(progress.unwrap(), UploadProgress::Complete);
             let (_, _, payload) = backend
@@ -1262,7 +914,7 @@ mod tests {
                 .unwrap();
             assert_eq!(stream::read_to_vec(payload).await.unwrap(), b"data");
             assert_eq!(
-                backend.upload_offset(&id, &token).await.unwrap_err().kind(),
+                backend.upload_offset(&token).await.unwrap_err().kind(),
                 ErrorKind::UnknownUploadSession
             );
         }
@@ -1276,7 +928,7 @@ mod tests {
 
         // Persist a prefix, then disconnect after writing one byte of the next chunk.
         backend
-            .put_chunk(&id, &token, 0, 2, stream::single("ab"))
+            .put_chunk(&token, 0, 2, stream::single("ab"))
             .await
             .unwrap();
         let broken = futures_stream::iter([
@@ -1286,20 +938,17 @@ mod tests {
             ))),
         ])
         .boxed();
-        let error = backend
-            .put_chunk(&id, &token, 2, 2, broken)
-            .await
-            .unwrap_err();
+        let error = backend.put_chunk(&token, 2, 2, broken).await.unwrap_err();
         assert_eq!(error.kind(), ErrorKind::ClientStream);
 
         // Resume from the partial byte and verify the complete object.
         assert_eq!(
-            backend.upload_offset(&id, &token).await.unwrap(),
+            backend.upload_offset(&token).await.unwrap(),
             UploadProgress::Incomplete { offset: 3 }
         );
         assert_eq!(
             backend
-                .put_chunk(&id, &token, 3, 1, stream::single("d"))
+                .put_chunk(&token, 3, 1, stream::single("d"))
                 .await
                 .unwrap(),
             UploadProgress::Complete
@@ -1322,8 +971,8 @@ mod tests {
         // Complete both sessions concurrently through their shared object lock.
         let writes = async {
             tokio::join!(
-                backend.put_chunk(&id, &first, 0, 3, stream::single("one")),
-                backend.put_chunk(&id, &second, 0, 3, stream::single("two")),
+                backend.put_chunk(&first, 0, 3, stream::single("one")),
+                backend.put_chunk(&second, 0, 3, stream::single("two")),
             )
         };
         let (first_result, second_result) = tokio::time::timeout(Duration::from_secs(2), writes)
@@ -1354,7 +1003,7 @@ mod tests {
         );
 
         let id = ObjectId::random(ObjectContext {
-            usecase: "testing".into(),
+            usecase: "testing".parse().unwrap(),
             scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
         });
 
@@ -1404,7 +1053,11 @@ mod tests {
         let mut slots = HashMap::new();
         let (first_id, colliding_id) = (0..=65_536)
             .find_map(|key| {
-                let id = ObjectId::from_parts("testing".into(), Scopes::empty(), key.to_string());
+                let id = ObjectId::from_parts(
+                    "testing".parse().unwrap(),
+                    Scopes::empty(),
+                    key.to_string(),
+                );
                 let path = first_locks.path(&id);
                 slots.insert(path, id.clone()).map(|first| (first, id))
             })
@@ -1443,16 +1096,17 @@ mod tests {
     #[tokio::test]
     async fn missing_object_expiry_does_not_block_descendant() {
         let (_tempdir, backend) = make_backend();
-        let id = ObjectId::from_parts("testing".into(), Scopes::empty(), "foo".into());
-        assert!(
-            !backend
+        let id = ObjectId::from_parts("testing".parse().unwrap(), Scopes::empty(), "foo".into());
+        assert_eq!(
+            backend
                 .set_expiry(
                     &id,
-                    Timestamp::now() + Duration::from_hours(1),
+                    ExpiryTarget::At(Timestamp::now() + Duration::from_hours(1)).into(),
                     Timestamp::now()
                 )
                 .await
-                .unwrap()
+                .unwrap(),
+            SetExpiryResponse::NotFound
         );
         let descendant = ObjectId::new(id.context.clone(), "foo/bar".into());
         backend
@@ -1568,38 +1222,61 @@ mod tests {
 
     #[tokio::test]
     async fn set_expiry() {
-        let (_tempdir, backend) = make_backend();
-        let id = make_id();
-        let old_expiry = Timestamp::now() + Duration::from_hours(1);
-        let metadata = Metadata {
-            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
-            time_expires: Some(old_expiry),
-            custom: [("preserved".into(), "yes".into())].into(),
-            ..Default::default()
-        };
-        backend
-            .put_object(&id, &metadata, stream::single("payload"), Timestamp::now())
-            .await
-            .unwrap();
-
-        let requested = old_expiry + Duration::from_hours(1) + Duration::from_nanos(999);
-        assert!(
+        for is_ttl in [false, true] {
+            let (_tempdir, backend) = make_backend();
+            let id = make_id();
+            let created = Timestamp::now();
+            let old_expiry = created + Duration::from_hours(1);
+            let metadata = Metadata {
+                expiration_policy: if is_ttl {
+                    ExpirationPolicy::TimeToLive(Duration::from_hours(1))
+                } else {
+                    ExpirationPolicy::TimeToIdle(Duration::from_hours(1))
+                },
+                time_created: Some(created),
+                time_expires: Some(old_expiry),
+                custom: [("preserved".into(), "yes".into())].into(),
+                ..Default::default()
+            };
             backend
-                .set_expiry(&id, requested, Timestamp::now())
+                .put_object(&id, &metadata, stream::single("payload"), Timestamp::now())
+                .await
+                .unwrap();
+
+            let duration = Duration::from_hours(2) + Duration::from_nanos(999);
+            let requested = created + duration;
+            for target in [
+                ExpiryTarget::At(requested),
+                ExpiryTarget::FromCreation(duration),
+            ] {
+                assert_eq!(
+                    backend
+                        .set_expiry(&id, target.into(), Timestamp::now())
+                        .await
+                        .unwrap(),
+                    SetExpiryResponse::Satisfied(requested)
+                );
+            }
+            let (updated, _, payload) = backend
+                .get_object(&id, Timestamp::now(), None)
                 .await
                 .unwrap()
-        );
-        let (updated, _, payload) = backend
-            .get_object(&id, Timestamp::now(), None)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(updated.expiration_policy, metadata.expiration_policy);
-        assert_eq!(updated.custom, metadata.custom);
-        assert_eq!(updated.time_expires, Some(requested));
-        assert_eq!(stream::read_to_vec(payload).await.unwrap(), b"payload");
+                .unwrap();
+            assert_eq!(
+                updated.expiration_policy,
+                if is_ttl {
+                    ExpirationPolicy::TimeToLive(Duration::from_hours(2))
+                } else {
+                    metadata.expiration_policy
+                }
+            );
+            assert_eq!(updated.time_created, metadata.time_created);
+            assert_eq!(updated.custom, metadata.custom);
+            assert_eq!(updated.time_expires, Some(requested));
+            assert_eq!(stream::read_to_vec(payload).await.unwrap(), b"payload");
 
-        assert_eq!(draft_count(&backend, &id), 0);
+            assert_eq!(draft_count(&backend, &id), 0);
+        }
     }
 
     #[tokio::test]
@@ -1623,15 +1300,16 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert!(
-            !backend
+        assert_eq!(
+            backend
                 .set_expiry(
                     &id,
-                    Timestamp::now() + Duration::from_hours(1),
+                    ExpiryTarget::At(Timestamp::now() + Duration::from_hours(1)).into(),
                     Timestamp::now()
                 )
                 .await
-                .unwrap()
+                .unwrap(),
+            SetExpiryResponse::NotFound
         );
     }
 
@@ -1647,7 +1325,7 @@ mod tests {
         );
 
         let id = ObjectId::random(ObjectContext {
-            usecase: "testing".into(),
+            usecase: "testing".parse().unwrap(),
             scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
         });
 
@@ -1689,7 +1367,7 @@ mod tests {
         );
 
         let id = ObjectId::random(ObjectContext {
-            usecase: "testing".into(),
+            usecase: "testing".parse().unwrap(),
             scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
         });
 
@@ -1699,7 +1377,7 @@ mod tests {
 
     fn make_id() -> ObjectId {
         ObjectId::random(ObjectContext {
-            usecase: "testing".into(),
+            usecase: "testing".parse().unwrap(),
             scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
         })
     }
@@ -1740,205 +1418,6 @@ mod tests {
             .flat_map(|entry| entry.map(|entry| entry.path()))
             .filter(|path| path.to_string_lossy().ends_with(".draft"))
             .count()
-    }
-
-    #[tokio::test]
-    async fn multipart_single_part() {
-        let (_tempdir, backend) = make_backend();
-        let id = make_id();
-        let metadata = Metadata {
-            content_type: "text/plain".into(),
-            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
-            origin: Some("203.0.113.42".into()),
-            custom: [("foo".into(), "bar".into())].into(),
-            ..Default::default()
-        };
-
-        let upload_id = backend.initiate_multipart(&id, &metadata).await.unwrap();
-
-        let data = b"hello, multipart world!";
-        let etag = backend
-            .upload_part(
-                &id,
-                &upload_id,
-                NonZeroU32::new(1).unwrap(),
-                data.len() as u64,
-                None,
-                stream::single(data.to_vec()),
-            )
-            .await
-            .unwrap();
-
-        let result = backend
-            .complete_multipart(
-                &id,
-                &upload_id,
-                vec![CompletedPart {
-                    part_number: NonZeroU32::new(1).unwrap(),
-                    etag,
-                }],
-                Timestamp::now(),
-            )
-            .await
-            .unwrap();
-        assert!(result.is_none(), "expected no error on complete");
-
-        let (meta, _, body) = backend
-            .get_object(&id, Timestamp::now(), None)
-            .await
-            .unwrap()
-            .unwrap();
-        let payload: BytesMut = body.try_collect().await.unwrap();
-        assert_eq!(payload.as_ref(), data);
-        assert_eq!(meta.content_type, "text/plain".to_string());
-        assert_eq!(
-            meta.expiration_policy,
-            ExpirationPolicy::TimeToIdle(Duration::from_hours(1))
-        );
-        assert_eq!(meta.origin, Some("203.0.113.42".into()));
-        assert_eq!(meta.custom, [("foo".into(), "bar".into())].into());
-    }
-
-    #[tokio::test]
-    async fn multipart_multiple_parts() {
-        let (_tempdir, backend) = make_backend();
-        let id = make_id();
-        let metadata = Metadata::default();
-
-        let upload_id = backend.initiate_multipart(&id, &metadata).await.unwrap();
-
-        let part1 = b"aaaa".to_vec();
-        let part2 = b"bbbb".to_vec();
-        let part3 = b"cc".to_vec();
-
-        let etag1 = backend
-            .upload_part(
-                &id,
-                &upload_id,
-                NonZeroU32::new(1).unwrap(),
-                part1.len() as u64,
-                None,
-                stream::single(part1.clone()),
-            )
-            .await
-            .unwrap();
-        let etag2 = backend
-            .upload_part(
-                &id,
-                &upload_id,
-                NonZeroU32::new(2).unwrap(),
-                part2.len() as u64,
-                None,
-                stream::single(part2.clone()),
-            )
-            .await
-            .unwrap();
-        let etag3 = backend
-            .upload_part(
-                &id,
-                &upload_id,
-                NonZeroU32::new(3).unwrap(),
-                part3.len() as u64,
-                None,
-                stream::single(part3.clone()),
-            )
-            .await
-            .unwrap();
-
-        let result = backend
-            .complete_multipart(
-                &id,
-                &upload_id,
-                vec![
-                    CompletedPart {
-                        part_number: NonZeroU32::new(1).unwrap(),
-                        etag: etag1,
-                    },
-                    CompletedPart {
-                        part_number: NonZeroU32::new(2).unwrap(),
-                        etag: etag2,
-                    },
-                    CompletedPart {
-                        part_number: NonZeroU32::new(3).unwrap(),
-                        etag: etag3,
-                    },
-                ],
-                Timestamp::now(),
-            )
-            .await
-            .unwrap();
-        assert!(result.is_none());
-
-        let (_, _, body) = backend
-            .get_object(&id, Timestamp::now(), None)
-            .await
-            .unwrap()
-            .unwrap();
-        let payload: BytesMut = body.try_collect().await.unwrap();
-        assert_eq!(payload.as_ref(), b"aaaabbbbcc");
-    }
-
-    #[tokio::test]
-    async fn multipart_list_parts() {
-        let (_tempdir, backend) = make_backend();
-        let id = make_id();
-        let metadata = Metadata::default();
-
-        let upload_id = backend.initiate_multipart(&id, &metadata).await.unwrap();
-
-        let etag1 = backend
-            .upload_part(
-                &id,
-                &upload_id,
-                NonZeroU32::new(1).unwrap(),
-                3,
-                None,
-                stream::single(b"aaa".to_vec()),
-            )
-            .await
-            .unwrap();
-        let etag2 = backend
-            .upload_part(
-                &id,
-                &upload_id,
-                NonZeroU32::new(2).unwrap(),
-                3,
-                None,
-                stream::single(b"bbb".to_vec()),
-            )
-            .await
-            .unwrap();
-
-        let list = backend
-            .list_parts(&id, &upload_id, None, None)
-            .await
-            .unwrap();
-        assert_eq!(list.parts.len(), 2);
-        assert_eq!(list.parts[0].part_number.get(), 1);
-        assert_eq!(list.parts[0].etag, etag1);
-        assert_eq!(list.parts[0].size, 3);
-        assert_eq!(list.parts[1].part_number.get(), 2);
-        assert_eq!(list.parts[1].etag, etag2);
-        assert_eq!(list.parts[1].size, 3);
-
-        // Pagination
-        let page1 = backend
-            .list_parts(&id, &upload_id, Some(1), None)
-            .await
-            .unwrap();
-        assert_eq!(page1.parts.len(), 1);
-        assert_eq!(page1.parts[0].part_number.get(), 1);
-        assert!(page1.is_truncated);
-        assert!(page1.next_part_number_marker.is_some());
-
-        let page2 = backend
-            .list_parts(&id, &upload_id, Some(1), page1.next_part_number_marker)
-            .await
-            .unwrap();
-        assert_eq!(page2.parts.len(), 1);
-        assert_eq!(page2.parts[0].part_number.get(), 2);
-
-        backend.abort_multipart(&id, &upload_id).await.unwrap();
     }
 
     #[tokio::test]
@@ -2063,137 +1542,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn multipart_abort() {
-        let (_tempdir, backend) = make_backend();
-        let id = make_id();
-        let metadata = Metadata::default();
-
-        let upload_id = backend.initiate_multipart(&id, &metadata).await.unwrap();
-
-        backend
-            .upload_part(
-                &id,
-                &upload_id,
-                NonZeroU32::new(1).unwrap(),
-                5,
-                None,
-                stream::single(b"hello".to_vec()),
-            )
-            .await
-            .unwrap();
-
-        backend.abort_multipart(&id, &upload_id).await.unwrap();
-
-        let result = backend
-            .get_object(&id, Timestamp::now(), None)
-            .await
-            .unwrap();
-        assert!(result.is_none(), "object should not exist after abort");
-    }
-
-    #[tokio::test]
-    async fn multipart_invalid_etag() {
-        let (_tempdir, backend) = make_backend();
-        let id = make_id();
-        let metadata = Metadata::default();
-
-        let upload_id = backend.initiate_multipart(&id, &metadata).await.unwrap();
-
-        let etag = backend
-            .upload_part(
-                &id,
-                &upload_id,
-                NonZeroU32::new(1).unwrap(),
-                5,
-                None,
-                stream::single(b"hello".to_vec()),
-            )
-            .await
-            .unwrap();
-
-        let result = backend
-            .complete_multipart(
-                &id,
-                &upload_id,
-                vec![CompletedPart {
-                    part_number: NonZeroU32::new(1).unwrap(),
-                    etag: "wrong-etag".into(),
-                }],
-                Timestamp::now(),
-            )
-            .await
-            .unwrap();
-        assert!(result.is_some(), "expected error for bad etag");
-        assert_eq!(result.unwrap().code, "InvalidPart");
-
-        // Upload must survive a failed complete so the client can retry.
-        let result = backend
-            .complete_multipart(
-                &id,
-                &upload_id,
-                vec![CompletedPart {
-                    part_number: NonZeroU32::new(1).unwrap(),
-                    etag,
-                }],
-                Timestamp::now(),
-            )
-            .await
-            .unwrap();
-        assert!(result.is_none(), "retry with correct etag should succeed");
-    }
-
-    #[tokio::test]
-    async fn multipart_missing_part() {
-        let (_tempdir, backend) = make_backend();
-        let id = make_id();
-        let metadata = Metadata::default();
-
-        let upload_id = backend.initiate_multipart(&id, &metadata).await.unwrap();
-
-        let etag = backend
-            .upload_part(
-                &id,
-                &upload_id,
-                NonZeroU32::new(1).unwrap(),
-                5,
-                None,
-                stream::single(b"hello".to_vec()),
-            )
-            .await
-            .unwrap();
-
-        let result = backend
-            .complete_multipart(
-                &id,
-                &upload_id,
-                vec![CompletedPart {
-                    part_number: NonZeroU32::new(99).unwrap(),
-                    etag: "whatever".into(),
-                }],
-                Timestamp::now(),
-            )
-            .await
-            .unwrap();
-        assert!(result.is_some(), "expected error for missing part");
-        assert_eq!(result.unwrap().code, "InvalidPart");
-
-        // Upload must survive a failed complete so the client can retry.
-        let result = backend
-            .complete_multipart(
-                &id,
-                &upload_id,
-                vec![CompletedPart {
-                    part_number: NonZeroU32::new(1).unwrap(),
-                    etag,
-                }],
-                Timestamp::now(),
-            )
-            .await
-            .unwrap();
-        assert!(result.is_none(), "retry with correct part should succeed");
-    }
-
     #[cfg(feature = "storage-cogs")]
     #[tokio::test]
     async fn change_stream_reports_size_written_to_disk() {
@@ -2244,15 +1592,17 @@ mod tests {
             ..Default::default()
         };
         let payload = b"oh hai!";
+        let upload_length = NonZeroU64::new(payload.len() as u64).unwrap();
         let token = backend
-            .create_upload_session(
-                &id,
-                &metadata,
-                NonZeroU64::new(payload.len() as u64).unwrap(),
-            )
+            .create_upload_session(&id, &metadata, upload_length)
             .await
             .unwrap()
             .unwrap();
+        let token = Session {
+            object_id: id.clone(),
+            upload_length,
+            backend_token: token,
+        };
 
         // Session creation alone does not report a stored object.
         assert!(producer.records().is_empty());
@@ -2261,7 +1611,6 @@ mod tests {
         assert_eq!(
             backend
                 .put_chunk(
-                    &id,
                     &token,
                     0,
                     payload.len() as u64,
@@ -2280,57 +1629,6 @@ mod tests {
         assert_eq!(records[0].op_type, OpType::Write);
         assert_eq!(records[0].size, Some(file.len() as u64));
         assert!(records[0].expiration_time.is_some());
-    }
-
-    #[cfg(feature = "storage-cogs")]
-    #[tokio::test]
-    async fn change_stream_reports_assembled_multipart_size() {
-        let (tempdir, backend, producer) = make_backend_with_change_stream();
-        let id = make_id();
-        let metadata = Metadata::default();
-
-        let upload_id = backend.initiate_multipart(&id, &metadata).await.unwrap();
-
-        let mut completed = Vec::new();
-        for (number, payload) in [(1u32, b"aaaa".to_vec()), (2, b"bbbb".to_vec())] {
-            let part_number = NonZeroU32::new(number).unwrap();
-            let etag = backend
-                .upload_part(
-                    &id,
-                    &upload_id,
-                    part_number,
-                    payload.len() as u64,
-                    None,
-                    stream::single(payload),
-                )
-                .await
-                .unwrap();
-            completed.push(CompletedPart { part_number, etag });
-        }
-
-        // Uploading parts is intermediate state, so nothing is reported until completion.
-        assert!(producer.records().is_empty());
-
-        assert!(
-            backend
-                .complete_multipart(&id, &upload_id, completed, Timestamp::now())
-                .await
-                .unwrap()
-                .is_none()
-        );
-
-        let file = tokio::fs::read(tempdir.path().join(id.as_storage_path().to_string()))
-            .await
-            .unwrap();
-
-        let records = producer.records();
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].op_type, OpType::Write);
-        assert_eq!(
-            records[0].size,
-            Some(file.len() as u64),
-            "the assembled object counts its metadata header and every part payload"
-        );
     }
 
     #[cfg(feature = "storage-cogs")]

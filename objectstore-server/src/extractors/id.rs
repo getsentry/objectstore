@@ -6,17 +6,19 @@ use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
 use objectstore_service::id::{ObjectContext, ObjectId};
 use objectstore_types::scope::{EMPTY_SCOPES, Scope, Scopes};
+use objectstore_types::usecase::Usecase;
 use serde::{Deserialize, de};
 
 use crate::extractors::Xt;
 use crate::extractors::downstream_service::DownstreamService;
+use crate::rate_limits::LimitExceeded;
 use crate::state::ServiceState;
 
 #[derive(Debug)]
 pub enum ObjectRejection {
     Path(PathRejection),
     Killswitched,
-    RateLimited,
+    RateLimited(LimitExceeded),
 }
 
 impl IntoResponse for ObjectRejection {
@@ -28,11 +30,7 @@ impl IntoResponse for ObjectRejection {
                 "Object access is disabled for this scope through killswitches",
             )
                 .into_response(),
-            ObjectRejection::RateLimited => (
-                http::StatusCode::TOO_MANY_REQUESTS,
-                "Object access is rate limited",
-            )
-                .into_response(),
+            ObjectRejection::RateLimited(error) => error.into_response(),
         }
     }
 }
@@ -68,9 +66,10 @@ impl FromRequestParts<ServiceState> for Xt<ObjectId> {
             return Err(ObjectRejection::Killswitched);
         }
 
-        if !state.rate_limiter.check(id.context(), Some(id.key())) {
-            return Err(ObjectRejection::RateLimited);
-        }
+        state
+            .rate_limiter
+            .check(id.context(), Some(id.key()))
+            .map_err(ObjectRejection::RateLimited)?;
 
         Ok(Xt(id))
     }
@@ -81,7 +80,7 @@ impl FromRequestParts<ServiceState> for Xt<ObjectId> {
 /// This is meant to be used with the axum `Path` extractor.
 #[derive(Clone, Debug, Deserialize)]
 struct ObjectParams {
-    usecase: String,
+    usecase: Usecase,
     #[serde(deserialize_with = "deserialize_scopes")]
     scopes: Scopes,
     key: String,
@@ -141,9 +140,10 @@ impl FromRequestParts<ServiceState> for Xt<ObjectContext> {
             return Err(ObjectRejection::Killswitched);
         }
 
-        if !state.rate_limiter.check(&context, None) {
-            return Err(ObjectRejection::RateLimited);
-        }
+        state
+            .rate_limiter
+            .check(&context, None)
+            .map_err(ObjectRejection::RateLimited)?;
 
         Ok(Xt(context))
     }
@@ -155,14 +155,14 @@ impl FromRequestParts<ServiceState> for Xt<ObjectContext> {
 /// (`/objects/{usecase}/{scopes}/{*key}`) routes — the extra `key` parameter is ignored.
 #[derive(Clone, Debug, Deserialize)]
 pub(super) struct ContextParams {
-    pub usecase: String,
+    pub usecase: Usecase,
     #[serde(deserialize_with = "deserialize_scopes")]
     pub scopes: Scopes,
 }
 
 fn populate_sentry_context(context: &ObjectContext) {
     sentry::configure_scope(|s| {
-        s.set_tag("usecase", &context.usecase);
+        s.set_tag("usecase", context.usecase.as_str());
         for scope in &context.scopes {
             s.set_tag(&format!("scope.{}", scope.name()), scope.value());
         }
@@ -179,6 +179,33 @@ mod tests {
     fn deser_scopes(input: &str) -> Result<Scopes, DeError> {
         let deserializer: CowStrDeserializer<DeError> = Cow::Borrowed(input).into_deserializer();
         deserialize_scopes(deserializer)
+    }
+
+    #[test]
+    fn parse_usecase() {
+        for (name, valid) in [
+            ("Debug_Files-123", true),
+            ("___", true),
+            ("_", false),
+            ("test/name", false),
+            ("test%2Fname", false),
+        ] {
+            let params = serde_json::json!({
+                "usecase": name,
+                "scopes": "org=123",
+                "key": "my-key",
+            });
+            assert_eq!(
+                serde_json::from_value::<ObjectParams>(params.clone()).is_ok(),
+                valid,
+                "object usecase {name:?}",
+            );
+            assert_eq!(
+                serde_json::from_value::<ContextParams>(params).is_ok(),
+                valid,
+                "context usecase {name:?}",
+            );
+        }
     }
 
     #[test]
@@ -290,6 +317,29 @@ mod tests {
     // Extraction tests
 
     #[tokio::test]
+    async fn invalid_decoded_usecase_rejects_body_without_panicking() {
+        use crate::extractors::body::MeteredBody;
+
+        // Extract only the body so this exercises its own path rejection.
+        let app = Router::new()
+            .route(
+                "/objects/{usecase}/{scopes}/",
+                post(|_: MeteredBody| async { StatusCode::OK }),
+            )
+            .with_state(test_state(Config::default()).await);
+        let response = app
+            .oneshot(
+                Request::post("/objects/test%2Fname/org=123/")
+                    .body(Body::from("test data"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(response_body(response).await.contains("usecase"));
+    }
+
+    #[tokio::test]
     async fn extract_object_id_parses_path() {
         let state = test_state(Config::default()).await;
         let app = test_router(state);
@@ -378,7 +428,7 @@ mod tests {
     async fn extract_object_id_killswitched() {
         let config = Config {
             killswitches: Killswitches::new(vec![Killswitch {
-                usecase: Some("blocked".into()),
+                usecase: Some("blocked".parse().unwrap()),
                 scopes: BTreeMap::new(),
                 service: None,
             }]),
@@ -406,7 +456,7 @@ mod tests {
     async fn extract_object_context_killswitched() {
         let config = Config {
             killswitches: Killswitches::new(vec![Killswitch {
-                usecase: Some("blocked".into()),
+                usecase: Some("blocked".parse().unwrap()),
                 scopes: BTreeMap::new(),
                 service: None,
             }]),
@@ -502,7 +552,7 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         let response = app.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
@@ -535,6 +585,6 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         let response = app.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

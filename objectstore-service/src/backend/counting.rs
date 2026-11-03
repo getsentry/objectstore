@@ -15,51 +15,42 @@
 //! [`StreamExecutor`]: crate::streaming::StreamExecutor
 
 use std::num::NonZeroU64;
-use std::sync::Arc;
 
 use objectstore_types::metadata::Metadata;
 use objectstore_types::range::ByteRange;
 use objectstore_types::resumable::UploadProgress;
 use objectstore_types::time::Timestamp;
+use objectstore_types::usecase::Usecase;
 
 use crate::backend::common::{
-    Backend, DeleteResponse, GetResponse, MetadataResponse, MultipartUploadBackend, PutResponse,
+    Backend, DeleteResponse, ExpiryUpdate, GetResponse, MetadataResponse, PutResponse,
+    SetExpiryResponse,
 };
 use crate::error::Result;
 use crate::id::ObjectId;
-use crate::multipart::{
-    AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
-    ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
-};
-use crate::resumable::BackendToken;
+use crate::resumable::{BackendToken, Session};
 use crate::stream::ClientStream;
 
 /// Increments `cogs.usage` by one operation for the given `usecase`.
 ///
 /// Under the hood, the `usecase` is used as the `app_feature`. This allows to identify distinct
 /// products and map them in the for the COGs pipeline.
-fn count(usecase: &str) {
-    objectstore_metrics::count!("cogs.usage" += 1, app_feature = usecase.to_owned());
+fn count(usecase: &Usecase) {
+    objectstore_metrics::count!("cogs.usage" += 1, app_feature = usecase.to_string());
 }
 
-/// A [`Backend`] decorator that counts each operation performed for COGS. Also implements
-/// [`MultipartUploadBackend`]. See the [module documentation](self) for how it should be used.
+/// A [`Backend`] decorator that counts each operation performed for COGS.
 ///
-/// [`CountingBackend`]'s implementation clashes with how the [`MultipartUploadBackend`] trait is
-/// connected to the [`Backend`] trait. The workaround is to give `CountingBackend` (up to) two
-/// `Arc`s that point to the inner backend:
-/// - `inner: Arc<dyn Backend>`
-/// - `inner_multipart: Option<Arc<dyn MultipartUploadBackend>>` if `inner` supports it
+/// See the [module documentation](self) for how it should be used.
 #[derive(Debug)]
 pub struct CountingBackend {
-    inner: Arc<dyn Backend>,
+    inner: Box<dyn Backend>,
 }
 
 impl CountingBackend {
     /// Creates a [`CountingBackend`] that wraps `inner` and increments `cogs.usage`
     /// before delegating operations to it.
     pub fn new(inner: Box<dyn Backend>) -> Self {
-        let inner: Arc<dyn Backend> = Arc::from(inner);
         Self { inner }
     }
 }
@@ -70,6 +61,10 @@ impl Backend for CountingBackend {
         self.inner.name()
     }
 
+    fn upload_granularity(&self) -> u64 {
+        self.inner.upload_granularity()
+    }
+
     async fn put_object(
         &self,
         id: &ObjectId,
@@ -77,7 +72,7 @@ impl Backend for CountingBackend {
         stream: ClientStream,
         access_time: Timestamp,
     ) -> Result<PutResponse> {
-        count(&id.context.usecase);
+        count(id.usecase());
         self.inner
             .put_object(id, metadata, stream, access_time)
             .await
@@ -89,7 +84,7 @@ impl Backend for CountingBackend {
         access_time: Timestamp,
         range: Option<ByteRange>,
     ) -> Result<GetResponse> {
-        count(&id.context.usecase);
+        count(id.usecase());
         self.inner.get_object(id, access_time, range).await
     }
 
@@ -98,22 +93,22 @@ impl Backend for CountingBackend {
         id: &ObjectId,
         access_time: Timestamp,
     ) -> Result<MetadataResponse> {
-        count(&id.context.usecase);
+        count(id.usecase());
         self.inner.get_metadata(id, access_time).await
     }
 
     async fn set_expiry(
         &self,
         id: &ObjectId,
-        expire_at: Timestamp,
+        target: ExpiryUpdate,
         access_time: Timestamp,
-    ) -> Result<bool> {
-        count(&id.context.usecase);
-        self.inner.set_expiry(id, expire_at, access_time).await
+    ) -> Result<SetExpiryResponse> {
+        count(id.usecase());
+        self.inner.set_expiry(id, target, access_time).await
     }
 
     async fn delete_object(&self, id: &ObjectId, access_time: Timestamp) -> Result<DeleteResponse> {
-        count(&id.context.usecase);
+        count(id.usecase());
         self.inner.delete_object(id, access_time).await
     }
 
@@ -121,123 +116,39 @@ impl Backend for CountingBackend {
         self.inner.join().await;
     }
 
-    fn as_multipart_upload_backend(&self) -> Result<&dyn MultipartUploadBackend> {
-        self.inner.as_multipart_upload_backend()?;
-        Ok(self)
-    }
-
     async fn create_upload_session(
         &self,
         id: &ObjectId,
         metadata: &Metadata,
-        total_length: NonZeroU64,
+        upload_length: NonZeroU64,
     ) -> Result<Option<BackendToken>> {
-        count(&id.context.usecase);
+        count(id.usecase());
         self.inner
-            .create_upload_session(id, metadata, total_length)
+            .create_upload_session(id, metadata, upload_length)
             .await
     }
 
     async fn put_chunk(
         &self,
-        id: &ObjectId,
-        token: &BackendToken,
+        session: &Session,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
     ) -> Result<UploadProgress> {
-        count(&id.context.usecase);
+        count(session.object_id.usecase());
         self.inner
-            .put_chunk(id, token, offset, content_length, stream)
+            .put_chunk(session, offset, content_length, stream)
             .await
     }
 
-    async fn upload_offset(&self, id: &ObjectId, token: &BackendToken) -> Result<UploadProgress> {
-        count(&id.context.usecase);
-        self.inner.upload_offset(id, token).await
+    async fn upload_offset(&self, session: &Session) -> Result<UploadProgress> {
+        count(session.object_id.usecase());
+        self.inner.upload_offset(session).await
     }
 
-    async fn cancel_upload(&self, id: &ObjectId, token: &BackendToken) -> Result<()> {
-        count(&id.context.usecase);
-        self.inner.cancel_upload(id, token).await
-    }
-}
-
-#[async_trait::async_trait]
-impl MultipartUploadBackend for CountingBackend {
-    async fn initiate_multipart(
-        &self,
-        id: &ObjectId,
-        metadata: &Metadata,
-    ) -> Result<InitiateMultipartResponse> {
-        count(&id.context.usecase);
-        self.inner
-            .as_multipart_upload_backend()?
-            .initiate_multipart(id, metadata)
-            .await
-    }
-
-    async fn upload_part(
-        &self,
-        id: &ObjectId,
-        upload_id: &UploadId,
-        part_number: PartNumber,
-        content_length: u64,
-        content_md5: Option<&str>,
-        body: ClientStream,
-    ) -> Result<UploadPartResponse> {
-        count(&id.context.usecase);
-        self.inner
-            .as_multipart_upload_backend()?
-            .upload_part(
-                id,
-                upload_id,
-                part_number,
-                content_length,
-                content_md5,
-                body,
-            )
-            .await
-    }
-
-    async fn list_parts(
-        &self,
-        id: &ObjectId,
-        upload_id: &UploadId,
-        max_parts: Option<u32>,
-        part_number_marker: Option<PartNumber>,
-    ) -> Result<ListPartsResponse> {
-        count(&id.context.usecase);
-        self.inner
-            .as_multipart_upload_backend()?
-            .list_parts(id, upload_id, max_parts, part_number_marker)
-            .await
-    }
-
-    async fn abort_multipart(
-        &self,
-        id: &ObjectId,
-        upload_id: &UploadId,
-    ) -> Result<AbortMultipartResponse> {
-        count(&id.context.usecase);
-        self.inner
-            .as_multipart_upload_backend()?
-            .abort_multipart(id, upload_id)
-            .await
-    }
-
-    async fn complete_multipart(
-        &self,
-        id: &ObjectId,
-        upload_id: &UploadId,
-        parts: Vec<CompletedPart>,
-        access_time: Timestamp,
-    ) -> Result<CompleteMultipartResponse> {
-        count(&id.context.usecase);
-        self.inner
-            .as_multipart_upload_backend()?
-            .complete_multipart(id, upload_id, parts, access_time)
-            .await
+    async fn cancel_upload(&self, session: &Session) -> Result<()> {
+        count(session.object_id.usecase());
+        self.inner.cancel_upload(session).await
     }
 }
 
@@ -253,7 +164,7 @@ mod tests {
     fn object_id(usecase: &str) -> ObjectId {
         ObjectId::new(
             ObjectContext {
-                usecase: usecase.into(),
+                usecase: usecase.parse().unwrap(),
                 scopes: Scopes::from_iter([Scope::create("org", "1").unwrap()]),
             },
             "key".into(),
@@ -351,53 +262,6 @@ mod tests {
                 .iter()
                 .any(|m| m == "cogs.usage:+1|c|#app_feature:new_usecase"),
             "captured: {captured:?}"
-        );
-    }
-
-    #[test]
-    fn counts_each_multipart_operation() {
-        let captured = capture(async {
-            let backend: Arc<dyn Backend> = Arc::new(CountingBackend::new(Box::new(
-                InMemoryBackend::new("in-memory"),
-            )));
-            let multipart = backend.as_multipart_upload_backend().unwrap();
-            let id = object_id("attachments");
-
-            let upload_id = multipart
-                .initiate_multipart(&id, &Metadata::default())
-                .await
-                .unwrap();
-            multipart
-                .upload_part(
-                    &id,
-                    &upload_id,
-                    PartNumber::new(1).unwrap(),
-                    2,
-                    None,
-                    stream::single("hi"),
-                )
-                .await
-                .unwrap();
-            multipart
-                .list_parts(&id, &upload_id, None, None)
-                .await
-                .unwrap();
-            multipart
-                .complete_multipart(&id, &upload_id, vec![], Timestamp::now())
-                .await
-                .unwrap();
-            // The upload was completed above, so aborting it is a no-op; counting
-            // happens on dispatch regardless, which is what this asserts.
-            let _ = multipart.abort_multipart(&id, &upload_id).await;
-        });
-
-        assert_eq!(
-            captured
-                .iter()
-                .filter(|m| m == &"cogs.usage:+1|c|#app_feature:attachments")
-                .count(),
-            5,
-            "expected one count per multipart operation, captured: {captured:?}"
         );
     }
 }

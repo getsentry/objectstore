@@ -5,7 +5,8 @@
 //! server parses and validates it, the service passes it to backends, and
 //! backends persist it alongside the stored object.
 //!
-//! The module also defines further types used in metadata.
+//! [`MetadataUpdate`] is the separate JSON request contract for explicit
+//! metadata updates. It is not a persisted metadata representation.
 //!
 //! # Serialization
 //!
@@ -57,7 +58,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::duration::{ParseDurationError, format_duration, parse_duration};
 use crate::headers;
-use crate::time::{InvalidTimestamp, Timestamp};
+use crate::time::{InvalidTimestamp, Rfc3339Timestamp, Timestamp};
 
 /// The custom HTTP header that contains the serialized [`ExpirationPolicy`].
 pub const HEADER_EXPIRATION: &str = "x-sn-expiration";
@@ -85,6 +86,58 @@ pub const DEFAULT_CONTENT_TYPE: &str = "application/octet-stream";
 /// bumps are not silently suppressed.
 const MAX_TTI_DEBOUNCE: Duration = Duration::from_hours(24);
 
+/// An application-specific JSON request for updating object metadata.
+///
+/// This is intentionally separate from [`Metadata`]: omitted fields are not merge-patch
+/// operations, and metadata headers are not interpreted as updates. Unknown fields are rejected.
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MetadataUpdate {
+    /// Extends the existing expiration deadline, adjusting TTL duration to match.
+    pub extend_expiry: ExpiryExtension,
+}
+
+/// A requested minimum expiration deadline.
+///
+/// The absolute form contains `at`. The relative form contains both `after` and `from`.
+/// Mixed, incomplete, and unknown fields are rejected during deserialization.
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum ExpiryExtension {
+    /// An RFC3339 deadline, validated during deserialization.
+    At {
+        /// The requested absolute deadline.
+        at: Rfc3339Timestamp,
+    },
+    /// A duration relative to an explicit anchor.
+    After {
+        /// A duration in the format documented by [`crate::duration`].
+        #[serde(with = "crate::duration")]
+        after: Duration,
+        /// The timestamp against which the duration is resolved.
+        from: ExpiryAnchor,
+    },
+}
+
+/// The timestamp against which a relative expiry extension is resolved.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExpiryAnchor {
+    /// The object's observed creation time.
+    Creation,
+    /// The request-start time.
+    Now,
+}
+
+/// A content type is not a valid [IANA Media
+/// Type](https://www.iana.org/assignments/media-types/media-types.xhtml).
+///
+/// The message describes which part is malformed. The underlying parser is an implementation
+/// detail and not part of the public API.
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+pub struct InvalidContentType(mediatype::MediaTypeError);
+
 /// Errors that can happen dealing with metadata
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -99,7 +152,7 @@ pub enum Error {
     Compression,
     /// The content type is invalid.
     #[error("invalid content type")]
-    ContentType(#[from] mediatype::MediaTypeError),
+    ContentType(#[from] InvalidContentType),
     /// The creation time is invalid.
     #[error("invalid creation time")]
     CreationTime(#[from] humantime::TimestampError),
@@ -239,16 +292,14 @@ impl FromStr for ExpirationPolicy {
 
 /// The compression algorithm applied to an object's payload.
 ///
-/// Transmitted via the standard `Content-Encoding` HTTP header. Currently only
-/// Zstandard (`zstd`) is supported.
+/// Transmitted via the standard `Content-Encoding` HTTP header. Supported
+/// algorithms are Zstandard (`zstd`) and `gzip`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Compression {
     /// Compressed using `zstd`.
     Zstd,
-    // /// Compressed using `gzip`.
-    // Gzip,
-    // /// Compressed using `lz4`.
-    // Lz4,
+    /// Compressed using `gzip`.
+    Gzip,
 }
 
 impl Compression {
@@ -256,8 +307,7 @@ impl Compression {
     pub fn as_str(&self) -> &str {
         match self {
             Compression::Zstd => "zstd",
-            // Compression::Gzip => "gzip",
-            // Compression::Lz4 => "lz4",
+            Compression::Gzip => "gzip",
         }
     }
 }
@@ -274,8 +324,7 @@ impl FromStr for Compression {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "zstd" => Ok(Compression::Zstd),
-            // "gzip" => Compression::Gzip,
-            // "lz4" => Compression::Lz4,
+            "gzip" => Ok(Compression::Gzip),
             _ => Err(Error::Compression),
         }
     }
@@ -304,9 +353,9 @@ pub struct Metadata {
 
     /// The resolved expiration timestamp (header: `x-sn-time-expires`).
     ///
-    /// Derived from the [`expiration_policy`](Self::expiration_policy). When using
-    /// a time-to-idle policy, this reflects the expiration timestamp present
-    /// *prior to* the current access to the object.
+    /// Initially derived from the [`expiration_policy`](Self::expiration_policy), but may be later
+    /// extended by explicit updates. This timestamp reflects the deadline present *prior to* the
+    /// current access to the object.
     ///
     /// Fractional deadlines round up to whole seconds; see [`Timestamp`].
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -331,9 +380,7 @@ pub struct Metadata {
 
     /// An optional filename associated with this object (header: `x-sn-filename`).
     ///
-    /// When present, the server includes a `Content-Disposition: attachment; filename="<filename>"`
-    /// header in GET responses, prompting browsers and download tools to save the file
-    /// under this name. Non-ASCII filenames additionally get an RFC 8187 `filename*` parameter.
+    /// This filename is returned when downloading the object.
     ///
     /// This is a logical string and may contain arbitrary Unicode; it is escaped only on the
     /// wire (see [the module docs](self#escaping-free-form-values)).
@@ -560,7 +607,7 @@ impl Metadata {
 /// Validates that `content_type` is a valid [IANA Media
 /// Type](https://www.iana.org/assignments/media-types/media-types.xhtml).
 fn validate_content_type(content_type: &str) -> Result<(), Error> {
-    mediatype::MediaType::parse(content_type)?;
+    mediatype::MediaType::parse(content_type).map_err(InvalidContentType)?;
     Ok(())
 }
 
@@ -583,6 +630,62 @@ impl Default for Metadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metadata_update_parses_supported_expiry_extensions() {
+        let cases = [
+            (
+                r#"{"extend_expiry":{"at":"2026-10-16T12:00:00Z"}}"#,
+                ExpiryExtension::At {
+                    at: "2026-10-16T12:00:00Z".parse().unwrap(),
+                },
+            ),
+            (
+                r#"{"extend_expiry":{"after":"30d","from":"creation"}}"#,
+                ExpiryExtension::After {
+                    after: Duration::from_secs(30 * 86400),
+                    from: ExpiryAnchor::Creation,
+                },
+            ),
+            (
+                r#"{"extend_expiry":{"after":"0s","from":"now"}}"#,
+                ExpiryExtension::After {
+                    after: Duration::ZERO,
+                    from: ExpiryAnchor::Now,
+                },
+            ),
+        ];
+
+        for (json, expected) in cases {
+            let update: MetadataUpdate = serde_json::from_str(json).unwrap();
+            assert_eq!(update.extend_expiry, expected);
+            assert_eq!(serde_json::to_string(&update).unwrap(), json);
+        }
+    }
+
+    #[test]
+    fn metadata_update_rejects_invalid_structures() {
+        let cases = [
+            r#"{"extend_expiry":{"at":"not a timestamp"}}"#,
+            r#"{"extend_expiry":{"after":"not a duration","from":"now"}}"#,
+            r#"{}"#,
+            r#"{"extend_expiry":null}"#,
+            r#"{"extend_expiry":{}}"#,
+            r#"{"extend_expiry":{"at":"2026-10-16T12:00:00Z","after":"30d","from":"now"}}"#,
+            r#"{"extend_expiry":{"after":"30d"}}"#,
+            r#"{"extend_expiry":{"after":"30d","from":"unsupported"}}"#,
+            r#"{"extend_expiry":{"at":"2026-10-16T12:00:00Z","unknown":true}}"#,
+            r#"{"extend_expiry":{"after":"30d","from":"now","unknown":true}}"#,
+            r#"{"extend_expiry":{"at":"2026-10-16T12:00:00Z"},"content_type":"text/plain"}"#,
+        ];
+
+        for json in cases {
+            assert!(
+                serde_json::from_str::<MetadataUpdate>(json).is_err(),
+                "unexpectedly accepted {json}"
+            );
+        }
+    }
 
     #[test]
     fn from_headers_with_origin() {
@@ -1144,15 +1247,17 @@ mod tests {
 
     #[test]
     fn compression_display_roundtrip() {
-        let displayed = Compression::Zstd.to_string();
-        assert_eq!(displayed, "zstd");
-        let parsed: Compression = displayed.parse().unwrap();
-        assert_eq!(parsed, Compression::Zstd);
+        for (compression, expected) in [(Compression::Zstd, "zstd"), (Compression::Gzip, "gzip")] {
+            let displayed = compression.to_string();
+            assert_eq!(displayed, expected);
+            let parsed: Compression = displayed.parse().unwrap();
+            assert_eq!(parsed, compression);
+        }
     }
 
     #[test]
     fn compression_parse_invalid() {
-        assert!(Compression::from_str("gzip").is_err());
+        assert!(Compression::from_str("lz4").is_err());
         assert!(Compression::from_str("").is_err());
     }
 

@@ -65,6 +65,7 @@ use anyhow::Result;
 use bytes::Bytes;
 use figment::providers::{Env, Format, Serialized, Yaml};
 use objectstore_service::backend::local_fs::FileSystemConfig;
+#[cfg(feature = "storage-cogs")]
 use objectstore_service::change_stream::CostTrackerConfig;
 use objectstore_service::encryption::Cipher;
 use objectstore_types::auth::Permission;
@@ -72,7 +73,7 @@ use secrecy::{CloneableSecret, SecretBox, SerializableSecret, zeroize::Zeroize};
 use serde::{Deserialize, Serialize};
 
 pub use objectstore_log::{LevelFilter, LogFormat, LoggingConfig};
-pub use objectstore_service::backend::{MultipartUploadStorageConfig, StorageConfig};
+pub use objectstore_service::backend::StorageConfig;
 
 use crate::killswitches::Killswitches;
 use crate::rate_limits::RateLimits;
@@ -222,7 +223,8 @@ pub struct Sentry {
     /// Error event sampling rate.
     ///
     /// Controls what percentage of error events are sent to Sentry. A value of `1.0` sends all
-    /// errors, while `0.5` sends 50% of errors, and `0.0` sends no errors.
+    /// errors, while `0.5` sends 50% of errors, and `0.0` sends no errors. Must be between `0.0`
+    /// and `1.0`, inclusive; other values are rejected when loading the configuration.
     ///
     /// # Default
     ///
@@ -231,12 +233,15 @@ pub struct Sentry {
     /// # Environment Variable
     ///
     /// `OS__SENTRY__SAMPLE_RATE`
+    #[serde(deserialize_with = "deserialize_sample_rate")]
     pub sample_rate: f32,
 
     /// Performance trace sampling rate.
     ///
     /// Controls what percentage of transactions (traces) are sent to Sentry for performance
-    /// monitoring. A value of `1.0` sends all traces, while `0.01` sends 1% of traces.
+    /// monitoring. A value of `1.0` sends all traces, while `0.01` sends 1% of traces. Must be
+    /// between `0.0` and `1.0`, inclusive; other values are rejected when loading the
+    /// configuration.
     ///
     /// **Important**: Performance traces can generate significant data volume in high-traffic
     /// systems. Start with a low rate (0.01-0.1) and adjust based on traffic and Sentry quota.
@@ -248,6 +253,7 @@ pub struct Sentry {
     /// # Environment Variable
     ///
     /// `OS__SENTRY__TRACES_SAMPLE_RATE`
+    #[serde(deserialize_with = "deserialize_sample_rate")]
     pub traces_sample_rate: f32,
 
     /// Whether to inherit sampling decisions from incoming traces.
@@ -297,6 +303,21 @@ pub struct Sentry {
     /// `OS__SENTRY__DEBUG`
     pub debug: bool,
 
+    /// Capacity of the Sentry transport's envelope queue.
+    ///
+    /// Maximum number of envelopes (events, transactions, logs) buffered for sending to Sentry.
+    /// When the queue is full, new envelopes are dropped. Raise this if Sentry data is being
+    /// dropped under load.
+    ///
+    /// # Default
+    ///
+    /// `60`
+    ///
+    /// # Environment Variable
+    ///
+    /// `OS__SENTRY__TRANSPORT_CHANNEL_CAPACITY`
+    pub transport_channel_capacity: usize,
+
     /// Additional tags to attach to all Sentry events.
     ///
     /// Key-value pairs that are sent as tags with every event reported to Sentry. Useful for adding
@@ -323,6 +344,20 @@ pub struct Sentry {
     pub tags: BTreeMap<String, String>,
 }
 
+/// Deserializes a sample rate, rejecting values outside of `0.0..=1.0`.
+fn deserialize_sample_rate<'de, D>(deserializer: D) -> std::result::Result<f32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let rate = f32::deserialize(deserializer)?;
+    if !(0.0..=1.0).contains(&rate) {
+        return Err(serde::de::Error::custom(format!(
+            "sample rate must be between 0.0 and 1.0, got {rate}"
+        )));
+    }
+    Ok(rate)
+}
+
 impl Sentry {
     /// Returns whether Sentry integration is enabled.
     ///
@@ -343,6 +378,7 @@ impl Default for Sentry {
             inherit_sampling_decision: true,
             attach_stacktrace: false,
             debug: false,
+            transport_channel_capacity: 60,
             tags: BTreeMap::new(),
         }
     }
@@ -508,6 +544,9 @@ pub struct Config {
     /// - `OS__STORAGE_COGS__TOPIC=shared-resources-inventory`
     /// - `OS__STORAGE_COGS__BOOTSTRAP_SERVERS=kafka:9092`
     /// - `OS__STORAGE_COGS__OVERRIDE_PARAMS__<PROPERTY>=<value>`
+    ///
+    /// Requires the `storage-cogs` Cargo feature.
+    #[cfg(feature = "storage-cogs")]
     #[serde(default)]
     pub storage_cogs: Option<CostTrackerConfig>,
 
@@ -578,8 +617,8 @@ pub struct Config {
 /// - `OS__SERVICE__CONCURRENCY_TIMEOUT`
 /// - `OS__SERVICE__BULK_CONCURRENCY_PCT`
 /// - `OS__SERVICE__BACKGROUND_QUEUE`
-/// - `OS__SERVICE__RESUMABLE_TOKEN_ENCRYPTION__ACTIVE_KEY_ID`
-/// - `OS__SERVICE__RESUMABLE_TOKEN_ENCRYPTION__KEYS`
+/// - `OS__SERVICE__ENCRYPTION__ACTIVE_KEY_ID`
+/// - `OS__SERVICE__ENCRYPTION__KEYS`
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Service {
@@ -587,7 +626,7 @@ pub struct Service {
     ///
     /// This caps the total number of in-flight storage operations (reads,
     /// writes, deletes) across all requests. Operations that exceed the limit
-    /// are rejected with HTTP 429.
+    /// are rejected with HTTP 503.
     ///
     /// # Default
     ///
@@ -599,7 +638,7 @@ pub struct Service {
     /// When all `max_concurrency` execution slots are held, up to this many
     /// additional requests will park and wait (for at most
     /// `concurrency_timeout`) instead of being rejected immediately.
-    /// Requests beyond that are rejected with HTTP 429.
+    /// Requests beyond that are rejected with HTTP 503.
     ///
     /// Sizing guidance: `concurrency_queue ≈ permit_release_rate ×
     /// acceptable_added_latency`.
@@ -653,6 +692,7 @@ pub struct Service {
     /// generated at startup, which means that resumable upload sessions won't work in a
     /// multi-instance deployment or survive a restart.
     /// Configure a persistent keyring in production.
+    /// Using the ephemeral fallback emits a startup warning.
     ///
     /// Keys must contain exactly 32 raw bytes.
     ///
@@ -816,6 +856,7 @@ impl Default for Config {
                 cogs: None,
             }),
 
+            #[cfg(feature = "storage-cogs")]
             storage_cogs: None,
             runtime: Runtime::default(),
             logging: LoggingConfig::default(),
@@ -890,7 +931,7 @@ impl Config {
 mod tests {
     use std::io::Write;
 
-    use objectstore_service::backend::{HighVolumeStorageConfig, MultipartUploadStorageConfig};
+    use objectstore_service::backend::HighVolumeStorageConfig;
     use secrecy::ExposeSecret;
 
     use crate::killswitches::Killswitch;
@@ -1089,7 +1130,7 @@ mod tests {
             let HighVolumeStorageConfig::BigTable(hv) = &c.high_volume;
             assert_eq!(hv.project_id, "my-project");
             assert_eq!(hv.rpc_timeout, Duration::from_secs(2));
-            let MultipartUploadStorageConfig::Gcs(lt) = &c.long_term else {
+            let StorageConfig::Gcs(lt) = c.long_term.as_ref() else {
                 panic!("expected gcs long_term");
             };
             assert_eq!(lt.bucket, "my-objectstore-bucket");
@@ -1120,7 +1161,7 @@ mod tests {
             assert_eq!(hv.instance_name, "my-instance");
             assert_eq!(hv.table_name, "my-table");
             assert_eq!(hv.rpc_timeout, Duration::from_millis(750));
-            let MultipartUploadStorageConfig::FileSystem(lt) = &c.long_term else {
+            let StorageConfig::FileSystem(lt) = c.long_term.as_ref() else {
                 panic!("expected filesystem long_term");
             };
             assert_eq!(lt.path, Path::new("/data/lt"));
@@ -1130,6 +1171,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "storage-cogs")]
     fn storage_cogs_via_env() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("OS__STORAGE__TYPE", "bigtable");
@@ -1177,6 +1219,7 @@ mod tests {
             };
             let stream = storage.cogs.as_ref().expect("change stream");
             assert_eq!(stream.sample_rate, 1.0, "reports everything by default");
+            #[cfg(feature = "storage-cogs")]
             assert!(
                 config.storage_cogs.is_none(),
                 "no transport is configured by default"
@@ -1187,6 +1230,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "storage-cogs")]
     fn serde_var_yaml_references() {
         let secrets = tempfile::tempdir().unwrap();
         let absolute_secret = secrets.path().join("kafka-password");
@@ -1449,7 +1493,7 @@ mod tests {
         figment::Jail::expect_with(|_jail| {
             let expected = [
                 Killswitch {
-                    usecase: Some("broken_usecase".into()),
+                    usecase: Some("broken_usecase".parse().unwrap()),
                     scopes: BTreeMap::new(),
                     service: None,
                 },
@@ -1472,7 +1516,7 @@ mod tests {
                     service: None,
                 },
                 Killswitch {
-                    usecase: Some("attachments".into()),
+                    usecase: Some("attachments".parse().unwrap()),
                     scopes: BTreeMap::from([("org".into(), "42".into())]),
                     service: Some("test-*".into()),
                 },
@@ -1525,7 +1569,7 @@ mod tests {
                     scope_pct: Some(25),
                     rules: vec![
                         ThroughputRule {
-                            usecase: Some("high_priority".to_string()),
+                            usecase: Some("high_priority".parse().unwrap()),
                             scopes: vec![("org".to_string(), "123".to_string())],
                             rps: Some(500),
                             pct: None,

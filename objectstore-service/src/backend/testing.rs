@@ -47,18 +47,14 @@ use objectstore_types::range::ByteRange;
 use objectstore_types::resumable::UploadProgress;
 
 use crate::backend::common::{
-    Backend, DeleteResponse, GetResponse, HighVolumeBackend, MetadataResponse,
-    MultipartUploadBackend, PutResponse, TieredGet, TieredMetadata, TieredUpdate, TieredWrite,
+    Backend, DeleteResponse, ExpiryUpdate, GetResponse, HighVolumeBackend, MetadataResponse,
+    PutResponse, SetExpiryResponse, TieredGet, TieredMetadata, TieredUpdate, TieredWrite,
     Tombstone,
 };
 use crate::backend::in_memory::InMemoryBackend;
 use crate::error::Result;
 use crate::id::ObjectId;
-use crate::multipart::{
-    AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
-    ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
-};
-use crate::resumable::BackendToken;
+use crate::resumable::{BackendToken, Session};
 use crate::stream::ClientStream;
 
 /// Hooks for [`TestBackend`].
@@ -76,6 +72,11 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
     /// Returns the diagnostic name used by this backend.
     fn name(&self) -> &'static str {
         "test-backend"
+    }
+
+    /// Intercepts [`Backend::upload_granularity`]. Default delegates to `inner`.
+    fn upload_granularity(&self, inner: &InMemoryBackend) -> u64 {
+        inner.upload_granularity()
     }
 
     /// Intercepts [`Backend::put_object`]. Default delegates to `inner`.
@@ -116,10 +117,10 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         &self,
         inner: &InMemoryBackend,
         id: &ObjectId,
-        expire_at: Timestamp,
+        target: ExpiryUpdate,
         access_time: Timestamp,
-    ) -> Result<bool> {
-        inner.set_expiry(id, expire_at, access_time).await
+    ) -> Result<SetExpiryResponse> {
+        inner.set_expiry(id, target, access_time).await
     }
 
     /// Intercepts [`Backend::delete_object`]. Default delegates to `inner`.
@@ -138,6 +139,36 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
     }
 
     // --- HighVolumeBackend methods ---
+
+    /// Intercepts [`HighVolumeBackend::create_upload_marker`]. Default delegates to `inner`.
+    async fn create_upload_marker(
+        &self,
+        inner: &InMemoryBackend,
+        revision: &ObjectId,
+        time_expires: Timestamp,
+    ) -> Result<()> {
+        inner.create_upload_marker(revision, time_expires).await
+    }
+
+    /// Intercepts [`HighVolumeBackend::has_upload_marker`]. Default delegates to `inner`.
+    async fn has_upload_marker(
+        &self,
+        inner: &InMemoryBackend,
+        revision: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<bool> {
+        inner.has_upload_marker(revision, access_time).await
+    }
+
+    /// Intercepts [`HighVolumeBackend::delete_upload_marker`]. Default delegates to `inner`.
+    async fn delete_upload_marker(
+        &self,
+        inner: &InMemoryBackend,
+        revision: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<bool> {
+        inner.delete_upload_marker(revision, access_time).await
+    }
 
     /// Intercepts [`HighVolumeBackend::put_non_tombstone`]. Default delegates to `inner`.
     async fn put_non_tombstone(
@@ -206,83 +237,9 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         current: Option<&ObjectId>,
         update: TieredUpdate,
         access_time: Timestamp,
-    ) -> Result<bool> {
+    ) -> Result<SetExpiryResponse> {
         inner
             .compare_and_update(id, current, update, access_time)
-            .await
-    }
-
-    // --- MultipartUploadBackend methods ---
-
-    /// Intercepts [`MultipartUploadBackend::initiate_multipart`]. Default delegates to `inner`.
-    async fn initiate_multipart(
-        &self,
-        inner: &InMemoryBackend,
-        id: &ObjectId,
-        metadata: &Metadata,
-    ) -> Result<InitiateMultipartResponse> {
-        inner.initiate_multipart(id, metadata).await
-    }
-
-    /// Intercepts [`MultipartUploadBackend::upload_part`]. Default delegates to `inner`.
-    #[allow(clippy::too_many_arguments)]
-    async fn upload_part(
-        &self,
-        inner: &InMemoryBackend,
-        id: &ObjectId,
-        upload_id: &UploadId,
-        part_number: PartNumber,
-        content_length: u64,
-        content_md5: Option<&str>,
-        body: ClientStream,
-    ) -> Result<UploadPartResponse> {
-        inner
-            .upload_part(
-                id,
-                upload_id,
-                part_number,
-                content_length,
-                content_md5,
-                body,
-            )
-            .await
-    }
-
-    /// Intercepts [`MultipartUploadBackend::list_parts`]. Default delegates to `inner`.
-    async fn list_parts(
-        &self,
-        inner: &InMemoryBackend,
-        id: &ObjectId,
-        upload_id: &UploadId,
-        max_parts: Option<u32>,
-        part_number_marker: Option<PartNumber>,
-    ) -> Result<ListPartsResponse> {
-        inner
-            .list_parts(id, upload_id, max_parts, part_number_marker)
-            .await
-    }
-
-    /// Intercepts [`MultipartUploadBackend::abort_multipart`]. Default delegates to `inner`.
-    async fn abort_multipart(
-        &self,
-        inner: &InMemoryBackend,
-        id: &ObjectId,
-        upload_id: &UploadId,
-    ) -> Result<AbortMultipartResponse> {
-        inner.abort_multipart(id, upload_id).await
-    }
-
-    /// Intercepts [`MultipartUploadBackend::complete_multipart`]. Default delegates to `inner`.
-    async fn complete_multipart(
-        &self,
-        inner: &InMemoryBackend,
-        id: &ObjectId,
-        upload_id: &UploadId,
-        parts: Vec<CompletedPart>,
-        access_time: Timestamp,
-    ) -> Result<CompleteMultipartResponse> {
-        inner
-            .complete_multipart(id, upload_id, parts, access_time)
             .await
     }
 
@@ -294,10 +251,10 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         inner: &InMemoryBackend,
         id: &ObjectId,
         metadata: &Metadata,
-        total_length: NonZeroU64,
+        upload_length: NonZeroU64,
     ) -> Result<Option<BackendToken>> {
         inner
-            .create_upload_session(id, metadata, total_length)
+            .create_upload_session(id, metadata, upload_length)
             .await
     }
 
@@ -305,14 +262,13 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
     async fn put_chunk(
         &self,
         inner: &InMemoryBackend,
-        id: &ObjectId,
-        token: &BackendToken,
+        session: &Session,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
     ) -> Result<UploadProgress> {
         inner
-            .put_chunk(id, token, offset, content_length, stream)
+            .put_chunk(session, offset, content_length, stream)
             .await
     }
 
@@ -320,20 +276,14 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
     async fn upload_offset(
         &self,
         inner: &InMemoryBackend,
-        id: &ObjectId,
-        token: &BackendToken,
+        session: &Session,
     ) -> Result<UploadProgress> {
-        inner.upload_offset(id, token).await
+        inner.upload_offset(session).await
     }
 
     /// Intercepts [`Backend::cancel_upload`]. Default delegates to `inner`.
-    async fn cancel_upload(
-        &self,
-        inner: &InMemoryBackend,
-        id: &ObjectId,
-        token: &BackendToken,
-    ) -> Result<()> {
-        inner.cancel_upload(id, token).await
+    async fn cancel_upload(&self, inner: &InMemoryBackend, session: &Session) -> Result<()> {
+        inner.cancel_upload(session).await
     }
 }
 
@@ -379,8 +329,8 @@ impl<H: Hooks> Backend for TestBackend<H> {
         self.hooks.name()
     }
 
-    fn as_multipart_upload_backend(&self) -> Result<&dyn MultipartUploadBackend> {
-        Ok(self)
+    fn upload_granularity(&self) -> u64 {
+        self.hooks.upload_granularity(&self.inner)
     }
 
     async fn put_object(
@@ -417,11 +367,11 @@ impl<H: Hooks> Backend for TestBackend<H> {
     async fn set_expiry(
         &self,
         id: &ObjectId,
-        expire_at: Timestamp,
+        target: ExpiryUpdate,
         access_time: Timestamp,
-    ) -> Result<bool> {
+    ) -> Result<SetExpiryResponse> {
         self.hooks
-            .set_expiry(&self.inner, id, expire_at, access_time)
+            .set_expiry(&self.inner, id, target, access_time)
             .await
     }
 
@@ -437,37 +387,62 @@ impl<H: Hooks> Backend for TestBackend<H> {
         &self,
         id: &ObjectId,
         metadata: &Metadata,
-        total_length: NonZeroU64,
+        upload_length: NonZeroU64,
     ) -> Result<Option<BackendToken>> {
         self.hooks
-            .create_upload_session(&self.inner, id, metadata, total_length)
+            .create_upload_session(&self.inner, id, metadata, upload_length)
             .await
     }
 
     async fn put_chunk(
         &self,
-        id: &ObjectId,
-        token: &BackendToken,
+        session: &Session,
         offset: u64,
         content_length: u64,
         stream: ClientStream,
     ) -> Result<UploadProgress> {
         self.hooks
-            .put_chunk(&self.inner, id, token, offset, content_length, stream)
+            .put_chunk(&self.inner, session, offset, content_length, stream)
             .await
     }
 
-    async fn upload_offset(&self, id: &ObjectId, token: &BackendToken) -> Result<UploadProgress> {
-        self.hooks.upload_offset(&self.inner, id, token).await
+    async fn upload_offset(&self, session: &Session) -> Result<UploadProgress> {
+        self.hooks.upload_offset(&self.inner, session).await
     }
 
-    async fn cancel_upload(&self, id: &ObjectId, token: &BackendToken) -> Result<()> {
-        self.hooks.cancel_upload(&self.inner, id, token).await
+    async fn cancel_upload(&self, session: &Session) -> Result<()> {
+        self.hooks.cancel_upload(&self.inner, session).await
     }
 }
 
 #[async_trait::async_trait]
 impl<H: Hooks> HighVolumeBackend for TestBackend<H> {
+    async fn create_upload_marker(
+        &self,
+        revision: &ObjectId,
+        time_expires: Timestamp,
+    ) -> Result<()> {
+        self.hooks
+            .create_upload_marker(&self.inner, revision, time_expires)
+            .await
+    }
+
+    async fn has_upload_marker(&self, revision: &ObjectId, access_time: Timestamp) -> Result<bool> {
+        self.hooks
+            .has_upload_marker(&self.inner, revision, access_time)
+            .await
+    }
+
+    async fn delete_upload_marker(
+        &self,
+        revision: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<bool> {
+        self.hooks
+            .delete_upload_marker(&self.inner, revision, access_time)
+            .await
+    }
+
     async fn put_non_tombstone(
         &self,
         id: &ObjectId,
@@ -529,76 +504,9 @@ impl<H: Hooks> HighVolumeBackend for TestBackend<H> {
         current: Option<&ObjectId>,
         update: TieredUpdate,
         access_time: Timestamp,
-    ) -> Result<bool> {
+    ) -> Result<SetExpiryResponse> {
         self.hooks
             .compare_and_update(&self.inner, id, current, update, access_time)
-            .await
-    }
-}
-
-#[async_trait::async_trait]
-impl<H: Hooks> MultipartUploadBackend for TestBackend<H> {
-    async fn initiate_multipart(
-        &self,
-        id: &ObjectId,
-        metadata: &Metadata,
-    ) -> Result<InitiateMultipartResponse> {
-        self.hooks
-            .initiate_multipart(&self.inner, id, metadata)
-            .await
-    }
-
-    async fn upload_part(
-        &self,
-        id: &ObjectId,
-        upload_id: &UploadId,
-        part_number: PartNumber,
-        content_length: u64,
-        content_md5: Option<&str>,
-        body: ClientStream,
-    ) -> Result<UploadPartResponse> {
-        self.hooks
-            .upload_part(
-                &self.inner,
-                id,
-                upload_id,
-                part_number,
-                content_length,
-                content_md5,
-                body,
-            )
-            .await
-    }
-
-    async fn list_parts(
-        &self,
-        id: &ObjectId,
-        upload_id: &UploadId,
-        max_parts: Option<u32>,
-        part_number_marker: Option<PartNumber>,
-    ) -> Result<ListPartsResponse> {
-        self.hooks
-            .list_parts(&self.inner, id, upload_id, max_parts, part_number_marker)
-            .await
-    }
-
-    async fn abort_multipart(
-        &self,
-        id: &ObjectId,
-        upload_id: &UploadId,
-    ) -> Result<AbortMultipartResponse> {
-        self.hooks.abort_multipart(&self.inner, id, upload_id).await
-    }
-
-    async fn complete_multipart(
-        &self,
-        id: &ObjectId,
-        upload_id: &UploadId,
-        parts: Vec<CompletedPart>,
-        access_time: Timestamp,
-    ) -> Result<CompleteMultipartResponse> {
-        self.hooks
-            .complete_multipart(&self.inner, id, upload_id, parts, access_time)
             .await
     }
 }

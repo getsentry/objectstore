@@ -31,7 +31,7 @@ objectstore-service = { path = "objectstore-service" }
 objectstore-test = { path = "objectstore-test" }
 objectstore-typed-options = { path = "objectstore-typed-options" }
 objectstore-typed-options-derive = { path = "objectstore-typed-options-derive" }
-objectstore-types = { path = "objectstore-types", version = "0.2.6" }
+objectstore-types = { path = "objectstore-types", version = "0.3.0" }
 stresstest = { path = "stresstest" }
 
 anyhow = "1.0.102"
@@ -39,11 +39,11 @@ arc-swap = "1.9.2"
 argh = "0.1.19"
 async-compression = "0.4.42"
 async-stream = "0.3.6"
-async-trait = "0.1.89"
+async-trait = "0.1.92"
 axum = "0.8.9"
 axum-extra = { version = "0.12.6", default-features = false }
-base64 = "0.22.1"
-bigtable_rs = { git = "https://github.com/getsentry/bigtable_rs.git", rev = "4cb75bc5e5f87204363973f6302107768e64972e" }
+base64 = { version = "0.23.1", default-features = false, features = ["std"] }
+bigtable_rs = { git = "https://github.com/getsentry/bigtable_rs.git", rev = "072cb5871766b39c08c9a4d1f43c8d3895eeb96e", default-features = false, features = ["gcp-auth-ring", "tonic-tls-ring"] }
 blake3 = "1.8.5"
 bytes = "1.12.0"
 bytesize = "2.4.0"
@@ -52,6 +52,7 @@ console = "0.16.3"
 ed25519-dalek = { version = "2.2.0" }
 elegant-departure = "0.3.2"
 figment = "0.10.19"
+flate2 = "1.1.9"
 futures = "0.3.32"
 futures-util = "0.3.32"
 gcp_auth = "0.12.6"
@@ -62,11 +63,11 @@ http-body-util = "0.1.3"
 humantime = "2.3.0"
 humantime-serde = "1.1.1"
 indicatif = "0.18.4"
-infer = { version = "0.19.0", default-features = false }
+infer = { version = "0.22.0", default-features = false }
 insta = "1.48.0"
-jsonwebtoken = { version = "10.4.0", features = ["rust_crypto"] }
-lru = "0.18.0"
-mediatype = "0.21.0"
+jsonwebtoken = { version = "11.1.0", features = ["rust_crypto"] }
+lru = "0.19.0"
+mediatype = "0.23.0"
 metrics = "0.24.6"
 metrics-exporter-dogstatsd = "0.9.8"
 multer = "3.1.0"
@@ -75,7 +76,7 @@ num_cpus = "1.17.0"
 papaya = "0.2.4"
 pin-project-lite = "0.2.17"
 percent-encoding = "2.3.2"
-quick-xml = "0.40.1"
+quick-xml = "0.42.0"
 rand = "0.10.1"
 rand_distr = "0.6.0"
 regex = "1.12.4"
@@ -83,23 +84,27 @@ reqwest = { version = "0.13.4", default-features = false }
 ring = "0.17.14"
 rustls = { version = "0.23.40", default-features = false }
 secrecy = "0.10.3"
-sentry = "0.48.3"
+sentry = "0.49.5"
 sentry-options = "1.2.4"
+sentry_arroyo = "2.47.0"
 # - `ssl` is required for SASL/SCRAM
 # - `librdkafka` must be built from source either way, and `cmake-build` is the
 #    recommended way to do it
-# - `libz-static` avoids a runtime dependency on `libz.so.1`; see objectstore-inventory-tracker
-rdkafka = { version = "0.39.0", features = [
+# - `libz-static` avoids a runtime dependency on `libz.so.1`, which the base image lacks
+# - the version range lets downstream users of objectstore-inventory-tracker pin
+#   whichever `rdkafka` they use; the lower bound matches `sentry_arroyo`, which
+#   shares the same `rdkafka` types
+rdkafka = { version = ">=0.37.0, <0.40.0", features = [
     "cmake-build",
     "libz-static",
     "ssl",
     "tracing",
 ] }
 serde = { version = "1.0.228", features = ["derive"] }
-serde-vars = "0.3.1"
+serde-vars = "0.4.0"
 serde_json = "1.0.150"
 serde_yaml = "0.9.34-deprecated"
-sketches-ddsketch = "0.3.1"
+sketches-ddsketch = "0.4.2"
 tempfile = "3.27.0"
 thiserror = "2.0.18"
 thread_local = "1.1.9"
@@ -116,5 +121,5 @@ tracing-subscriber = "0.3.23"
 url = "2.5.8"
 uuid = { version = "1.23.3", features = ["v4"] }
 yansi = "1.0.1"
-zstd = "0.13.3"
-zstd-safe = "7.2.4"
+zstd = "0.14.3"
+zstd-safe = "8.2.0"

@@ -6,7 +6,10 @@ use std::time::Duration;
 
 use futures_util::StreamExt as _;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, get_current_timestamp};
-use objectstore_client::{Client, Error, ExpirationPolicy, OperationResult, Permission, Usecase};
+use objectstore_client::{
+    Client, Error, ExpirationPolicy, ExpiryExtension, ExtendExpiryResponse, OperationResult,
+    Permission, Usecase,
+};
 use objectstore_test::server::{TEST_EDDSA_KID, TEST_EDDSA_PRIVKEY};
 use objectstore_types::metadata::Compression;
 use reqwest::StatusCode;
@@ -63,7 +66,7 @@ async fn stores_uncompressed() {
         .token(test_token_generator())
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_organization(12345)).unwrap();
 
     let body = "oh hai!";
@@ -86,7 +89,7 @@ async fn uses_zstd_by_default() {
         .token(test_token_generator())
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_organization(12345)).unwrap();
 
     let body = "oh hai!";
@@ -110,6 +113,39 @@ async fn uses_zstd_by_default() {
 }
 
 #[tokio::test]
+async fn roundtrips_gzip() {
+    let server = test_server().await;
+
+    let client = Client::builder(server.url("/"))
+        .token(test_token_generator())
+        .build()
+        .unwrap();
+    let usecase = Usecase::new("usecase")
+        .unwrap()
+        .with_compression(Compression::Gzip);
+    let session = client.session(usecase.for_organization(12345)).unwrap();
+
+    let stored_id = session.put("oh hai!").send().await.unwrap().key;
+
+    let request = session.get(&stored_id).decompress(false);
+    let response = request.send().await.unwrap().unwrap();
+    assert_eq!(response.metadata.compression, Some(Compression::Gzip));
+
+    let received_compressed = response.payload().await.unwrap();
+    let mut decompressed = Vec::new();
+    std::io::Read::read_to_end(
+        &mut flate2::read::GzDecoder::new(&received_compressed[..]),
+        &mut decompressed,
+    )
+    .unwrap();
+    assert_eq!(decompressed, b"oh hai!");
+
+    let response = session.get(&stored_id).send().await.unwrap().unwrap();
+    assert_eq!(response.metadata.compression, None);
+    assert_eq!(response.payload().await.unwrap(), "oh hai!");
+}
+
+#[tokio::test]
 async fn stores_precompressed_payload_verbatim() {
     let server = test_server().await;
 
@@ -117,7 +153,7 @@ async fn stores_precompressed_payload_verbatim() {
         .token(test_token_generator())
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_organization(12345)).unwrap();
 
     let compressed = zstd::bulk::compress(b"oh hai!", 0).unwrap();
@@ -154,7 +190,7 @@ async fn deletes_stores_stuff() {
         .token(test_token_generator())
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
     let body = "oh hai!";
@@ -174,7 +210,7 @@ async fn stores_under_given_key() {
         .token(test_token_generator())
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
     let body = "oh hai!";
@@ -192,7 +228,7 @@ async fn roundtrips_unicode_metadata() {
         .token(test_token_generator())
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
     let filename = "réport-📄.pdf";
@@ -240,7 +276,7 @@ async fn stores_structured_keys() {
         .token(test_token_generator())
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
     let body = "oh hai!";
@@ -261,7 +297,7 @@ async fn overwrites_existing_key() {
         .token(test_token_generator())
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
     let stored_id = session.put("initial body").send().await.unwrap().key;
@@ -283,7 +319,7 @@ async fn not_found_with_wrong_scope() {
         .token(test_token_generator())
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
 
     // First we have to place an object with one scope
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
@@ -303,7 +339,7 @@ async fn stores_with_origin() {
         .token(test_token_generator())
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_organization(12345)).unwrap();
 
     let stored_id = session
@@ -327,7 +363,7 @@ async fn stores_without_origin() {
         .token(test_token_generator())
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_organization(12345)).unwrap();
 
     let stored_id = session
@@ -352,7 +388,7 @@ async fn fails_with_insufficient_auth_token_perms() {
         .token(token_generator)
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
     let put_result = session.put("initial body").send().await;
@@ -368,6 +404,18 @@ async fn fails_with_insufficient_auth_token_perms() {
         Err(Error::Reqwest(err)) => assert_eq!(err.status().unwrap(), StatusCode::FORBIDDEN),
         _ => panic!("Expected error"),
     }
+
+    let error = session
+        .extend_expiry(
+            "some-key",
+            ExpiryExtension::FromNow(Duration::from_secs(86400)),
+        )
+        .send()
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, Error::Reqwest(error) if error.status() == Some(StatusCode::FORBIDDEN))
+    );
 }
 
 #[tokio::test]
@@ -377,7 +425,7 @@ async fn create_token_rejects_escalation() {
         .token(test_token_generator().permissions(&[Permission::ObjectRead]))
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_organization(12345)).unwrap();
 
     let result = session
@@ -413,7 +461,7 @@ async fn create_token_rejects_static_token() {
         .token(token)
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_organization(12345)).unwrap();
 
     // A static, pre-signed token cannot be re-signed with custom permissions or expiry.
@@ -429,7 +477,7 @@ async fn create_token_rejects_static_token() {
 #[tokio::test]
 async fn create_token_without_provider() {
     let client = Client::builder("http://127.0.0.1:8888/").build().unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_organization(12345)).unwrap();
 
     // Without a token provider there is no request to configure, and no token to return.
@@ -447,7 +495,7 @@ async fn stores_with_static_token() {
         .token(token)
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_organization(12345)).unwrap();
 
     let body = "hello with static token!";
@@ -466,7 +514,7 @@ async fn batch_operations() {
         .token(test_token_generator())
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
     // First batch: 4 PUT operations
@@ -583,7 +631,7 @@ async fn batch_insert_without_key() {
         .token(test_token_generator())
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
     // Insert without specifying a key — the server should generate one
@@ -625,7 +673,7 @@ async fn batch_partial_failures() {
         .token(read_only_token)
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
     let results: Vec<_> = session
@@ -701,7 +749,7 @@ async fn batch_put_files() {
         .token(test_token_generator())
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
     let dir = tempfile::tempdir().unwrap();
@@ -771,7 +819,7 @@ async fn put_path_does_not_exhaust_file_descriptors() {
         .build()
         .unwrap();
     let session = client
-        .session(Usecase::new("usecase").for_project(12345, 1337))
+        .session(Usecase::from_static("usecase").for_project(12345, 1337))
         .unwrap();
 
     let dir = tempfile::tempdir().unwrap();
@@ -796,7 +844,7 @@ async fn put_file_with_compression() {
         .token(test_token_generator())
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_organization(12345)).unwrap();
 
     let dir = tempfile::tempdir().unwrap();
@@ -838,7 +886,7 @@ async fn head_returns_metadata() {
         .token(test_token_generator())
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
     let stored_id = session
@@ -867,7 +915,7 @@ async fn round_trips_expiration_policy_beyond_a_year() {
         .token(test_token_generator())
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
     // Serializes as "400d 1h 18m 31s"
@@ -891,6 +939,80 @@ async fn round_trips_expiration_policy_beyond_a_year() {
 }
 
 #[tokio::test]
+async fn extends_expiry() {
+    let server = test_server().await;
+    let session = common::test_session(&server);
+    let policy = ExpirationPolicy::TimeToLive(Duration::from_secs(86400));
+    let key = session
+        .put("payload")
+        .expiration_policy(policy)
+        .send()
+        .await
+        .unwrap()
+        .key;
+
+    let outcome = session
+        .extend_expiry(
+            &key,
+            ExpiryExtension::FromCreation(Duration::from_secs(3 * 86400)),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(outcome, ExtendExpiryResponse::Satisfied);
+    let metadata = session.head(&key).send().await.unwrap().unwrap();
+    assert_eq!(
+        metadata.time_expires,
+        Some(metadata.time_created.unwrap() + Duration::from_secs(3 * 86400))
+    );
+    assert_eq!(
+        metadata.expiration_policy,
+        ExpirationPolicy::TimeToLive(Duration::from_secs(3 * 86400))
+    );
+
+    let outcome = session
+        .extend_expiry(
+            &key,
+            ExpiryExtension::FromCreation(Duration::from_secs(2 * 86400)),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(outcome, ExtendExpiryResponse::Satisfied);
+    assert_eq!(session.head(&key).send().await.unwrap().unwrap(), metadata);
+    let response = session.get(&key).send().await.unwrap().unwrap();
+    assert_eq!(response.payload().await.unwrap(), "payload");
+}
+
+#[tokio::test]
+async fn extend_expiry_missing_object() {
+    let server = test_server().await;
+    let session = common::test_session(&server);
+    let outcome = session
+        .extend_expiry(
+            "missing",
+            ExpiryExtension::FromNow(Duration::from_secs(86400)),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(outcome, ExtendExpiryResponse::NotFound);
+}
+
+#[tokio::test]
+async fn extend_expiry_non_expiring_object() {
+    let server = test_server().await;
+    let session = common::test_session(&server);
+    let key = session.put("payload").send().await.unwrap().key;
+    let outcome = session
+        .extend_expiry(&key, ExpiryExtension::FromNow(Duration::from_secs(86400)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(outcome, ExtendExpiryResponse::Rejected);
+}
+
+#[tokio::test]
 async fn batch_head_operations() {
     let server = test_server().await;
 
@@ -898,7 +1020,7 @@ async fn batch_head_operations() {
         .token(test_token_generator())
         .build()
         .unwrap();
-    let usecase = Usecase::new("usecase");
+    let usecase = Usecase::from_static("usecase");
     let session = client.session(usecase.for_project(12345, 1337)).unwrap();
 
     session
@@ -964,6 +1086,7 @@ async fn test_resumable_upload() {
         .unwrap()
         .unwrap();
     assert_eq!(upload.key(), "resumable-client");
+    assert!(upload.granularity().is_some());
     assert_eq!(
         upload.progress().send().await.unwrap(),
         UploadProgress::Incomplete { offset: 0 }
@@ -975,14 +1098,16 @@ async fn test_resumable_upload() {
 
     // Resume the session and finish the upload.
     let resumed = session.resume_upload(upload.key(), upload.token().clone());
+    assert_eq!(resumed.granularity(), None);
     assert_eq!(
         resumed.progress().send().await.unwrap(),
         UploadProgress::Incomplete { offset: 3 }
     );
-    assert_eq!(
-        resumed.put(0, "bad").send().await.unwrap(),
-        UploadProgress::Incomplete { offset: 3 }
-    );
+    assert_eq!(resumed.granularity(), None);
+    assert!(matches!(
+        resumed.put(0, "bad").send().await.unwrap_err(),
+        Error::UploadOffsetMismatch { offset: 3 }
+    ));
     assert!(resumed.put(3, "defg").send().await.is_err());
     assert_eq!(
         resumed.put(3, "def").send().await.unwrap(),
@@ -994,6 +1119,62 @@ async fn test_resumable_upload() {
     assert_eq!(response.metadata.content_type, "text/plain");
     assert_eq!(response.payload().await.unwrap(), "abcdef");
     assert!(resumed.progress().send().await.is_err());
+}
+
+#[cfg(feature = "resumable-upload-api")]
+#[tokio::test]
+async fn test_resumable_upload_streaming() {
+    let server = test_server().await;
+    let session = common::test_session(&server);
+
+    let compressed = zstd::encode_all(&b"abcdef"[..], 0).unwrap();
+    let second_piece_start = compressed.len() / 2;
+    let first_piece_len = second_piece_start / 2;
+    let upload = session
+        .create_upload(compressed.len() as u64)
+        .key("resumable-streaming-client")
+        .compression(Compression::Zstd)
+        .send()
+        .await
+        .unwrap()
+        .unwrap();
+
+    let chunk = futures_util::stream::iter([
+        Ok::<_, std::io::Error>(bytes::Bytes::copy_from_slice(
+            &compressed[..first_piece_len],
+        )),
+        Ok(bytes::Bytes::copy_from_slice(
+            &compressed[first_piece_len..second_piece_start],
+        )),
+    ])
+    .boxed();
+    assert_eq!(
+        upload
+            .put_stream(0, second_piece_start as u64, chunk)
+            .send()
+            .await
+            .unwrap(),
+        UploadProgress::Incomplete {
+            offset: second_piece_start as u64
+        }
+    );
+
+    let reader = std::io::Cursor::new(compressed[second_piece_start..].to_vec());
+    assert_eq!(
+        upload
+            .put_read(
+                second_piece_start as u64,
+                (compressed.len() - second_piece_start) as u64,
+                reader
+            )
+            .send()
+            .await
+            .unwrap(),
+        UploadProgress::Complete
+    );
+
+    let response = session.get(upload.key()).send().await.unwrap().unwrap();
+    assert_eq!(response.payload().await.unwrap(), "abcdef");
 }
 
 #[cfg(feature = "resumable-upload-api")]

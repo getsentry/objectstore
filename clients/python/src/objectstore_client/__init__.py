@@ -1,11 +1,21 @@
-from objectstore_client.auth import Permission, SecretKey, TokenGenerator, TokenProvider
+from objectstore_client.auth import (
+    Permission,
+    SecretKey,
+    Token,
+    TokenGenerator,
+    TokenProvider,
+)
 from objectstore_client.client import (
     Client,
     GetResponse,
     Session,
     Usecase,
 )
-from objectstore_client.errors import RequestError
+from objectstore_client.errors import (
+    ExpiryExtensionRejected,
+    ObjectNotFound,
+    RequestError,
+)
 from objectstore_client.metadata import (
     Compression,
     ExpirationPolicy,
@@ -22,6 +32,8 @@ __all__ = [
     "Session",
     "GetResponse",
     "RequestError",
+    "ObjectNotFound",
+    "ExpiryExtensionRejected",
     "Compression",
     "ExpirationPolicy",
     "Metadata",
@@ -29,6 +41,7 @@ __all__ = [
     "TimeToIdle",
     "TimeToLive",
     "TokenProvider",
+    "Token",
     "SecretKey",
     "TokenGenerator",
     "MetricsBackend",

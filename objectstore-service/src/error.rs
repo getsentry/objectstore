@@ -10,6 +10,9 @@ use std::error::Error as StdError;
 use std::fmt;
 
 use objectstore_log::Level;
+
+use crate::change_stream::ChangeStreamError;
+
 /// A panic captured from a service task.
 #[derive(Debug)]
 pub struct Panic {
@@ -43,8 +46,6 @@ impl StdError for Panic {}
 pub enum ErrorKind {
     /// Object metadata supplied by a client is invalid.
     InvalidMetadata,
-    /// A multipart upload identifier is invalid.
-    InvalidUploadId,
     /// A client-provided request stream failed.
     ClientStream,
     /// A requested byte range cannot be resolved against the object size.
@@ -59,6 +60,8 @@ pub enum ErrorKind {
     },
     /// A resumable upload session expired or was canceled.
     UploadSessionGone,
+    /// A resumable upload session token could not be decrypted or authenticated.
+    InvalidUploadSessionToken,
     /// The backend does not recognize a resumable upload session.
     UnknownUploadSession,
     /// A resumable chunk would exceed the total upload length.
@@ -69,6 +72,13 @@ pub enum ErrorKind {
         content_length: u64,
         /// The total upload length declared when the session was created.
         upload_length: u64,
+    },
+    /// A non-final resumable chunk is shorter than the upload granularity.
+    ChunkTooSmall {
+        /// The declared length of the chunk.
+        chunk_length: u64,
+        /// The upload granularity in bytes.
+        upload_granularity: u64,
     },
     /// The service cannot accept more work.
     AtCapacity,
@@ -96,7 +106,6 @@ impl fmt::Display for ErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidMetadata => f.write_str("invalid object metadata"),
-            Self::InvalidUploadId => f.write_str("invalid upload id"),
             Self::ClientStream => f.write_str("invalid client stream"),
             Self::RangeNotSatisfiable { total } => {
                 write!(f, "range not satisfiable (object size: {total} bytes)")
@@ -105,6 +114,9 @@ impl fmt::Display for ErrorKind {
                 write!(f, "upload offset mismatch (server holds {offset} bytes)")
             }
             Self::UploadSessionGone => f.write_str("upload session gone"),
+            Self::InvalidUploadSessionToken => {
+                f.write_str("invalid upload session token: could not decrypt or authenticate it")
+            }
             Self::UnknownUploadSession => f.write_str("unknown upload session"),
             Self::ChunkExceedsUploadLength {
                 offset,
@@ -113,6 +125,13 @@ impl fmt::Display for ErrorKind {
             } => write!(
                 f,
                 "chunk at offset {offset} with length {content_length} exceeds upload length {upload_length}"
+            ),
+            Self::ChunkTooSmall {
+                chunk_length,
+                upload_granularity,
+            } => write!(
+                f,
+                "non-final chunk length {chunk_length} is smaller than upload granularity {upload_granularity}"
             ),
             Self::AtCapacity => f.write_str("service at capacity"),
             Self::Unsupported => f.write_str("unsupported operation"),
@@ -185,13 +204,14 @@ impl Error {
         match self.kind {
             // Malformed client input at DEBUG level
             ErrorKind::InvalidMetadata => Level::DEBUG,
-            ErrorKind::InvalidUploadId => Level::DEBUG,
             ErrorKind::ClientStream => Level::DEBUG,
             ErrorKind::RangeNotSatisfiable { .. } => Level::DEBUG,
             ErrorKind::UploadOffsetMismatch { .. } => Level::DEBUG,
             ErrorKind::UploadSessionGone => Level::DEBUG,
+            ErrorKind::InvalidUploadSessionToken => Level::DEBUG,
             ErrorKind::UnknownUploadSession => Level::DEBUG,
             ErrorKind::ChunkExceedsUploadLength { .. } => Level::DEBUG,
+            ErrorKind::ChunkTooSmall { .. } => Level::DEBUG,
             // Indicates that optional functionality is not supported.
             // We don't want a rogue client spamming us with Sentry errors just by calling an API
             // that the server doesn't support, so we just log it.
@@ -296,6 +316,17 @@ where
     }
 }
 
+impl From<ChangeStreamError> for Error {
+    fn from(source: ChangeStreamError) -> Self {
+        let kind = match source {
+            ChangeStreamError::Unavailable(_) => ErrorKind::BackendUnavailable,
+            ChangeStreamError::Timeout(_) => ErrorKind::BackendTimeout,
+            ChangeStreamError::Failure(_) => ErrorKind::BackendFailure,
+        };
+        Self::with_context(kind, "writing to the change stream", source)
+    }
+}
+
 impl From<std::io::Error> for Error {
     fn from(source: std::io::Error) -> Self {
         Self::with_source(ErrorKind::BackendFailure, source)
@@ -305,12 +336,6 @@ impl From<std::io::Error> for Error {
 impl From<crate::stream::ClientError> for Error {
     fn from(source: crate::stream::ClientError) -> Self {
         Self::with_source(ErrorKind::ClientStream, source)
-    }
-}
-
-impl From<objectstore_types::multipart::InvalidUploadId> for Error {
-    fn from(source: objectstore_types::multipart::InvalidUploadId) -> Self {
-        Self::with_source(ErrorKind::InvalidUploadId, source)
     }
 }
 

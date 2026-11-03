@@ -113,8 +113,8 @@ for detailed setup and usage instructions.
 
 ## Building
 
-Ensure `protoc` and the latest stable Rust toolchain are installed on your
-machine. A release build can be created with:
+Ensure the latest stable Rust toolchain is installed on your machine. A release
+build can be created with:
 
 ```sh
 cargo build --release --locked
@@ -192,7 +192,7 @@ the required images and configuration, such as port mapping.
 column families.
  - For **Google Cloud Storage** (GCS), a test bucket is already configured in
   the dev container.
- - For **MinIO** (S3-compatible), a public test bucket is created on startup.
+ - For **SeaweedFS** (S3-compatible), a public test bucket is created on startup.
 
 The emulators example config is pre-configured with a tiered configuration using
 both backends. To use it:

@@ -2,6 +2,8 @@
 //!
 //! Durations are exchanged as part of the
 //! [`x-sn-expiration`](crate::metadata::HEADER_EXPIRATION) header, for instance as `ttl:7d 12h`.
+//! JSON fields can use `#[serde(with = "crate::duration")]` to exchange a
+//! [`Duration`] as a string in the same format.
 //!
 //! # Emitted format
 //!
@@ -29,9 +31,12 @@
 //! writes. That leniency exists to keep reading values that older versions persisted, and is not
 //! part of the wire format: do not rely on it, and do not reproduce it in clients.
 
+use std::borrow::Cow;
 use std::error::Error;
 use std::fmt;
 use std::time::Duration;
+
+use serde::{Deserialize, Deserializer, Serializer};
 
 const SECS_PER_MINUTE: u64 = 60;
 const SECS_PER_HOUR: u64 = 60 * SECS_PER_MINUTE;
@@ -73,6 +78,22 @@ pub fn format_duration(duration: Duration) -> FormattedDuration {
 /// Returns a [`ParseDurationError`] if `input` is not a valid duration.
 pub fn parse_duration(input: &str) -> Result<Duration, ParseDurationError> {
     humantime::parse_duration(input).map_err(ParseDurationError)
+}
+
+/// Serializes a duration as a wire-format string, truncating fractional seconds.
+pub fn serialize<S: Serializer>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.collect_str(&format_duration(*duration))
+}
+
+/// Deserializes a duration string using [`parse_duration`].
+pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
+    // Plain `Cow::deserialize` always owns; `borrow` enables borrowing from the input.
+    #[derive(Deserialize)]
+    #[serde(transparent)]
+    struct BorrowedStr<'a>(#[serde(borrow)] Cow<'a, str>);
+
+    let BorrowedStr(value) = BorrowedStr::deserialize(deserializer)?;
+    parse_duration(&value).map_err(serde::de::Error::custom)
 }
 
 /// The error returned when a string is not a valid duration in the wire format.

@@ -19,18 +19,14 @@ use objectstore_types::range::{ByteRange, ContentRange};
 use objectstore_types::resumable::{SessionToken as EncryptedSessionToken, UploadProgress};
 use objectstore_types::time::Timestamp;
 
-use crate::backend::common::Backend;
+use crate::backend::common::{Backend, ExpiryUpdate, SetExpiryResponse};
 use crate::backend::counting::CountingBackend;
 use crate::background::RenewalScheduler;
 use crate::concurrency::ConcurrencyLimiter;
 use crate::encryption::Cipher;
 use crate::error::{ErrorKind, Result, ResultExt as _};
 use crate::id::{ObjectContext, ObjectId};
-use crate::multipart::{
-    AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
-    ListPartsResponse, PartNumber, UploadId, UploadPartResponse,
-};
-use crate::resumable::{BackendToken, SessionToken};
+use crate::resumable::Session;
 use crate::stream::{ClientStream, PayloadStream};
 use crate::streaming::StreamExecutor;
 
@@ -42,6 +38,15 @@ pub type MetadataResponse = Option<Metadata>;
 pub type InsertResponse = ObjectId;
 /// Service response for [`StorageService::delete_object`].
 pub type DeleteResponse = ();
+
+/// A newly opened resumable upload session and its upload granularity.
+#[derive(Debug)]
+pub struct CreateUploadSessionResponse {
+    /// The encrypted token used to continue the upload.
+    pub session: EncryptedSessionToken,
+    /// The upload granularity in bytes, or zero when there is none.
+    pub granularity: u64,
+}
 
 /// Default concurrency limit for [`StorageService`].
 ///
@@ -303,15 +308,23 @@ impl StorageService {
     }
 
     /// Extends an existing TTL or TTI object's deadline.
+    ///
+    /// Actual extensions adjust TTL duration to approximately match the lifetime since
+    /// creation. TTI duration, payload, and other metadata remain unchanged.
+    ///
+    /// Returns whether the request was satisfied, the object was absent or expired,
+    /// or the update was rejected. See [`SetExpiryResponse`] for details.
+    /// Remaining-lifetime limits in [`ExpiryUpdate`] are enforced against `access_time`;
+    /// exceeding a limit returns [`ErrorKind::InvalidMetadata`].
     pub async fn set_expiry(
         &self,
         id: ObjectId,
-        expire_at: Timestamp,
+        target: ExpiryUpdate,
         access_time: Timestamp,
-    ) -> Result<bool> {
+    ) -> Result<SetExpiryResponse> {
         let inner = Arc::clone(&self.inner);
         self.spawn("set_expiry", async move {
-            inner.set_expiry(&id, expire_at, access_time).await
+            inner.set_expiry(&id, target, access_time).await
         })
         .await
     }
@@ -345,119 +358,9 @@ impl StorageService {
         self.inner.join().await;
     }
 
-    // --- Multipart upload operations ---
-
-    /// Initiates a new multipart upload.
-    pub async fn initiate_multipart(
-        &self,
-        id: ObjectId,
-        metadata: Metadata,
-    ) -> Result<InitiateMultipartResponse> {
-        metadata.validate().kind(ErrorKind::InvalidMetadata)?;
-        self.inner.as_multipart_upload_backend()?; // Fail before clone/spawn if unsupported
-        let inner = self.inner.clone();
-        self.spawn("initiate_multipart", async move {
-            inner
-                .as_multipart_upload_backend()?
-                .initiate_multipart(&id, &metadata)
-                .await
-        })
-        .await
-    }
-
-    /// Uploads a single part.
-    ///
-    /// Note that this requires a `content_length`.
-    /// This grants us the broadest and most seamless compatibility when it comes to backends.
-    /// For example, MinIO rejects `UploadPart` requests without a `Content-Length` on plain PUT
-    /// requests.
-    /// This can be worked around by using AWS SigV4 chunked streaming requests, which we could use
-    /// if one day we'll have a usecase where the client doesn't know the part length upfront.
-    pub async fn upload_part(
-        &self,
-        id: ObjectId,
-        upload_id: UploadId,
-        part_number: PartNumber,
-        content_length: u64,
-        content_md5: Option<String>,
-        body: ClientStream,
-    ) -> Result<UploadPartResponse> {
-        self.inner.as_multipart_upload_backend()?; // Fail before clone/spawn if unsupported
-        let inner = self.inner.clone();
-        self.spawn("upload_part", async move {
-            inner
-                .as_multipart_upload_backend()?
-                .upload_part(
-                    &id,
-                    &upload_id,
-                    part_number,
-                    content_length,
-                    content_md5.as_deref(),
-                    body,
-                )
-                .await
-        })
-        .await
-    }
-
-    /// Lists the parts uploaded so far.
-    pub async fn list_parts(
-        &self,
-        id: ObjectId,
-        upload_id: UploadId,
-        max_parts: Option<u32>,
-        part_number_marker: Option<PartNumber>,
-    ) -> Result<ListPartsResponse> {
-        self.inner.as_multipart_upload_backend()?; // Fail before clone/spawn if unsupported
-        let inner = self.inner.clone();
-        self.spawn("list_parts", async move {
-            inner
-                .as_multipart_upload_backend()?
-                .list_parts(&id, &upload_id, max_parts, part_number_marker)
-                .await
-        })
-        .await
-    }
-
-    /// Aborts a multipart upload.
-    pub async fn abort_multipart(
-        &self,
-        id: ObjectId,
-        upload_id: UploadId,
-    ) -> Result<AbortMultipartResponse> {
-        self.inner.as_multipart_upload_backend()?; // Fail before clone/spawn if unsupported
-        let inner = self.inner.clone();
-        self.spawn("abort_multipart", async move {
-            inner
-                .as_multipart_upload_backend()?
-                .abort_multipart(&id, &upload_id)
-                .await
-        })
-        .await
-    }
-
-    /// Finalizes a multipart upload.
-    pub async fn complete_multipart(
-        &self,
-        id: ObjectId,
-        upload_id: UploadId,
-        parts: Vec<CompletedPart>,
-        access_time: Timestamp,
-    ) -> Result<CompleteMultipartResponse> {
-        self.inner.as_multipart_upload_backend()?; // Fail before clone/spawn if unsupported
-        let inner = self.inner.clone();
-        self.spawn("complete_multipart", async move {
-            inner
-                .as_multipart_upload_backend()?
-                .complete_multipart(&id, &upload_id, parts, access_time)
-                .await
-        })
-        .await
-    }
-
     // --- Resumable upload operations ---
 
-    /// Opens a resumable upload session for an object of `total_length` bytes.
+    /// Opens a resumable upload session for an object of `upload_length` bytes.
     ///
     /// Returns `Ok(None)` for zero-length objects or when the backend declines resumable uploads
     /// for this object, in which case the caller should fall back to [`Self::insert_object`].
@@ -465,9 +368,9 @@ impl StorageService {
         &self,
         id: ObjectId,
         metadata: Metadata,
-        total_length: u64,
-    ) -> Result<Option<EncryptedSessionToken>> {
-        let Some(total_length) = NonZeroU64::new(total_length) else {
+        upload_length: u64,
+    ) -> Result<Option<CreateUploadSessionResponse>> {
+        let Some(upload_length) = NonZeroU64::new(upload_length) else {
             return Ok(None);
         };
         metadata.validate().kind(ErrorKind::InvalidMetadata)?;
@@ -475,35 +378,36 @@ impl StorageService {
         let cipher = Arc::clone(&self.cipher);
         self.spawn("create_upload_session", async move {
             let session = inner
-                .create_upload_session(&id, &metadata, total_length)
+                .create_upload_session(&id, &metadata, upload_length)
                 .await?;
             session
                 .map(|backend_token| {
-                    cipher
-                        .encrypt(&SessionToken {
+                    let session = cipher
+                        .encrypt(&Session {
                             object_id: id,
+                            upload_length,
                             backend_token,
                         })
-                        .map(EncryptedSessionToken::new)
+                        .map(EncryptedSessionToken::new)?;
+                    Ok(CreateUploadSessionResponse {
+                        session,
+                        granularity: inner.upload_granularity(),
+                    })
                 })
                 .transpose()
         })
         .await
     }
 
-    fn backend_token_for(
-        &self,
-        expected_id: &ObjectId,
-        token: EncryptedSessionToken,
-    ) -> Result<BackendToken> {
-        let session: SessionToken = self
+    fn session_for(&self, expected_id: &ObjectId, token: EncryptedSessionToken) -> Result<Session> {
+        let session: Session = self
             .cipher
             .decrypt(token.as_bytes())
-            .map_err(|_| ErrorKind::UnknownUploadSession)?;
+            .map_err(|_| ErrorKind::InvalidUploadSessionToken)?;
         if session.object_id != *expected_id {
             return Err(ErrorKind::UnknownUploadSession.into());
         }
-        Ok(session.backend_token)
+        Ok(session)
     }
 
     /// Writes a chunk of `content_length` bytes at `offset` into an open session.
@@ -522,11 +426,11 @@ impl StorageService {
         content_length: u64,
         body: ClientStream,
     ) -> Result<UploadProgress> {
-        let session = self.backend_token_for(&id, token)?;
+        let session = self.session_for(&id, token)?;
         let inner = Arc::clone(&self.inner);
         self.spawn("put_chunk", async move {
             inner
-                .put_chunk(&id, &session, offset, content_length, body)
+                .put_chunk(&session, offset, content_length, body)
                 .await
         })
         .await
@@ -542,20 +446,20 @@ impl StorageService {
         id: ObjectId,
         token: EncryptedSessionToken,
     ) -> Result<UploadProgress> {
-        let session = self.backend_token_for(&id, token)?;
+        let session = self.session_for(&id, token)?;
         let inner = Arc::clone(&self.inner);
         self.spawn("upload_offset", async move {
-            inner.upload_offset(&id, &session).await
+            inner.upload_offset(&session).await
         })
         .await
     }
 
     /// Cancels an upload session, discarding whatever was uploaded.
     pub async fn cancel_upload(&self, id: ObjectId, token: EncryptedSessionToken) -> Result<()> {
-        let session = self.backend_token_for(&id, token)?;
+        let session = self.session_for(&id, token)?;
         let inner = Arc::clone(&self.inner);
         self.spawn("cancel_upload", async move {
-            inner.cancel_upload(&id, &session).await
+            inner.cancel_upload(&session).await
         })
         .await
     }
@@ -577,12 +481,13 @@ mod tests {
     use super::*;
     use crate::backend::bigtable::{BigTableBackend, BigTableConfig};
     use crate::backend::changelog::NoopChangeLog;
-    use crate::backend::common::{HighVolumeBackend, PutResponse, TieredWrite};
+    use crate::backend::common::{ExpiryTarget, HighVolumeBackend, PutResponse, TieredWrite};
     use crate::backend::gcs::{GcsBackend, GcsConfig};
     use crate::backend::in_memory::InMemoryBackend;
     use crate::backend::testing::{Hooks, TestBackend};
     use crate::backend::tiered::TieredStorage;
     use crate::change_stream::ChangeStreamFactory;
+    use crate::resumable::BackendToken;
     use crate::stream::{self, ClientStream};
 
     #[derive(Clone, Debug, Default)]
@@ -592,12 +497,16 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Hooks for ResumableTokenHooks {
+        fn upload_granularity(&self, _inner: &InMemoryBackend) -> u64 {
+            256 * 1024
+        }
+
         async fn create_upload_session(
             &self,
             _inner: &InMemoryBackend,
             _id: &ObjectId,
             _metadata: &Metadata,
-            _total_length: NonZeroU64,
+            _upload_length: NonZeroU64,
         ) -> Result<Option<BackendToken>> {
             Ok(Some("backend token".to_owned()))
         }
@@ -605,17 +514,20 @@ mod tests {
         async fn upload_offset(
             &self,
             _inner: &InMemoryBackend,
-            _id: &ObjectId,
-            token: &BackendToken,
+            session: &Session,
         ) -> Result<UploadProgress> {
-            self.seen_tokens.lock().unwrap().push(token.to_owned());
+            assert_eq!(session.upload_length.get(), 4);
+            self.seen_tokens
+                .lock()
+                .unwrap()
+                .push(session.backend_token.clone());
             Ok(UploadProgress::Incomplete { offset: 0 })
         }
     }
 
     fn make_context() -> ObjectContext {
         ObjectContext {
-            usecase: "testing".into(),
+            usecase: "testing".parse().unwrap(),
             scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
         }
     }
@@ -675,6 +587,7 @@ mod tests {
         let config = GcsConfig {
             endpoint: Some("http://localhost:8087".into()),
             bucket: "test-bucket".into(), // aligned with the env var in devservices and CI
+            tcp_user_timeout: Duration::from_secs(30),
             cogs: None,
         };
 
@@ -718,6 +631,7 @@ mod tests {
         let gcs_config = GcsConfig {
             endpoint: Some("http://localhost:8087".into()),
             bucket: "test-bucket".into(),
+            tcp_user_timeout: Duration::from_secs(30),
             cogs: None,
         };
 
@@ -864,11 +778,16 @@ mod tests {
             .unwrap();
         let requested = old_expiry + Duration::from_hours(1);
 
-        assert!(
+        assert_eq!(
             service
-                .set_expiry(id.clone(), requested, Timestamp::now())
+                .set_expiry(
+                    id.clone(),
+                    ExpiryTarget::At(requested).into(),
+                    Timestamp::now()
+                )
                 .await
-                .unwrap()
+                .unwrap(),
+            SetExpiryResponse::Satisfied(requested)
         );
         assert_eq!(
             service
@@ -932,14 +851,14 @@ mod tests {
             &self,
             inner: &InMemoryBackend,
             id: &ObjectId,
-            expire_at: Timestamp,
+            target: ExpiryUpdate,
             access_time: Timestamp,
-        ) -> Result<bool> {
+        ) -> Result<SetExpiryResponse> {
             *self.access_time.lock().unwrap() = Some(access_time);
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.started.notify_one();
             self.resume.notified().await;
-            inner.set_expiry(id, expire_at, access_time).await
+            inner.set_expiry(id, target, access_time).await
         }
     }
 
@@ -1114,14 +1033,14 @@ mod tests {
             &self,
             inner: &InMemoryBackend,
             id: &ObjectId,
-            expire_at: Timestamp,
+            target: ExpiryUpdate,
             access_time: Timestamp,
-        ) -> Result<bool> {
+        ) -> Result<SetExpiryResponse> {
             if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 assert!(!self.panic, "intentional renewal panic");
                 return Err(ErrorKind::BackendFailure.into());
             }
-            inner.set_expiry(id, expire_at, access_time).await
+            inner.set_expiry(id, target, access_time).await
         }
     }
 
@@ -1382,11 +1301,13 @@ mod tests {
     async fn resumable_round_trip() {
         let service = make_service();
         let id = ObjectId::new(make_context(), "resumable".into());
-        let token = service
+        let created = service
             .create_upload_session(id.clone(), Metadata::default(), 3)
             .await
             .unwrap()
             .unwrap();
+        assert_eq!(created.granularity, 0);
+        let token = created.session;
         assert_eq!(
             service
                 .put_chunk(id.clone(), token.clone(), 0, 1, stream::single("a"))
@@ -1460,17 +1381,29 @@ mod tests {
         );
         let id = ObjectId::new(make_context(), "resumable".into());
 
-        let token = service
+        let created = service
             .create_upload_session(id.clone(), Metadata::default(), 4)
             .await?
             .expect("test backend supports resumable uploads");
+        assert_eq!(created.granularity, 256 * 1024);
+        let token = created.session;
         assert_ne!(token.as_bytes(), b"backend token");
         assert!(matches!(
             service
                 .upload_offset(id.clone(), EncryptedSessionToken::new(b"backend token"))
                 .await,
-            Err(error) if error.kind() == ErrorKind::UnknownUploadSession
+            Err(error) if error.kind() == ErrorKind::InvalidUploadSessionToken
         ));
+        let other_service = StorageService::new(
+            Box::new(TestBackend::new(hooks.clone())),
+            Cipher::ephemeral().unwrap(),
+        );
+        let error = other_service
+            .upload_offset(id.clone(), token.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidUploadSessionToken);
+        assert!(error.source().is_none());
         let other_id = ObjectId::new(make_context(), "other".into());
         assert!(matches!(
             service.upload_offset(other_id, token.clone()).await,
@@ -1499,7 +1432,8 @@ mod tests {
         let encrypted = service
             .create_upload_session(id.clone(), Metadata::default(), 4)
             .await?
-            .expect("test backend supports resumable uploads");
+            .expect("test backend supports resumable uploads")
+            .session;
         assert_ne!(encrypted.as_bytes(), b"backend token");
         service.upload_offset(id, encrypted).await?;
         assert_eq!(
@@ -1524,8 +1458,11 @@ mod tests {
             .upload_offset(id, EncryptedSessionToken::new(b"backend token"))
             .await;
         let error = result.unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::UnknownUploadSession);
-        assert_eq!(error.to_string(), "unknown upload session");
+        assert_eq!(error.kind(), ErrorKind::InvalidUploadSessionToken);
+        assert_eq!(
+            error.to_string(),
+            "invalid upload session token: could not decrypt or authenticate it"
+        );
         assert!(error.source().is_none());
         assert!(hooks.seen_tokens.lock().unwrap().is_empty());
     }

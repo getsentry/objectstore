@@ -70,7 +70,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    rustls::crypto::aws_lc_rs::default_provider()
+    rustls::crypto::ring::default_provider()
         .install_default()
         .ok(); // INVARIANT: no other code installs a provider before main()
 
@@ -190,7 +190,7 @@ async fn main() -> anyhow::Result<()> {
     let worker_bytes = Arc::clone(&total_bytes);
     let worker_handle = tokio::spawn(async move {
         let context = ObjectContext {
-            usecase: "bench".into(),
+            usecase: "bench".parse().unwrap(),
             scopes: Scopes::from_iter([
                 Scope::create("org", "bench").unwrap(), // INVARIANT: valid scope name
             ]),

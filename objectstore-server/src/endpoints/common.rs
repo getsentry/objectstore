@@ -13,6 +13,7 @@ use thiserror::Error;
 
 use crate::auth::AuthError;
 use crate::extractors::batch::BatchError;
+use crate::rate_limits::LimitExceeded;
 
 /// A JSON error response returned by the API.
 #[derive(Serialize, Deserialize, Debug)]
@@ -53,6 +54,10 @@ pub enum ApiError {
         #[source]
         cause: Option<Box<dyn Error + Send + Sync>>,
     },
+
+    /// The requested operation was valid but could not be satisfied.
+    #[error("{0}")]
+    Conflict(Cow<'static, str>),
 
     /// Authorization/authentication errors.
     #[error("auth error: {0}")]
@@ -97,6 +102,11 @@ impl ApiError {
         }
     }
 
+    /// Creates a conflict error with a client-safe explanation.
+    pub fn conflict(context: impl Into<Cow<'static, str>>) -> Self {
+        Self::Conflict(context.into())
+    }
+
     /// Creates an internal server error with context and an underlying cause.
     pub fn internal<E>(context: impl Into<Cow<'static, str>>, cause: E) -> Self
     where
@@ -112,12 +122,13 @@ impl ApiError {
     pub fn status(&self) -> StatusCode {
         match &self {
             ApiError::Client { .. } => StatusCode::BAD_REQUEST,
+            ApiError::Conflict(_) => StatusCode::CONFLICT,
 
             ApiError::Batch(BatchError::BadRequest(_))
             | ApiError::Batch(BatchError::Metadata(_))
             | ApiError::Batch(BatchError::Multipart(_)) => StatusCode::BAD_REQUEST,
             ApiError::Batch(BatchError::LimitExceeded(_)) => StatusCode::PAYLOAD_TOO_LARGE,
-            ApiError::Batch(BatchError::RateLimited) => StatusCode::TOO_MANY_REQUESTS,
+            ApiError::Batch(BatchError::RateLimited(rejection)) => rejection.status(),
             ApiError::Batch(BatchError::ResponseSerialization { .. }) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
@@ -132,14 +143,15 @@ impl ApiError {
 
             ApiError::Service(error) => match error.kind() {
                 ServiceErrorKind::InvalidMetadata
-                | ServiceErrorKind::InvalidUploadId
+                | ServiceErrorKind::InvalidUploadSessionToken
                 | ServiceErrorKind::ClientStream
-                | ServiceErrorKind::ChunkExceedsUploadLength { .. } => StatusCode::BAD_REQUEST,
+                | ServiceErrorKind::ChunkExceedsUploadLength { .. }
+                | ServiceErrorKind::ChunkTooSmall { .. } => StatusCode::BAD_REQUEST,
                 ServiceErrorKind::UnknownUploadSession => StatusCode::NOT_FOUND,
                 ServiceErrorKind::RangeNotSatisfiable { .. } => StatusCode::RANGE_NOT_SATISFIABLE,
                 ServiceErrorKind::UploadOffsetMismatch { .. } => StatusCode::CONFLICT,
                 ServiceErrorKind::UploadSessionGone => StatusCode::GONE,
-                ServiceErrorKind::AtCapacity => StatusCode::TOO_MANY_REQUESTS,
+                ServiceErrorKind::AtCapacity => LimitExceeded::Capacity.status(),
                 ServiceErrorKind::Unsupported => StatusCode::NOT_IMPLEMENTED,
                 ServiceErrorKind::BackendRateLimited => StatusCode::TOO_MANY_REQUESTS,
                 ServiceErrorKind::BackendTimeout | ServiceErrorKind::BackendUnavailable => {
@@ -161,8 +173,11 @@ impl ApiError {
     /// Call this exactly once wherever an `ApiError` is serialized into a client-visible
     /// response: standalone responses ([`IntoResponse`]) and batch response parts.
     pub fn capture(&self) {
-        // Captured at the source in the service layer to prevent double-logging.
-        if matches!(self, ApiError::Service(_)) {
+        // Service errors and admission rejections are already logged at the source.
+        if matches!(
+            self,
+            ApiError::Service(_) | ApiError::Batch(BatchError::RateLimited(_))
+        ) {
             return;
         }
 
@@ -174,6 +189,12 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        if let ApiError::Service(e) = &self
+            && e.kind() == ServiceErrorKind::AtCapacity
+        {
+            return LimitExceeded::Capacity.into_response();
+        }
+
         self.capture();
         let body = ApiErrorResponse::from_error(&self);
         (self.status(), Json(body)).into_response()

@@ -11,7 +11,7 @@ use objectstore_client::{Client, Usecase, Result};
 
 async fn example() -> Result<()> {
     let client = Client::new("http://localhost:8888/")?;
-    let session = Usecase::new("attachments")
+    let session = Usecase::from_static("attachments")
         .for_project(42, 1337)
         .session(&client)?;
 
@@ -34,6 +34,8 @@ async fn example() -> Result<()> {
 ### Usecases and Scopes
 
 A [`Usecase`] represents a server-side namespace with its own configuration defaults.
+Its name must follow the naming rules documented on [`Usecase`]. Use
+[`Usecase::from_static`] for statically defined names and [`Usecase::new`] for dynamic names.
 Within a Usecase, [`Scope`]s provide further isolation — typically keyed by organization
 and project IDs. A [`Session`] ties a Client to a specific Usecase + Scope for operations.
 
@@ -43,12 +45,12 @@ method [`Usecase::for_project`] pushes `org` then `project` in the recommended o
 
 ```rust,ignore
 // Scope with org and project (recommended first components)
-let session = Usecase::new("attachments")
+let session = Usecase::from_static("attachments")
     .for_project(42, 1337)
     .session(&client)?;
 
 // Additional components are appended after org/project
-let session = Usecase::new("attachments")
+let session = Usecase::from_static("attachments")
     .for_project(42, 1337)
     .push("app_slug", "email_app")
     .session(&client)?;
@@ -69,7 +71,7 @@ use std::time::Duration;
 use objectstore_client::ExpirationPolicy;
 
 // Set default expiration on the Usecase
-Usecase::new("attachments")
+Usecase::from_static("attachments")
     .with_expiration_policy(ExpirationPolicy::TimeToIdle(Duration::from_secs(30 * 86400)));
 
 // Override per-upload
@@ -77,6 +79,22 @@ session.put("payload")
     .expiration_policy(ExpirationPolicy::TimeToLive(Duration::from_secs(3600)))
     .send().await?;
 ```
+
+Use [`Session::extend_expiry`] to keep an existing object longer.
+
+```rust,no_run
+# async fn example(session: objectstore_client::Session) -> objectstore_client::Result<()> {
+use std::time::Duration;
+use objectstore_client::ExpiryExtension;
+
+session.extend_expiry("key", ExpiryExtension::FromNow(Duration::from_secs(30 * 86400)))
+    .send().await?;
+# Ok(())
+# }
+```
+
+See [`ExpiryExtension`] for target options and [`Session::extend_expiry`] for
+outcome handling.
 
 ### Origin Tracking
 
@@ -152,12 +170,17 @@ If the request fails midway, it will be possible to resume it from the persisted
 setting only records how the object is encoded; the caller must compress the payload accordingly.
 The object length and all offsets refer to the bytes after compression.
 
+When manually slicing non-final chunks, use sizes that are multiples of `upload.granularity()`.
+All chunks except the last must be at least as large as the granularity.
+If a non-final chunk is larger than the granularity but its size is not a multiple of it, then the
+server may persist only its aligned prefix.
+
 ```rust,no_run
 #![cfg(feature = "resumable-upload-api")]
 
 use bytes::Bytes;
 use anyhow::{Context as _, Result};
-use objectstore_client::{Session, UploadProgress};
+use objectstore_client::{Error, Session, UploadProgress};
 
 async fn upload_large_object(session: &Session, object: Bytes) -> Result<()> {
     let upload = session
@@ -176,103 +199,15 @@ async fn upload_large_object(session: &Session, object: Bytes) -> Result<()> {
         offset = match upload
             .put(offset, object.slice(offset as usize..))
             .send()
-            .await?
+            .await
         {
-            UploadProgress::Complete => return Ok(()),
-            UploadProgress::Incomplete { offset: next } => next,
+            Ok(UploadProgress::Complete) => return Ok(()),
+            Ok(UploadProgress::Incomplete { offset: next }) => next,
+            Err(Error::UploadOffsetMismatch { offset: next }) => next,
+            Err(err) => return Err(err.into()),
         };
     }
 }
-```
-
-### Multipart Upload API
-
-> **Feature flag required:** Enable the `multipart` Cargo feature to use this API.
-> It is not included in the default feature set.
->
-> ```toml
-> objectstore-client = { version = "...", features = ["multipart"] }
-> ```
-
-For large objects, use multipart uploads to upload parts concurrently with bounded
-parallelism.
-
-**Important:** unlike single-object uploads, multipart uploads do **not** auto-compress.
-`compression` on the initiate request behaves like `precompressed` above: it only records the
-algorithm, and the caller must pre-compress each part accordingly.
-
-```rust,ignore
-use futures_util::StreamExt as _;
-use futures_util::stream;
-use objectstore_client::Compression;
-
-let upload = session
-    .initiate_multipart_upload()
-    .key("my-large-object")
-    .compression(Compression::Zstd)
-    .send()
-    .await?;
-
-let parts: Vec<(Vec<u8>, u32)> = vec![
-    (zstd::encode_all(&part1_data[..], 0)?, 1),
-    (zstd::encode_all(&part2_data[..], 0)?, 2),
-];
-
-let results: Vec<_> = stream::iter(
-    parts
-        .into_iter()
-        .map(|(data, part_number)| upload.put(data, part_number, None)),
-)
-.buffer_unordered(8)
-.collect()
-.await;
-
-let mut done = Vec::new();
-let mut errors = Vec::new();
-for result in results {
-    match result {
-        Ok(part) => done.push(part),
-        Err(e) => errors.push(e),
-    }
-}
-
-if !errors.is_empty() {
-    // reupload failed parts...
-}
-
-let key = upload.complete(done).await?;
-// or
-upload.abort().await?;
-```
-
-You can also resume an in-progress multipart upload, e.g. after a process restart.
-
-```rust,ignore
-use futures_util::{StreamExt as _, TryStreamExt as _};
-use futures_util::stream;
-use objectstore_client::CompletePart;
-
-let upload = session.resume_multipart_upload("my-large-object", saved_upload_id)?;
-
-let existing = upload.list_parts().await?;
-let total_parts = 10;
-let uploaded: Vec<u32> = existing.iter().map(|p| p.part_number.get()).collect();
-let missing: Vec<u32> = (1..=total_parts)
-    .filter(|n| !uploaded.contains(n))
-    .collect();
-
-let mut done: Vec<_> = stream::iter(
-    missing
-        .into_iter()
-        .map(|part_number| upload.put(get_part_data(part_number), part_number, None)),
-)
-.buffer_unordered(8)
-.try_collect()
-.await?;
-
-done.extend(existing.into_iter().map(CompletePart::from));
-
-let key = upload.complete(done).await?;
 ```
 
 ### Many API
@@ -287,7 +222,7 @@ use objectstore_client::{Client, Usecase, OperationResult, Result};
 
 async fn example_batch() -> Result<()> {
     let client = Client::new("http://localhost:8888/")?;
-    let session = Usecase::new("attachments")
+    let session = Usecase::from_static("attachments")
         .for_project(42, 1337)
         .session(&client)?;
 
@@ -360,7 +295,7 @@ let client = Client::builder("http://localhost:8888/")
 
 // Option 2: External service with a pre-signed JWT
 // Use TokenGenerator::create_token() to obtain a static token from an authority
-let scope = Usecase::new("my_app").for_project(42, 1337);
+let scope = Usecase::from_static("my_app").for_project(42, 1337);
 let generator = TokenGenerator::new(SecretKey {
     secret_key: "<private key>".into(),
     kid: "my-service".into(),
@@ -396,9 +331,7 @@ static CLIENT: LazyLock<Client> = LazyLock::new(|| {
         .expect("Objectstore client to build successfully")
 });
 
-static ATTACHMENTS: LazyLock<Usecase> = LazyLock::new(|| {
-    Usecase::new("attachments")
-});
+static ATTACHMENTS: Usecase = Usecase::from_static("attachments");
 
 async fn example() -> Result<()> {
     let session = CLIENT.session(ATTACHMENTS.for_project(42, 1337))?;

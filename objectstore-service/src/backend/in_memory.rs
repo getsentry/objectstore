@@ -5,10 +5,9 @@
 //! backend is [`Clone`] so tests can hold a handle for direct inspection while
 //! the service owns a boxed copy.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
 
 use objectstore_types::range::ByteRange;
 use objectstore_types::time::Timestamp;
@@ -17,18 +16,14 @@ use bytes::{Bytes, BytesMut};
 use futures_util::TryStreamExt;
 use objectstore_types::metadata::Metadata;
 
-use super::common::{
-    DeleteResponse, GetResponse, HighVolumeBackend, MultipartUploadBackend, PutResponse, TieredGet,
-    TieredMetadata, TieredUpdate, TieredWrite, Tombstone,
+use crate::backend::common::{
+    self, DeleteResponse, ExpiryUpdate, GetResponse, HighVolumeBackend, PutResponse,
+    SetExpiryResponse, TieredGet, TieredMetadata, TieredUpdate, TieredWrite, Tombstone,
 };
 use crate::change_stream::{ChangeStream, NoopStream, flush_change_stream};
-use crate::error::{Error, ErrorKind, Result};
+use crate::error::{ErrorKind, Result};
 use crate::id::ObjectId;
-use crate::multipart::{
-    AbortMultipartResponse, CompleteMultipartResponse, CompletedPart, InitiateMultipartResponse,
-    ListPartsResponse, Part, PartNumber, UploadId, UploadPartResponse,
-};
-use crate::resumable::{BackendToken, UploadProgress};
+use crate::resumable::{BackendToken, Session, UploadProgress};
 use crate::stream::ClientStream;
 
 /// An entry in the in-memory store.
@@ -62,31 +57,15 @@ impl StoreEntry {
 
 type Store = HashMap<ObjectId, StoreEntry>;
 
-#[derive(Clone, Debug)]
-struct MultipartUpload {
-    metadata: Metadata,
-    parts: BTreeMap<PartNumber, UploadedPart>,
-}
-
-#[derive(Clone, Debug)]
-struct UploadedPart {
-    etag: String,
-    data: Bytes,
-    uploaded_at: SystemTime,
-}
-
 #[derive(Debug)]
 struct ResumableUpload {
     metadata: Metadata,
-    total_length: NonZeroU64,
     data: BytesMut,
 }
 
 // None marks a removed session for operations already waiting on its mutex.
 type ResumableSession = Arc<tokio::sync::Mutex<Option<ResumableUpload>>>;
 type ResumableStore = HashMap<(ObjectId, BackendToken), ResumableSession>;
-
-type MultipartStore = HashMap<(ObjectId, UploadId), MultipartUpload>;
 
 /// In-memory [`Backend`](super::common::Backend) backed by a `HashMap`.
 ///
@@ -97,8 +76,8 @@ type MultipartStore = HashMap<(ObjectId, UploadId), MultipartUpload>;
 pub struct InMemoryBackend {
     name: &'static str,
     store: Arc<Mutex<Store>>,
-    multipart_store: Arc<Mutex<MultipartStore>>,
     resumable_store: Arc<Mutex<ResumableStore>>,
+    upload_markers: Arc<Mutex<HashMap<ObjectId, Timestamp>>>,
     change_stream: Arc<dyn ChangeStream>,
 }
 
@@ -108,17 +87,17 @@ impl InMemoryBackend {
         Self {
             name,
             store: Arc::new(Mutex::new(HashMap::new())),
-            multipart_store: Arc::new(Mutex::new(HashMap::new())),
             resumable_store: Arc::new(Mutex::new(HashMap::new())),
+            upload_markers: Arc::new(Mutex::new(HashMap::new())),
             change_stream: Arc::new(NoopStream),
         }
     }
 
-    fn upload_session(&self, id: &ObjectId, token: &BackendToken) -> Result<ResumableSession> {
+    fn upload_session(&self, session: &Session) -> Result<ResumableSession> {
         self.resumable_store
             .lock()
             .unwrap()
-            .get(&(id.clone(), token.clone()))
+            .get(&(session.object_id.clone(), session.backend_token.clone()))
             // Clone the session handle so that the `resumable_store` mutex is released immediately.
             .cloned()
             .ok_or_else(|| ErrorKind::UnknownUploadSession.into())
@@ -128,6 +107,45 @@ impl InMemoryBackend {
     pub fn with_change_stream(mut self, change_stream: Arc<dyn ChangeStream>) -> Self {
         self.change_stream = change_stream;
         self
+    }
+
+    /// Applies `extend` to `id`'s entry, calling [`ChangeStream::begin_update`] first.
+    ///
+    /// Like a conditional write, this is rejected if the entry changed in the meantime.
+    async fn update_expiry(
+        &self,
+        id: &ObjectId,
+        access_time: Timestamp,
+        extend: impl Fn(&mut StoreEntry) -> Result<ExpiryOutcome> + Send + Sync,
+    ) -> Result<SetExpiryResponse> {
+        let try_extend = |store: &Store| -> Result<(ExpiryOutcome, Option<StoreEntry>)> {
+            match store.get(id) {
+                Some(entry) if !entry.is_expired(access_time) => {
+                    let mut updated = entry.clone();
+                    let outcome = extend(&mut updated)?;
+                    Ok((outcome, Some(updated)))
+                }
+                _ => Ok((ExpiryOutcome::NotFound, None)),
+            }
+        };
+
+        let (outcome, _) = try_extend(&self.store.lock().unwrap())?;
+        let ExpiryOutcome::Extended(expire_at) = outcome else {
+            return Ok(outcome.response());
+        };
+        self.change_stream.begin_update(id, Some(expire_at)).await?;
+
+        {
+            let mut store = self.store.lock().unwrap();
+            match try_extend(&store)? {
+                (ExpiryOutcome::Extended(t), Some(updated)) if t == expire_at => {
+                    store.insert(id.clone(), updated);
+                }
+                _ => return Ok(SetExpiryResponse::Rejected),
+            }
+        }
+        self.change_stream.commit_update(id, Some(expire_at)).await;
+        Ok(outcome.response())
     }
 
     /// Returns the stored entry for `id`, for direct inspection in tests.
@@ -163,10 +181,6 @@ impl super::common::Backend for InMemoryBackend {
         self.name
     }
 
-    fn as_multipart_upload_backend(&self) -> Result<&dyn MultipartUploadBackend> {
-        Ok(self)
-    }
-
     async fn put_object(
         &self,
         id: &ObjectId,
@@ -174,12 +188,16 @@ impl super::common::Backend for InMemoryBackend {
         stream: ClientStream,
         _access_time: Timestamp,
     ) -> Result<PutResponse> {
+        self.change_stream
+            .begin_write(id, metadata.time_expires)
+            .await?;
         let bytes: BytesMut = stream.try_collect().await?;
         let entry = StoreEntry::Object(metadata.clone(), bytes.freeze());
         let size = entry.stored_size();
         self.store.lock().unwrap().insert(id.clone(), entry);
         self.change_stream
-            .write(id, size as u64, metadata.time_expires);
+            .commit_write(id, size as u64, metadata.time_expires)
+            .await;
         Ok(())
     }
 
@@ -220,24 +238,14 @@ impl super::common::Backend for InMemoryBackend {
     async fn set_expiry(
         &self,
         id: &ObjectId,
-        expire_at: Timestamp,
+        target: ExpiryUpdate,
         access_time: Timestamp,
-    ) -> Result<bool> {
-        let outcome = {
-            let mut store = self.store.lock().unwrap();
-            match store.get_mut(id) {
-                Some(StoreEntry::Object(metadata, _)) => {
-                    extend_expiry(&mut metadata.time_expires, expire_at, access_time)
-                }
-                _ => ExpiryOutcome::Rejected,
-            }
-        };
-
-        if outcome == ExpiryOutcome::Extended {
-            self.change_stream.update(id, Some(expire_at));
-        }
-
-        Ok(outcome.is_satisfied())
+    ) -> Result<SetExpiryResponse> {
+        self.update_expiry(id, access_time, |entry| match entry {
+            StoreEntry::Object(metadata, _) => extend_object_expiry(metadata, target, access_time),
+            StoreEntry::Tombstone(_) => Ok(ExpiryOutcome::Rejected),
+        })
+        .await
     }
 
     async fn delete_object(
@@ -246,7 +254,7 @@ impl super::common::Backend for InMemoryBackend {
         _access_time: Timestamp,
     ) -> Result<DeleteResponse> {
         if self.store.lock().unwrap().remove(id).is_some() {
-            self.change_stream.delete(id);
+            self.change_stream.commit_delete(id).await;
         }
         Ok(())
     }
@@ -255,12 +263,14 @@ impl super::common::Backend for InMemoryBackend {
         &self,
         id: &ObjectId,
         metadata: &Metadata,
-        total_length: NonZeroU64,
+        _upload_length: NonZeroU64,
     ) -> Result<Option<BackendToken>> {
+        self.change_stream
+            .begin_write(id, metadata.time_expires)
+            .await?;
         let token = uuid::Uuid::now_v7().to_string();
         let upload = ResumableUpload {
             metadata: metadata.clone(),
-            total_length,
             data: BytesMut::new(),
         };
         self.resumable_store.lock().unwrap().insert(
@@ -272,22 +282,21 @@ impl super::common::Backend for InMemoryBackend {
 
     async fn put_chunk(
         &self,
-        id: &ObjectId,
-        token: &BackendToken,
+        session: &Session,
         offset: u64,
         content_length: u64,
         mut stream: ClientStream,
     ) -> Result<UploadProgress> {
-        let session = self.upload_session(id, token)?;
-        let mut guard = session.lock().await;
+        let upload_session = self.upload_session(session)?;
+        let mut guard = upload_session.lock().await;
         let upload = guard.as_mut().ok_or(ErrorKind::UnknownUploadSession)?;
         offset
             .checked_add(content_length)
-            .filter(|end| *end <= upload.total_length.get())
+            .filter(|end| *end <= session.upload_length.get())
             .ok_or(ErrorKind::ChunkExceedsUploadLength {
                 offset,
                 content_length,
-                upload_length: upload.total_length.get(),
+                upload_length: session.upload_length.get(),
             })?;
         if content_length != 0 && offset != upload.data.len() as u64 {
             return Err(ErrorKind::UploadOffsetMismatch {
@@ -307,7 +316,7 @@ impl super::common::Backend for InMemoryBackend {
         }
 
         let offset = upload.data.len() as u64;
-        if offset != upload.total_length.get() {
+        if offset != session.upload_length.get() {
             return Ok(UploadProgress::Incomplete { offset });
         }
 
@@ -316,34 +325,39 @@ impl super::common::Backend for InMemoryBackend {
         let expires_at = metadata.time_expires;
         let entry = StoreEntry::Object(metadata, upload.data.freeze());
         let size = entry.stored_size();
-        self.store.lock().unwrap().insert(id.clone(), entry);
+        self.store
+            .lock()
+            .unwrap()
+            .insert(session.object_id.clone(), entry);
 
-        self.change_stream.write(id, size as u64, expires_at);
+        self.change_stream
+            .commit_write(&session.object_id, size as u64, expires_at)
+            .await;
         self.resumable_store
             .lock()
             .unwrap()
-            .remove(&(id.clone(), token.clone()));
+            .remove(&(session.object_id.clone(), session.backend_token.clone()));
 
         Ok(UploadProgress::Complete)
     }
 
-    async fn upload_offset(&self, id: &ObjectId, token: &BackendToken) -> Result<UploadProgress> {
-        let session = self.upload_session(id, token)?;
-        let guard = session.lock().await;
+    async fn upload_offset(&self, session: &Session) -> Result<UploadProgress> {
+        let upload_session = self.upload_session(session)?;
+        let guard = upload_session.lock().await;
         let upload = guard.as_ref().ok_or(ErrorKind::UnknownUploadSession)?;
         Ok(UploadProgress::Incomplete {
             offset: upload.data.len() as u64,
         })
     }
 
-    async fn cancel_upload(&self, id: &ObjectId, token: &BackendToken) -> Result<()> {
-        let session = self.upload_session(id, token)?;
-        let mut guard = session.lock().await;
+    async fn cancel_upload(&self, session: &Session) -> Result<()> {
+        let upload_session = self.upload_session(session)?;
+        let mut guard = upload_session.lock().await;
         guard.take().ok_or(ErrorKind::UnknownUploadSession)?;
         self.resumable_store
             .lock()
             .unwrap()
-            .remove(&(id.clone(), token.clone()));
+            .remove(&(session.object_id.clone(), session.backend_token.clone()));
         Ok(())
     }
 
@@ -354,6 +368,50 @@ impl super::common::Backend for InMemoryBackend {
 
 #[async_trait::async_trait]
 impl HighVolumeBackend for InMemoryBackend {
+    async fn create_upload_marker(
+        &self,
+        revision: &ObjectId,
+        time_expires: Timestamp,
+    ) -> Result<()> {
+        self.change_stream
+            .begin_write(revision, Some(time_expires))
+            .await?;
+        self.upload_markers
+            .lock()
+            .unwrap()
+            .insert(revision.clone(), time_expires);
+        self.change_stream
+            .commit_write(revision, 1, Some(time_expires))
+            .await;
+        Ok(())
+    }
+
+    async fn has_upload_marker(&self, revision: &ObjectId, access_time: Timestamp) -> Result<bool> {
+        Ok(self
+            .upload_markers
+            .lock()
+            .unwrap()
+            .get(revision)
+            .is_some_and(|expiry| *expiry >= access_time))
+    }
+
+    async fn delete_upload_marker(
+        &self,
+        revision: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<bool> {
+        let deleted = self
+            .upload_markers
+            .lock()
+            .unwrap()
+            .remove(revision)
+            .is_some_and(|expiry| expiry >= access_time);
+        if deleted {
+            self.change_stream.commit_delete(revision).await;
+        }
+        Ok(deleted)
+    }
+
     async fn put_non_tombstone(
         &self,
         id: &ObjectId,
@@ -361,20 +419,29 @@ impl HighVolumeBackend for InMemoryBackend {
         payload: Bytes,
         access_time: Timestamp,
     ) -> Result<Option<Tombstone>> {
-        let mut store = self.store.lock().unwrap();
-        if let Some(StoreEntry::Tombstone(tombstone)) = store.get(id)
-            && !tombstone.is_expired(access_time)
-        {
-            return Ok(Some(tombstone.clone()));
-        }
+        self.change_stream
+            .begin_write(id, metadata.time_expires)
+            .await?;
+        let (size, expires_at) = {
+            let mut store = self.store.lock().unwrap();
+            if let Some(StoreEntry::Tombstone(tombstone)) = store.get(id)
+                && !tombstone.is_expired(access_time)
+            {
+                return Ok(Some(tombstone.clone()));
+            }
 
-        let mut metadata = metadata.clone();
-        metadata.size = Some(payload.len());
-        let expires_at = metadata.time_expires;
-        let entry = StoreEntry::Object(metadata, payload);
-        let size = entry.stored_size();
-        store.insert(id.clone(), entry);
-        self.change_stream.write(id, size as u64, expires_at);
+            let mut metadata = metadata.clone();
+            metadata.size = Some(payload.len());
+            let expires_at = metadata.time_expires;
+            let entry = StoreEntry::Object(metadata, payload);
+            let size = entry.stored_size();
+            store.insert(id.clone(), entry);
+            (size, expires_at)
+        };
+
+        self.change_stream
+            .commit_write(id, size as u64, expires_at)
+            .await;
         Ok(None)
     }
 
@@ -427,15 +494,19 @@ impl HighVolumeBackend for InMemoryBackend {
         id: &ObjectId,
         access_time: Timestamp,
     ) -> Result<Option<Tombstone>> {
-        let mut store = self.store.lock().unwrap();
-        if let Some(StoreEntry::Tombstone(tombstone)) = store.get(id).cloned()
-            && !tombstone.is_expired(access_time)
-        {
-            return Ok(Some(tombstone));
-        }
+        let removed = {
+            let mut store = self.store.lock().unwrap();
+            if let Some(StoreEntry::Tombstone(tombstone)) = store.get(id).cloned()
+                && !tombstone.is_expired(access_time)
+            {
+                return Ok(Some(tombstone));
+            }
 
-        if store.remove(id).is_some() {
-            self.change_stream.delete(id);
+            store.remove(id).is_some()
+        };
+
+        if removed {
+            self.change_stream.commit_delete(id).await;
         }
         Ok(None)
     }
@@ -446,26 +517,18 @@ impl HighVolumeBackend for InMemoryBackend {
         current: Option<&ObjectId>,
         update: TieredUpdate,
         access_time: Timestamp,
-    ) -> Result<bool> {
-        let TieredUpdate::SetExpiry(expire_at) = update;
-        let outcome = {
-            let mut store = self.store.lock().unwrap();
-            match (store.get_mut(id), current) {
-                (Some(StoreEntry::Object(metadata, _)), None) => {
-                    extend_expiry(&mut metadata.time_expires, expire_at, access_time)
-                }
-                (Some(StoreEntry::Tombstone(t)), Some(target)) if t.target == *target => {
-                    extend_expiry(&mut t.time_expires, expire_at, access_time)
-                }
-                _ => ExpiryOutcome::Rejected,
+    ) -> Result<SetExpiryResponse> {
+        let TieredUpdate::SetExpiry(expiry_target) = update;
+        self.update_expiry(id, access_time, |entry| match (entry, current) {
+            (StoreEntry::Object(metadata, _), None) => {
+                extend_object_expiry(metadata, expiry_target, access_time)
             }
-        };
-
-        if outcome == ExpiryOutcome::Extended {
-            self.change_stream.update(id, Some(expire_at));
-        }
-
-        Ok(outcome.is_satisfied())
+            (StoreEntry::Tombstone(t), Some(target)) if t.target == *target => {
+                extend_expiry(&mut t.time_expires, expiry_target, None, access_time)
+            }
+            _ => Ok(ExpiryOutcome::Rejected),
+        })
+        .await
     }
 
     async fn compare_and_write(
@@ -475,223 +538,60 @@ impl HighVolumeBackend for InMemoryBackend {
         write: TieredWrite,
         access_time: Timestamp,
     ) -> Result<bool> {
-        let mut store = self.store.lock().unwrap();
-
-        let actual = store.get(id);
-        let matches_current = matches_redirect(actual, current, access_time);
-        let matches_next = matches_redirect(actual, write.target(), access_time);
-
-        if matches_current {
-            match write {
-                TieredWrite::Tombstone(tombstone) => {
-                    let expires_at = tombstone.time_expires;
-                    let entry = StoreEntry::Tombstone(tombstone);
-                    let size = entry.stored_size();
-                    store.insert(id.clone(), entry);
-                    self.change_stream.write(id, size as u64, expires_at);
-                }
-                TieredWrite::Object(metadata, payload) => {
-                    let expires_at = metadata.time_expires;
-                    let entry = StoreEntry::Object(metadata, payload);
-                    let size = entry.stored_size();
-                    store.insert(id.clone(), entry);
-                    self.change_stream.write(id, size as u64, expires_at);
-                }
-                TieredWrite::Delete => {
-                    if store.remove(id).is_some() {
-                        self.change_stream.delete(id);
-                    }
-                }
+        match &write {
+            TieredWrite::Tombstone(tombstone) => {
+                self.change_stream
+                    .begin_write(id, tombstone.time_expires)
+                    .await?;
             }
+            TieredWrite::Object(metadata, _) => {
+                self.change_stream
+                    .begin_write(id, metadata.time_expires)
+                    .await?;
+            }
+            TieredWrite::Delete => {}
         }
 
-        Ok(matches_current || matches_next)
-    }
-}
+        let mut written = None;
+        let mut deleted = false;
+        let matches = {
+            let mut store = self.store.lock().unwrap();
 
-#[async_trait::async_trait]
-impl MultipartUploadBackend for InMemoryBackend {
-    async fn initiate_multipart(
-        &self,
-        id: &ObjectId,
-        metadata: &Metadata,
-    ) -> Result<InitiateMultipartResponse> {
-        let upload_id = UploadId::new(uuid::Uuid::now_v7().to_string())?;
-        let upload = MultipartUpload {
-            metadata: metadata.clone(),
-            parts: BTreeMap::new(),
-        };
-        self.multipart_store
-            .lock()
-            .unwrap()
-            .insert((id.clone(), upload_id.clone()), upload);
-        Ok(upload_id)
-    }
+            let actual = store.get(id);
+            let matches_current = matches_redirect(actual, current, access_time);
+            let matches_next = matches_redirect(actual, write.target(), access_time);
 
-    async fn upload_part(
-        &self,
-        id: &ObjectId,
-        upload_id: &UploadId,
-        part_number: PartNumber,
-        _content_length: u64,
-        _content_md5: Option<&str>,
-        body: ClientStream,
-    ) -> Result<UploadPartResponse> {
-        let data: BytesMut = body.try_collect().await?;
-        let data = data.freeze();
-        let etag = format!("\"etag-{part_number}-{}\"", data.len());
-
-        let mut store = self.multipart_store.lock().unwrap();
-        let upload = store
-            .get_mut(&(id.clone(), upload_id.clone()))
-            .ok_or_else(|| {
-                Error::new(
-                    ErrorKind::BackendFailure,
-                    "in-memory multipart upload not found",
-                )
-            })?;
-
-        upload.parts.insert(
-            part_number,
-            UploadedPart {
-                etag: etag.clone(),
-                data,
-                uploaded_at: SystemTime::now(),
-            },
-        );
-
-        Ok(etag)
-    }
-
-    async fn list_parts(
-        &self,
-        id: &ObjectId,
-        upload_id: &UploadId,
-        max_parts: Option<u32>,
-        part_number_marker: Option<PartNumber>,
-    ) -> Result<ListPartsResponse> {
-        let store = self.multipart_store.lock().unwrap();
-        let upload = store.get(&(id.clone(), upload_id.clone())).ok_or_else(|| {
-            Error::new(
-                ErrorKind::BackendFailure,
-                "in-memory multipart upload not found",
-            )
-        })?;
-
-        let iter = upload
-            .parts
-            .iter()
-            .filter(|(pn, _)| part_number_marker.is_none_or(|marker| **pn > marker));
-
-        let max = max_parts.unwrap_or(u32::MAX) as usize;
-        let all: Vec<_> = iter.collect();
-        let is_truncated = all.len() > max;
-        let page: Vec<_> = all.into_iter().take(max).collect();
-
-        let next_part_number_marker = if is_truncated {
-            page.last().map(|(pn, _)| **pn)
-        } else {
-            None
-        };
-
-        let parts = page
-            .into_iter()
-            .map(|(pn, part)| Part {
-                part_number: *pn,
-                etag: part.etag.clone(),
-                last_modified: part.uploaded_at,
-                size: part.data.len() as u64,
-            })
-            .collect();
-
-        Ok(ListPartsResponse {
-            parts,
-            is_truncated,
-            next_part_number_marker,
-        })
-    }
-
-    async fn abort_multipart(
-        &self,
-        id: &ObjectId,
-        upload_id: &UploadId,
-    ) -> Result<AbortMultipartResponse> {
-        self.multipart_store
-            .lock()
-            .unwrap()
-            .remove(&(id.clone(), upload_id.clone()));
-        Ok(())
-    }
-
-    async fn complete_multipart(
-        &self,
-        id: &ObjectId,
-        upload_id: &UploadId,
-        parts: Vec<CompletedPart>,
-        _access_time: Timestamp,
-    ) -> Result<CompleteMultipartResponse> {
-        let key = (id.clone(), upload_id.clone());
-
-        // TODO: validate that parts are in ascending part_number order and reject with
-        // InvalidPartOrder if not (matches S3/GCS behavior). Needs a proper client error variant.
-
-        // Validate and assemble while holding the multipart lock, but don't
-        // remove the upload yet — a failed validation must leave it intact so
-        // the client can retry.
-        let (metadata, payload) = {
-            let store = self.multipart_store.lock().unwrap();
-            let upload = store.get(&key).ok_or_else(|| {
-                Error::new(
-                    ErrorKind::BackendFailure,
-                    "in-memory multipart upload not found",
-                )
-            })?;
-
-            for completed in &parts {
-                match upload.parts.get(&completed.part_number) {
-                    None => {
-                        return Ok(Some(crate::multipart::CompleteMultipartError {
-                            code: "InvalidPart".into(),
-                            message: format!(
-                                "part number {} was not uploaded",
-                                completed.part_number
-                            ),
-                        }));
+            if matches_current {
+                match write {
+                    TieredWrite::Tombstone(tombstone) => {
+                        let expires_at = tombstone.time_expires;
+                        let entry = StoreEntry::Tombstone(tombstone);
+                        written = Some((entry.stored_size(), expires_at));
+                        store.insert(id.clone(), entry);
                     }
-                    Some(stored) if stored.etag != completed.etag => {
-                        return Ok(Some(crate::multipart::CompleteMultipartError {
-                            code: "InvalidPart".into(),
-                            message: format!(
-                                "etag mismatch for part {}: expected {}, got {}",
-                                completed.part_number, stored.etag, completed.etag
-                            ),
-                        }));
+                    TieredWrite::Object(metadata, payload) => {
+                        let expires_at = metadata.time_expires;
+                        let entry = StoreEntry::Object(metadata, payload);
+                        written = Some((entry.stored_size(), expires_at));
+                        store.insert(id.clone(), entry);
                     }
-                    _ => {}
+                    TieredWrite::Delete => deleted = store.remove(id).is_some(),
                 }
             }
 
-            let mut payload = BytesMut::new();
-            for completed in &parts {
-                let stored = &upload.parts[&completed.part_number];
-                payload.extend_from_slice(&stored.data);
-            }
-
-            let mut metadata = upload.metadata.clone();
-            metadata.size = Some(payload.len());
-
-            (metadata, payload.freeze())
+            matches_current || matches_next
         };
 
-        let expires_at = metadata.time_expires;
-        let entry = StoreEntry::Object(metadata, payload);
-        let size = entry.stored_size();
-        self.store.lock().unwrap().insert(id.clone(), entry);
-        self.change_stream.write(id, size as u64, expires_at);
+        if let Some((size, expires_at)) = written {
+            self.change_stream
+                .commit_write(id, size as u64, expires_at)
+                .await;
+        }
+        if deleted {
+            self.change_stream.commit_delete(id).await;
+        }
 
-        self.multipart_store.lock().unwrap().remove(&key);
-
-        Ok(None)
+        Ok(matches)
     }
 }
 
@@ -725,38 +625,88 @@ fn matches_redirect(
 /// [`ChangeStream`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ExpiryOutcome {
-    /// The deadline could not be extended. None is set, or it has already passed.
+    /// The entry is absent or expired.
+    NotFound,
+    /// The entry was not eligible or the target could not be resolved.
     Rejected,
     /// The stored deadline already covered `expire_at`. Nothing was written.
-    AlreadySatisfied,
+    AlreadySatisfied(Timestamp),
     /// The stored deadline moved out to `expire_at`.
-    Extended,
+    Extended(Timestamp),
 }
 
 impl ExpiryOutcome {
-    /// Whether the entry now expires no earlier than the requested deadline.
-    fn is_satisfied(self) -> bool {
-        !matches!(self, Self::Rejected)
+    /// Converts the internal mutation outcome to the backend response.
+    fn response(self) -> SetExpiryResponse {
+        match self {
+            Self::NotFound => SetExpiryResponse::NotFound,
+            Self::Rejected => SetExpiryResponse::Rejected,
+            Self::AlreadySatisfied(deadline) | Self::Extended(deadline) => {
+                SetExpiryResponse::Satisfied(deadline)
+            }
+        }
     }
 }
 
-/// Extends an active expiry time to `expire_at` where valid.
-fn extend_expiry(
-    field: &mut Option<Timestamp>,
-    expire_at: Timestamp,
-    now: Timestamp,
-) -> ExpiryOutcome {
-    let Some(time_expires) = *field else {
-        return ExpiryOutcome::Rejected; // entries without a deadline cannot be extended
+/// Extends an object's deadline and TTL together, leaving metadata intact on error.
+fn extend_object_expiry(
+    metadata: &mut Metadata,
+    target: ExpiryUpdate,
+    access_time: Timestamp,
+) -> Result<ExpiryOutcome> {
+    let Some(original_expires) = metadata.time_expires else {
+        return Ok(ExpiryOutcome::Rejected); // entry without a deadline
     };
 
-    if time_expires < now {
-        ExpiryOutcome::Rejected // already expired
-    } else if time_expires >= expire_at {
-        ExpiryOutcome::AlreadySatisfied
+    // Only write `updated_expires` back if `extended_expiration_policy` also succeeds
+    let mut updated_expires = Some(original_expires);
+    let outcome = extend_expiry(
+        &mut updated_expires,
+        target,
+        metadata.time_created,
+        access_time,
+    )?;
+
+    if let ExpiryOutcome::Extended(expire_at) = outcome {
+        let updated_policy = common::extended_expiration_policy(
+            metadata.expiration_policy,
+            metadata.time_created,
+            original_expires,
+            expire_at,
+        )?;
+
+        metadata.time_expires = updated_expires;
+        metadata.expiration_policy = updated_policy;
+    }
+
+    Ok(outcome)
+}
+
+/// Resolves `target` and extends an active expiry time where valid.
+///
+/// Eligibility is checked before target resolution.
+fn extend_expiry(
+    field: &mut Option<Timestamp>,
+    target: ExpiryUpdate,
+    time_created: Option<Timestamp>,
+    access_time: Timestamp,
+) -> Result<ExpiryOutcome> {
+    let Some(time_expires) = *field else {
+        return Ok(ExpiryOutcome::Rejected); // entries without a deadline cannot be extended
+    };
+
+    if time_expires < access_time {
+        return Ok(ExpiryOutcome::NotFound); // already expired
+    }
+
+    let Some(expire_at) = target.resolve(time_created, access_time)? else {
+        return Ok(ExpiryOutcome::Rejected);
+    };
+    if time_expires >= expire_at {
+        Ok(ExpiryOutcome::AlreadySatisfied(expire_at))
     } else {
         *field = Some(expire_at);
-        ExpiryOutcome::Extended
+        Ok(ExpiryOutcome::Extended(expire_at))
     }
 }
 
@@ -815,35 +765,36 @@ impl Entry {
 #[cfg(test)]
 mod tests {
     use futures_util::StreamExt;
-    use std::num::NonZeroU32;
     use std::time::Duration;
 
+    #[cfg(feature = "storage-cogs")]
+    use objectstore_inventory_tracker::{OpType, test_utils::DummyProducer};
     use objectstore_types::metadata::ExpirationPolicy;
     use objectstore_types::scope::{Scope, Scopes};
 
-    #[cfg(feature = "storage-cogs")]
-    use objectstore_inventory_tracker::OpType;
-    #[cfg(feature = "storage-cogs")]
-    use objectstore_inventory_tracker::test_utils::DummyProducer;
-
     use super::*;
-    use crate::backend::common::Backend;
+    use crate::backend::common::{Backend, ExpiryTarget};
     use crate::id::ObjectContext;
     use crate::stream;
 
     fn make_id() -> ObjectId {
         ObjectId::random(ObjectContext {
-            usecase: "testing".into(),
+            usecase: "testing".parse().unwrap(),
             scopes: Scopes::from_iter([Scope::create("testing", "value").unwrap()]),
         })
     }
 
-    async fn create_session(backend: &InMemoryBackend, id: &ObjectId, length: u64) -> BackendToken {
-        backend
+    async fn create_session(backend: &InMemoryBackend, id: &ObjectId, length: u64) -> Session {
+        let backend_token = backend
             .create_upload_session(id, &Metadata::default(), NonZeroU64::new(length).unwrap())
             .await
             .unwrap()
-            .unwrap()
+            .unwrap();
+        Session {
+            object_id: id.clone(),
+            upload_length: NonZeroU64::new(length).unwrap(),
+            backend_token,
+        }
     }
 
     #[tokio::test]
@@ -865,20 +816,26 @@ mod tests {
             )
             .await
             .unwrap();
+        let upload_length = NonZeroU64::new(3).unwrap();
         let token = backend
-            .create_upload_session(&id, &metadata, NonZeroU64::new(3).unwrap())
+            .create_upload_session(&id, &metadata, upload_length)
             .await
             .unwrap()
             .unwrap();
+        let token = Session {
+            object_id: id.clone(),
+            upload_length,
+            backend_token: token,
+        };
         assert_eq!(
-            backend.upload_offset(&id, &token).await.unwrap(),
+            backend.upload_offset(&token).await.unwrap(),
             UploadProgress::Incomplete { offset: 0 }
         );
 
         // Upload a prefix. The session advances, and the old object remains visible.
         assert_eq!(
             backend
-                .put_chunk(&id, &token, 0, 1, stream::single("a"))
+                .put_chunk(&token, 0, 1, stream::single("a"))
                 .await
                 .unwrap(),
             UploadProgress::Incomplete { offset: 1 }
@@ -886,13 +843,13 @@ mod tests {
         assert_eq!(backend.get(&id).expect_object().1, "old");
         assert_eq!(
             backend
-                .put_chunk(&id, &token, 0, 0, stream::single(""))
+                .put_chunk(&token, 0, 0, stream::single(""))
                 .await
                 .unwrap(),
             UploadProgress::Incomplete { offset: 1 }
         );
         let error = backend
-            .put_chunk(&id, &token, 0, 1, stream::single("a"))
+            .put_chunk(&token, 0, 1, stream::single("a"))
             .await
             .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::UploadOffsetMismatch { offset: 1 });
@@ -900,7 +857,7 @@ mod tests {
         // Upload the suffix. Publication replaces the object and deletes the session.
         assert_eq!(
             backend
-                .put_chunk(&id, &token, 1, 2, stream::single("bc"))
+                .put_chunk(&token, 1, 2, stream::single("bc"))
                 .await
                 .unwrap(),
             UploadProgress::Complete
@@ -910,7 +867,7 @@ mod tests {
         assert_eq!(actual.custom, metadata.custom);
         assert_eq!(actual.size, metadata.size);
         assert_eq!(
-            backend.upload_offset(&id, &token).await.unwrap_err().kind(),
+            backend.upload_offset(&token).await.unwrap_err().kind(),
             ErrorKind::UnknownUploadSession
         );
     }
@@ -923,7 +880,7 @@ mod tests {
 
         // The backend rejects a chunk whose declared range exceeds the session length.
         let error = backend
-            .put_chunk(&id, &token, 3, 1, stream::single("x"))
+            .put_chunk(&token, 3, 1, stream::single("x"))
             .await
             .unwrap_err();
         assert_eq!(
@@ -937,13 +894,13 @@ mod tests {
 
         // Cancellation discards partial progress and makes the token unknown to the backend.
         backend
-            .put_chunk(&id, &token, 0, 1, stream::single("a"))
+            .put_chunk(&token, 0, 1, stream::single("a"))
             .await
             .unwrap();
-        backend.cancel_upload(&id, &token).await.unwrap();
+        backend.cancel_upload(&token).await.unwrap();
         assert!(!backend.contains(&id));
         assert_eq!(
-            backend.upload_offset(&id, &token).await.unwrap_err().kind(),
+            backend.upload_offset(&token).await.unwrap_err().kind(),
             ErrorKind::UnknownUploadSession
         );
     }
@@ -956,7 +913,7 @@ mod tests {
 
         // Persist a prefix, then disconnect after writing one byte of the next chunk.
         backend
-            .put_chunk(&id, &token, 0, 2, stream::single("ab"))
+            .put_chunk(&token, 0, 2, stream::single("ab"))
             .await
             .unwrap();
         let body = futures_util::stream::iter([
@@ -968,7 +925,7 @@ mod tests {
         .boxed();
         assert_eq!(
             backend
-                .put_chunk(&id, &token, 2, 2, body)
+                .put_chunk(&token, 2, 2, body)
                 .await
                 .unwrap_err()
                 .kind(),
@@ -977,12 +934,12 @@ mod tests {
 
         // Resume from the partial byte and verify the complete object.
         assert_eq!(
-            backend.upload_offset(&id, &token).await.unwrap(),
+            backend.upload_offset(&token).await.unwrap(),
             UploadProgress::Incomplete { offset: 3 }
         );
         assert_eq!(
             backend
-                .put_chunk(&id, &token, 3, 1, stream::single("d"))
+                .put_chunk(&token, 3, 1, stream::single("d"))
                 .await
                 .unwrap(),
             UploadProgress::Complete
@@ -999,10 +956,10 @@ mod tests {
         let body = futures_util::stream::once(async { Ok(receiver.await.unwrap()) }).boxed();
 
         // An offset query waits while a chunk holds the session lock.
-        let request = backend.put_chunk(&id, &token, 0, 1, body);
+        let request = backend.put_chunk(&token, 0, 1, body);
         tokio::pin!(request);
         assert!(futures_util::poll!(&mut request).is_pending());
-        let query = backend.upload_offset(&id, &token);
+        let query = backend.upload_offset(&token);
         tokio::pin!(query);
         assert!(futures_util::poll!(&mut query).is_pending());
 
@@ -1025,14 +982,14 @@ mod tests {
 
         // Partial session state is not reported as a stored object.
         backend
-            .put_chunk(&id, &token, 0, 1, stream::single("a"))
+            .put_chunk(&token, 0, 1, stream::single("a"))
             .await
             .unwrap();
         assert!(producer.records().is_empty());
 
         // Completion emits exactly one write for the published object.
         backend
-            .put_chunk(&id, &token, 1, 1, stream::single("b"))
+            .put_chunk(&token, 1, 1, stream::single("b"))
             .await
             .unwrap();
         let records = producer.records();
@@ -1047,43 +1004,111 @@ mod tests {
             ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
             ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
         ] {
-            let backend = InMemoryBackend::new("test");
-            let id = make_id();
             let original_expiry = access_time + Duration::from_hours(1);
-            let metadata = Metadata {
-                expiration_policy: policy,
+            let requested = original_expiry + Duration::from_hours(1) + Duration::from_nanos(999);
+            for target in [
+                ExpiryTarget::At(requested),
+                ExpiryTarget::FromCreation(Duration::from_hours(2) + Duration::from_nanos(999)),
+            ] {
+                let backend = InMemoryBackend::new("test");
+                let id = make_id();
+                let metadata = Metadata {
+                    expiration_policy: policy,
+                    time_created: Some(access_time),
+                    time_expires: Some(original_expiry),
+                    custom: [("preserved".into(), "yes".into())].into(),
+                    ..Default::default()
+                };
+                backend
+                    .put_object(&id, &metadata, stream::single("payload"), access_time)
+                    .await
+                    .unwrap();
+
+                let restricted = ExpiryUpdate {
+                    max: Some(Duration::ZERO),
+                    target,
+                };
+                assert_eq!(
+                    backend
+                        .set_expiry(&id, restricted, access_time)
+                        .await
+                        .unwrap_err()
+                        .kind(),
+                    ErrorKind::InvalidMetadata,
+                );
+                let target = ExpiryUpdate {
+                    max: Some(Duration::from_hours(100)),
+                    target,
+                };
+                assert_eq!(
+                    backend.set_expiry(&id, target, access_time).await.unwrap(),
+                    SetExpiryResponse::Satisfied(requested)
+                );
+                assert_eq!(
+                    backend
+                        .set_expiry(&id, restricted, access_time)
+                        .await
+                        .unwrap_err()
+                        .kind(),
+                    ErrorKind::InvalidMetadata,
+                );
+                let (updated, payload) = backend.get(&id).expect_object();
+                let expected_policy = match policy {
+                    ExpirationPolicy::TimeToLive(_) => {
+                        ExpirationPolicy::TimeToLive(Duration::from_hours(2))
+                    }
+                    other => other,
+                };
+                assert_eq!(updated.expiration_policy, expected_policy);
+                assert_eq!(updated.time_created, metadata.time_created);
+                assert_eq!(updated.custom, metadata.custom);
+                assert_eq!(payload, Bytes::from_static(b"payload"));
+                assert_eq!(updated.time_expires, Some(requested));
+
+                assert_eq!(
+                    backend
+                        .set_expiry(&id, ExpiryTarget::At(original_expiry).into(), access_time)
+                        .await
+                        .unwrap(),
+                    SetExpiryResponse::Satisfied(original_expiry)
+                );
+                assert_eq!(backend.get(&id).expect_object().0, updated);
+            }
+        }
+    }
+
+    #[test]
+    fn extend_object_expiry_preserves_metadata_on_error() {
+        let access_time = Timestamp::from_unix_secs(1_700_000_000).unwrap();
+        let original_expiry = access_time + Duration::from_hours(1);
+        let requested = original_expiry + Duration::from_hours(1);
+        for (time_created, ttl) in [
+            (
+                Some(requested + Duration::from_secs(1)),
+                Duration::from_hours(1),
+            ),
+            (None, Duration::MAX),
+        ] {
+            let original = Metadata {
+                expiration_policy: ExpirationPolicy::TimeToLive(ttl),
+                time_created,
                 time_expires: Some(original_expiry),
-                custom: [("preserved".into(), "yes".into())].into(),
                 ..Default::default()
             };
-            backend
-                .put_object(&id, &metadata, stream::single("payload"), access_time)
-                .await
-                .unwrap();
-
-            let requested = original_expiry + Duration::from_hours(1) + Duration::from_nanos(999);
-            assert!(
-                backend
-                    .set_expiry(&id, requested, access_time)
-                    .await
-                    .unwrap()
-            );
-            let (updated, payload) = backend.get(&id).expect_object();
-            assert_eq!(updated.expiration_policy, policy);
-            assert_eq!(updated.custom, metadata.custom);
-            assert_eq!(payload, Bytes::from_static(b"payload"));
-            assert_eq!(updated.time_expires, Some(requested));
-
-            assert!(
-                backend
-                    .set_expiry(&id, original_expiry, access_time)
-                    .await
-                    .unwrap()
-            );
-            assert_eq!(
-                backend.get(&id).expect_object().0.time_expires,
-                updated.time_expires
-            );
+            let mut metadata = original.clone();
+            for _ in 0..2 {
+                assert_eq!(
+                    extend_object_expiry(
+                        &mut metadata,
+                        ExpiryTarget::At(requested).into(),
+                        access_time,
+                    )
+                    .unwrap_err()
+                    .kind(),
+                    ErrorKind::CorruptData
+                );
+                assert_eq!(metadata, original);
+            }
         }
     }
 
@@ -1092,11 +1117,61 @@ mod tests {
         let access_time = Timestamp::from_unix_secs(1_700_000_000).unwrap();
         let backend = InMemoryBackend::new("test");
         let absent = make_id();
-        assert!(
-            !backend
-                .set_expiry(&absent, access_time + Duration::from_hours(1), access_time)
+        assert_eq!(
+            backend
+                .set_expiry(
+                    &absent,
+                    ExpiryTarget::At(access_time + Duration::from_hours(1)).into(),
+                    access_time,
+                )
                 .await
-                .unwrap()
+                .unwrap(),
+            SetExpiryResponse::NotFound
+        );
+
+        let missing_creation = make_id();
+        let original_expiry = access_time + Duration::from_hours(1);
+        backend
+            .put_object(
+                &missing_creation,
+                &Metadata {
+                    expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
+                    time_expires: Some(original_expiry),
+                    ..Default::default()
+                },
+                stream::single("legacy"),
+                access_time,
+            )
+            .await
+            .unwrap();
+        let absolute = original_expiry + Duration::from_hours(1);
+        assert_eq!(
+            backend
+                .set_expiry(
+                    &missing_creation,
+                    ExpiryTarget::At(absolute).into(),
+                    access_time
+                )
+                .await
+                .unwrap(),
+            SetExpiryResponse::Satisfied(absolute)
+        );
+        let updated = backend.get(&missing_creation).expect_object().0;
+        assert_eq!(
+            updated.expiration_policy,
+            ExpirationPolicy::TimeToLive(Duration::from_hours(2))
+        );
+        assert_eq!(updated.time_created, None);
+        assert_eq!(
+            backend
+                .set_expiry(
+                    &missing_creation,
+                    ExpiryTarget::FromCreation(Duration::ZERO).into(),
+                    access_time,
+                )
+                .await
+                .unwrap(),
+            SetExpiryResponse::Rejected
         );
 
         let manual = make_id();
@@ -1109,11 +1184,16 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(
-            !backend
-                .set_expiry(&manual, access_time + Duration::from_hours(1), access_time)
+        assert_eq!(
+            backend
+                .set_expiry(
+                    &manual,
+                    ExpiryTarget::At(access_time + Duration::from_hours(1)).into(),
+                    access_time,
+                )
                 .await
-                .unwrap()
+                .unwrap(),
+            SetExpiryResponse::Rejected
         );
 
         let expired = make_id();
@@ -1143,11 +1223,16 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert!(
-            !backend
-                .set_expiry(&expired, access_time + Duration::from_hours(1), access_time)
+        assert_eq!(
+            backend
+                .set_expiry(
+                    &expired,
+                    ExpiryTarget::At(access_time + Duration::from_hours(1)).into(),
+                    access_time,
+                )
                 .await
-                .unwrap()
+                .unwrap(),
+            SetExpiryResponse::NotFound
         );
     }
 
@@ -1186,366 +1271,52 @@ mod tests {
         );
 
         let new_expiry = old_expiry + Duration::from_hours(1);
-        assert!(
-            !backend
+        assert_eq!(
+            backend
                 .compare_and_update(
                     &id,
                     Some(&other),
-                    TieredUpdate::SetExpiry(new_expiry),
+                    TieredUpdate::SetExpiry(ExpiryTarget::At(new_expiry).into()),
                     access_time,
                 )
                 .await
-                .unwrap()
+                .unwrap(),
+            SetExpiryResponse::Rejected
         );
         assert_eq!(
             backend.get(&id).expect_tombstone().time_expires,
             Some(old_expiry)
         );
-        assert!(
+        assert_eq!(
             backend
                 .compare_and_update(
                     &id,
                     Some(&target),
-                    TieredUpdate::SetExpiry(new_expiry),
+                    TieredUpdate::SetExpiry(
+                        ExpiryTarget::FromCreation(Duration::from_hours(2)).into()
+                    ),
+                    access_time,
+                )
+                .await
+                .unwrap(),
+            SetExpiryResponse::Rejected
+        );
+        assert_eq!(
+            backend
+                .compare_and_update(
+                    &id,
+                    Some(&target),
+                    TieredUpdate::SetExpiry(ExpiryTarget::At(new_expiry).into()),
                     access_time
                 )
                 .await
-                .unwrap()
+                .unwrap(),
+            SetExpiryResponse::Satisfied(new_expiry)
         );
         assert_eq!(
             backend.get(&id).expect_tombstone().time_expires,
             Some(new_expiry)
         );
-    }
-
-    #[tokio::test]
-    async fn multipart_single_part() {
-        let backend = InMemoryBackend::new("test");
-        let id = make_id();
-        let metadata = Metadata {
-            content_type: "text/plain".into(),
-            expiration_policy: ExpirationPolicy::TimeToIdle(Duration::from_hours(1)),
-            origin: Some("203.0.113.42".into()),
-            custom: [("foo".into(), "bar".into())].into(),
-            ..Default::default()
-        };
-
-        let upload_id = backend.initiate_multipart(&id, &metadata).await.unwrap();
-
-        let data = b"hello, multipart world!";
-        let etag = backend
-            .upload_part(
-                &id,
-                &upload_id,
-                NonZeroU32::new(1).unwrap(),
-                data.len() as u64,
-                None,
-                stream::single(data.to_vec()),
-            )
-            .await
-            .unwrap();
-
-        let result = backend
-            .complete_multipart(
-                &id,
-                &upload_id,
-                vec![CompletedPart {
-                    part_number: NonZeroU32::new(1).unwrap(),
-                    etag,
-                }],
-                Timestamp::now(),
-            )
-            .await
-            .unwrap();
-        assert!(result.is_none(), "expected no error on complete");
-
-        let (meta, _, body) = backend
-            .get_object(&id, Timestamp::now(), None)
-            .await
-            .unwrap()
-            .unwrap();
-        let payload = stream::read_to_vec(body).await.unwrap();
-        assert_eq!(payload, data);
-        assert_eq!(meta.content_type, "text/plain".to_string());
-        assert_eq!(
-            meta.expiration_policy,
-            ExpirationPolicy::TimeToIdle(Duration::from_hours(1))
-        );
-        assert_eq!(meta.origin, Some("203.0.113.42".into()));
-        assert_eq!(meta.custom, [("foo".into(), "bar".into())].into());
-    }
-
-    #[tokio::test]
-    async fn multipart_multiple_parts() {
-        let backend = InMemoryBackend::new("test");
-        let id = make_id();
-        let metadata = Metadata::default();
-
-        let upload_id = backend.initiate_multipart(&id, &metadata).await.unwrap();
-
-        let part1 = b"aaaa".to_vec();
-        let part2 = b"bbbb".to_vec();
-        let part3 = b"cc".to_vec();
-
-        let etag1 = backend
-            .upload_part(
-                &id,
-                &upload_id,
-                NonZeroU32::new(1).unwrap(),
-                part1.len() as u64,
-                None,
-                stream::single(part1.clone()),
-            )
-            .await
-            .unwrap();
-        let etag2 = backend
-            .upload_part(
-                &id,
-                &upload_id,
-                NonZeroU32::new(2).unwrap(),
-                part2.len() as u64,
-                None,
-                stream::single(part2.clone()),
-            )
-            .await
-            .unwrap();
-        let etag3 = backend
-            .upload_part(
-                &id,
-                &upload_id,
-                NonZeroU32::new(3).unwrap(),
-                part3.len() as u64,
-                None,
-                stream::single(part3.clone()),
-            )
-            .await
-            .unwrap();
-
-        let result = backend
-            .complete_multipart(
-                &id,
-                &upload_id,
-                vec![
-                    CompletedPart {
-                        part_number: NonZeroU32::new(1).unwrap(),
-                        etag: etag1,
-                    },
-                    CompletedPart {
-                        part_number: NonZeroU32::new(2).unwrap(),
-                        etag: etag2,
-                    },
-                    CompletedPart {
-                        part_number: NonZeroU32::new(3).unwrap(),
-                        etag: etag3,
-                    },
-                ],
-                Timestamp::now(),
-            )
-            .await
-            .unwrap();
-        assert!(result.is_none());
-
-        let (_, _, body) = backend
-            .get_object(&id, Timestamp::now(), None)
-            .await
-            .unwrap()
-            .unwrap();
-        let payload = stream::read_to_vec(body).await.unwrap();
-        assert_eq!(payload, b"aaaabbbbcc");
-    }
-
-    #[tokio::test]
-    async fn multipart_list_parts() {
-        let backend = InMemoryBackend::new("test");
-        let id = make_id();
-        let metadata = Metadata::default();
-
-        let upload_id = backend.initiate_multipart(&id, &metadata).await.unwrap();
-
-        let etag1 = backend
-            .upload_part(
-                &id,
-                &upload_id,
-                NonZeroU32::new(1).unwrap(),
-                3,
-                None,
-                stream::single(b"aaa".to_vec()),
-            )
-            .await
-            .unwrap();
-        let etag2 = backend
-            .upload_part(
-                &id,
-                &upload_id,
-                NonZeroU32::new(2).unwrap(),
-                3,
-                None,
-                stream::single(b"bbb".to_vec()),
-            )
-            .await
-            .unwrap();
-
-        let list = backend
-            .list_parts(&id, &upload_id, None, None)
-            .await
-            .unwrap();
-        assert_eq!(list.parts.len(), 2);
-        assert_eq!(list.parts[0].part_number.get(), 1);
-        assert_eq!(list.parts[0].etag, etag1);
-        assert_eq!(list.parts[0].size, 3);
-        assert_eq!(list.parts[1].part_number.get(), 2);
-        assert_eq!(list.parts[1].etag, etag2);
-        assert_eq!(list.parts[1].size, 3);
-
-        // Pagination
-        let page1 = backend
-            .list_parts(&id, &upload_id, Some(1), None)
-            .await
-            .unwrap();
-        assert_eq!(page1.parts.len(), 1);
-        assert_eq!(page1.parts[0].part_number.get(), 1);
-        assert!(page1.is_truncated);
-        assert!(page1.next_part_number_marker.is_some());
-
-        let page2 = backend
-            .list_parts(&id, &upload_id, Some(1), page1.next_part_number_marker)
-            .await
-            .unwrap();
-        assert_eq!(page2.parts.len(), 1);
-        assert_eq!(page2.parts[0].part_number.get(), 2);
-
-        backend.abort_multipart(&id, &upload_id).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn multipart_abort() {
-        let backend = InMemoryBackend::new("test");
-        let id = make_id();
-        let metadata = Metadata::default();
-
-        let upload_id = backend.initiate_multipart(&id, &metadata).await.unwrap();
-
-        backend
-            .upload_part(
-                &id,
-                &upload_id,
-                NonZeroU32::new(1).unwrap(),
-                5,
-                None,
-                stream::single(b"hello".to_vec()),
-            )
-            .await
-            .unwrap();
-
-        backend.abort_multipart(&id, &upload_id).await.unwrap();
-
-        let result = backend
-            .get_object(&id, Timestamp::now(), None)
-            .await
-            .unwrap();
-        assert!(result.is_none(), "object should not exist after abort");
-    }
-
-    #[tokio::test]
-    async fn multipart_invalid_etag() {
-        let backend = InMemoryBackend::new("test");
-        let id = make_id();
-        let metadata = Metadata::default();
-
-        let upload_id = backend.initiate_multipart(&id, &metadata).await.unwrap();
-
-        let etag = backend
-            .upload_part(
-                &id,
-                &upload_id,
-                NonZeroU32::new(1).unwrap(),
-                5,
-                None,
-                stream::single(b"hello".to_vec()),
-            )
-            .await
-            .unwrap();
-
-        let result = backend
-            .complete_multipart(
-                &id,
-                &upload_id,
-                vec![CompletedPart {
-                    part_number: NonZeroU32::new(1).unwrap(),
-                    etag: "wrong-etag".into(),
-                }],
-                Timestamp::now(),
-            )
-            .await
-            .unwrap();
-        assert!(result.is_some(), "expected error for bad etag");
-        assert_eq!(result.unwrap().code, "InvalidPart");
-
-        // Upload must survive a failed complete so the client can retry.
-        let result = backend
-            .complete_multipart(
-                &id,
-                &upload_id,
-                vec![CompletedPart {
-                    part_number: NonZeroU32::new(1).unwrap(),
-                    etag,
-                }],
-                Timestamp::now(),
-            )
-            .await
-            .unwrap();
-        assert!(result.is_none(), "retry with correct etag should succeed");
-    }
-
-    #[tokio::test]
-    async fn multipart_missing_part() {
-        let backend = InMemoryBackend::new("test");
-        let id = make_id();
-        let metadata = Metadata::default();
-
-        let upload_id = backend.initiate_multipart(&id, &metadata).await.unwrap();
-
-        let etag = backend
-            .upload_part(
-                &id,
-                &upload_id,
-                NonZeroU32::new(1).unwrap(),
-                5,
-                None,
-                stream::single(b"hello".to_vec()),
-            )
-            .await
-            .unwrap();
-
-        let result = backend
-            .complete_multipart(
-                &id,
-                &upload_id,
-                vec![CompletedPart {
-                    part_number: NonZeroU32::new(99).unwrap(),
-                    etag: "whatever".into(),
-                }],
-                Timestamp::now(),
-            )
-            .await
-            .unwrap();
-        assert!(result.is_some(), "expected error for missing part");
-        assert_eq!(result.unwrap().code, "InvalidPart");
-
-        // Upload must survive a failed complete so the client can retry.
-        let result = backend
-            .complete_multipart(
-                &id,
-                &upload_id,
-                vec![CompletedPart {
-                    part_number: NonZeroU32::new(1).unwrap(),
-                    etag,
-                }],
-                Timestamp::now(),
-            )
-            .await
-            .unwrap();
-        assert!(result.is_none(), "retry with correct part should succeed");
     }
 
     #[cfg(feature = "storage-cogs")]
@@ -1621,11 +1392,12 @@ mod tests {
         producer.clear();
 
         let extended = expires + Duration::from_secs(3600);
-        assert!(
+        assert_eq!(
             backend
-                .set_expiry(&id, extended, access_time)
+                .set_expiry(&id, ExpiryTarget::At(extended).into(), access_time)
                 .await
-                .unwrap()
+                .unwrap(),
+            SetExpiryResponse::Satisfied(extended)
         );
 
         let records = producer.records();
@@ -1634,11 +1406,13 @@ mod tests {
 
         // A deadline that already covers the request writes nothing, so it reports nothing.
         producer.clear();
-        assert!(
+        let requested = expires + Duration::from_secs(60);
+        assert_eq!(
             backend
-                .set_expiry(&id, expires + Duration::from_secs(60), access_time)
+                .set_expiry(&id, ExpiryTarget::At(requested).into(), access_time)
                 .await
-                .unwrap()
+                .unwrap(),
+            SetExpiryResponse::Satisfied(requested)
         );
         assert!(producer.records().is_empty());
     }
@@ -1667,16 +1441,17 @@ mod tests {
         producer.clear();
 
         let extended = expires + Duration::from_secs(3600);
-        assert!(
+        assert_eq!(
             backend
                 .compare_and_update(
                     &id,
                     Some(&target),
-                    TieredUpdate::SetExpiry(extended),
+                    TieredUpdate::SetExpiry(ExpiryTarget::At(extended).into()),
                     access_time,
                 )
                 .await
-                .unwrap()
+                .unwrap(),
+            SetExpiryResponse::Satisfied(extended)
         );
 
         let records = producer.records();

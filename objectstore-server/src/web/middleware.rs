@@ -1,18 +1,17 @@
 use std::any::Any;
-use std::net::SocketAddr;
 
 use axum::RequestExt;
 use axum::body::Body;
-use axum::extract::{ConnectInfo, MatchedPath, RawPathParams, Request, State};
+use axum::extract::{MatchedPath, RawPathParams, Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use objectstore_log::tracing;
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::endpoints;
 use crate::extractors::downstream_service::DownstreamService;
 use crate::extractors::request_time::RequestTime;
+use crate::rate_limits::LimitExceeded;
 use crate::web::RequestCounter;
 use crate::web::metrics_body::{EmitMetricsGuard, MetricsBody};
 use crate::web::sentry_body::SentryBody;
@@ -43,7 +42,7 @@ pub async fn limit_web_concurrency(
         let service = request.extract_parts::<DownstreamService>().await.unwrap();
         objectstore_metrics::count!("web.concurrency.rejected", service = service.to_string());
         objectstore_log::warn!("Request rejected: web concurrency limit reached");
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        return LimitExceeded::Capacity.into_response();
     }
 
     next.run(request).await
@@ -52,25 +51,6 @@ pub async fn limit_web_concurrency(
 /// Create a `SetResponseHeaderLayer` that sets the `Server` header.
 pub fn set_server_header() -> SetResponseHeaderLayer<HeaderValue> {
     SetResponseHeaderLayer::overriding(header::SERVER, HeaderValue::from_static(SERVER))
-}
-
-/// Create a tracing span for an HTTP request.
-///
-/// As opposed to `DefaultMakeSpan`, this also records the client IP address if available.
-pub fn make_http_span(request: &Request) -> tracing::Span {
-    let span = tracing::debug_span!(
-        "request",
-        method = %request.method(),
-        uri = %request.uri(),
-        version = ?request.version(),
-        client_addr = tracing::field::Empty,
-    );
-
-    if let Some(ConnectInfo(addr)) = request.extensions().get::<ConnectInfo<SocketAddr>>() {
-        span.record("client_addr", tracing::field::display(addr.ip()));
-    }
-
-    span
 }
 
 /// A panic handler that logs the panic and turns it into a 500 response.
@@ -91,7 +71,7 @@ pub fn handle_panic(err: Box<dyn Any + Send + 'static>) -> Response {
     response.into_response()
 }
 
-/// Wraps the response body so the request's Sentry hub stays active during polling.
+/// Wraps the response body with a fork of the request's Sentry hub for polling.
 ///
 /// Use this with [`from_fn`](axum::middleware::from_fn). Place it below the Sentry
 /// tower layers so that `Hub::current()` returns the request-scoped hub.
@@ -99,7 +79,7 @@ pub async fn bind_sentry_body(request: Request, next: Next) -> Response {
     let hub = sentry::Hub::current();
     next.run(request)
         .await
-        .map(|body| Body::new(SentryBody::new(hub, body)))
+        .map(|body| Body::new(SentryBody::new(sentry::Hub::new_from_top(hub).into(), body)))
 }
 
 async fn get_usecase(request: &mut Request) -> Option<String> {

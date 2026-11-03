@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 
 use objectstore_typed_options::SentryOptions;
+use objectstore_types::usecase::Usecase;
 use serde::{Deserialize, Serialize};
 
 pub use objectstore_typed_options::Error;
@@ -59,11 +60,11 @@ impl Options {
 /// contexts and discard all requests.
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 pub struct Killswitch {
-    /// Optional usecase to match.
+    /// Optional validated usecase name to match exactly.
     ///
     /// If `None`, matches any usecase.
     #[serde(default)]
-    pub usecase: Option<String>,
+    pub usecase: Option<Usecase>,
 
     /// Scopes to match.
     ///
@@ -94,5 +95,17 @@ mod tests {
     #[test]
     fn schema_is_valid() {
         let _ = Options::get();
+    }
+
+    #[test]
+    fn killswitch_deserialization_validates_usecase() {
+        let switch: Killswitch = serde_json::from_str(r#"{"usecase":"Debug_Files"}"#).unwrap();
+        assert_eq!(switch.usecase.as_ref().unwrap().as_str(), "Debug_Files");
+        let serialized = serde_json::to_value(&switch).unwrap();
+        assert_eq!(serialized["usecase"], "Debug_Files");
+
+        let wildcard: Killswitch = serde_json::from_str("{}").unwrap();
+        assert!(wildcard.usecase.is_none());
+        assert!(serde_json::from_str::<Killswitch>(r#"{"usecase":"test/name"}"#).is_err());
     }
 }

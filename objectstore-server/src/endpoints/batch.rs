@@ -75,11 +75,10 @@ async fn batch(
         let state = Arc::clone(&state);
         let context = context.clone();
         move |_op| {
-            if state.rate_limiter.check(&context, None) {
-                Ok(())
-            } else {
-                Err(ApiError::from(BatchError::RateLimited))
-            }
+            state
+                .rate_limiter
+                .check(&context, None)
+                .map_err(|rejection| ApiError::from(BatchError::RateLimited(rejection)))
         }
     });
 
