@@ -15,8 +15,7 @@ use tokio_util::io::{ReaderStream, StreamReader};
 
 pub use objectstore_types::metadata::{Compression, ExpirationPolicy};
 
-use crate::instrument::{OperationSpan, debug, record_field, record_stream_length};
-use crate::put::payload::{PreparedBody, ReplayableBody};
+use crate::instrument::{OperationSpan, debug, record_field};
 use crate::response::ResponseExt as _;
 use crate::resumable::CreateResumableUploadBuilder;
 use crate::{ClientStream, ObjectKey, Session};
@@ -336,22 +335,9 @@ pub(crate) async fn encode_body(body: PutBody, mode: Option<CompressionMode>) ->
 }
 
 fn compress(reader: impl AsyncBufRead + Send + 'static, compression: Compression) -> Body {
-    let stream = match compression {
-        Compression::Zstd => ReaderStream::new(ZstdEncoder::new(reader)).boxed(),
-        Compression::Gzip => ReaderStream::new(GzipEncoder::new(reader)).boxed(),
-    };
-    Body::wrap_stream(record_stream_length(stream, "objectstore.compressed_size"))
-}
-
-/// Records the size of a payload as it is passed to the client, before client compression.
-fn record_payload_size(compression: Option<CompressionMode>, size: u64) {
     match compression {
-        Some(CompressionMode::Precompressed(_)) => {
-            record_field("objectstore.compressed_size", size);
-        }
-        Some(CompressionMode::Compress(_)) | None => {
-            record_field("objectstore.uncompressed_size", size);
-        }
+        Compression::Zstd => Body::wrap_stream(ReaderStream::new(ZstdEncoder::new(reader))),
+        Compression::Gzip => Body::wrap_stream(ReaderStream::new(GzipEncoder::new(reader))),
     }
 }
 
@@ -376,9 +362,6 @@ impl PutBuilder {
                 .as_ref()
                 .map_or("none", Compression::as_str),
         );
-        if let PutBody::Buffer(bytes) = &self.body {
-            record_payload_size(self.compression, bytes.len() as u64);
-        }
 
         let headers = self.metadata.to_headers("")?;
         let prepared = payload::prepare(
@@ -388,17 +371,7 @@ impl PutBuilder {
             self.session.client.spool_dir().map(PathBuf::from),
         )
         .await?;
-        match &prepared {
-            PreparedBody::Replayable(ReplayableBody::Path { length, .. }) => {
-                record_payload_size(self.compression, *length);
-            }
-            PreparedBody::Replayable(ReplayableBody::Temporary { length, .. }) => {
-                record_field("objectstore.compressed_size", *length);
-            }
-            PreparedBody::Replayable(ReplayableBody::Buffer(_)) | PreparedBody::OneShot(_) => {}
-        }
-
-        if let PreparedBody::Replayable(body) = &prepared {
+        if let payload::PreparedBody::Replayable(body) = &prepared {
             let create = CreateResumableUploadBuilder::new(
                 self.session.clone(),
                 body.len(),

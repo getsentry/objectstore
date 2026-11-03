@@ -6,7 +6,7 @@ mod common;
 
 use std::time::Duration;
 
-use objectstore_client::{Client, Compression, ExpiryExtension, Usecase};
+use objectstore_client::{Client, ExpiryExtension, Usecase};
 use sentry::integrations::tracing::SpanLayer;
 use sentry::protocol::{EnvelopeItem, Span, Value};
 use tracing::Instrument as _;
@@ -149,19 +149,12 @@ fn get_missing_object() {
 }
 
 #[test]
-fn put_records_compression_and_sizes() {
-    let payload = "x".repeat(1024);
-
-    let spans = capture_spans(async move {
+fn put_records_compression_and_key() {
+    let spans = capture_spans(async {
         let server = test_server().await;
         let session = test_session(&server);
 
-        session
-            .put(payload)
-            .resumable_threshold_bytes(None)
-            .send()
-            .await
-            .unwrap();
+        session.put("payload").send().await.unwrap();
     });
 
     let span = find_span(&spans, "objectstore.put");
@@ -169,45 +162,8 @@ fn put_records_compression_and_sizes() {
         data(span, "objectstore.compression"),
         Some(&Value::from("zstd"))
     );
-    assert_eq!(
-        data(span, "objectstore.uncompressed_size"),
-        Some(&Value::from(1024))
-    );
-    let compressed_size = data(span, "objectstore.compressed_size")
-        .and_then(Value::as_u64)
-        .expect("compressed size to be recorded");
-    assert!(compressed_size > 0 && compressed_size < 1024);
     // The server assigns the key, so it is only known after the response.
     assert!(data(span, "objectstore.key").is_some_and(Value::is_string));
-}
-
-#[test]
-fn put_precompressed_records_compressed_size() {
-    let payload = zstd::encode_all(&b"hello world"[..], 0).unwrap();
-    let payload_len = payload.len() as u64;
-
-    let spans = capture_spans(async move {
-        let server = test_server().await;
-        let session = test_session(&server);
-
-        session
-            .put(payload)
-            .precompressed(Compression::Zstd)
-            .send()
-            .await
-            .unwrap();
-    });
-
-    let span = find_span(&spans, "objectstore.put");
-    assert_eq!(
-        data(span, "objectstore.compression"),
-        Some(&Value::from("zstd"))
-    );
-    assert_eq!(
-        data(span, "objectstore.compressed_size"),
-        Some(&Value::from(payload_len))
-    );
-    assert_eq!(data(span, "objectstore.uncompressed_size"), None);
 }
 
 #[test]
@@ -261,6 +217,4 @@ fn batch_records_operation_count() {
         Some("objectstore.batch usecase")
     );
     assert_eq!(data(span, "objectstore.operations"), Some(&Value::from(3)));
-    // Batched parts must not leak per-object attributes into the batch span.
-    assert_eq!(data(span, "objectstore.compressed_size"), None);
 }

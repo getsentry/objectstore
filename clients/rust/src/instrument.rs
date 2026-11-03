@@ -25,11 +25,10 @@ pub use noop::*;
 mod spans {
     use std::future::Future;
 
-    use futures_util::StreamExt as _;
     use tracing::field::Empty;
     use tracing::{Instrument as _, Span};
 
-    use crate::{ClientStream, Session};
+    use crate::Session;
 
     #[allow(unused_imports, reason = "mirrors the logging surface of `tracing`")]
     pub use tracing::{debug, error, info, trace, warn};
@@ -59,8 +58,6 @@ mod spans {
                 objectstore.found = Empty,
                 objectstore.compression = Empty,
                 objectstore.decompressed = Empty,
-                objectstore.uncompressed_size = Empty,
-                objectstore.compressed_size = Empty,
                 objectstore.offset = Empty,
                 objectstore.size = Empty,
             );
@@ -69,9 +66,6 @@ mod spans {
         }
 
         /// Creates a span for a batch request carrying `operations` operations.
-        ///
-        /// Unlike [`Self::storage`], this span does not declare per-object fields, so recording
-        /// them while encoding the batch's parts has no effect.
         pub fn batch(session: &Session, operations: usize) -> Self {
             let usecase = session.scope.usecase().name();
             let span = tracing::info_span!(
@@ -99,32 +93,6 @@ mod spans {
     /// Spans that do not declare the field ignore the value.
     pub fn record_field(field: &'static str, value: impl tracing::Value) {
         Span::current().record(field, value);
-    }
-
-    /// Records the total number of bytes yielded by `stream` in the field `field` of the current
-    /// span.
-    ///
-    /// The length is recorded once the stream ends. Streams that fail or are dropped early do not
-    /// record anything. Use this for request bodies whose size is only known after sending them.
-    pub fn record_stream_length(stream: ClientStream, field: &'static str) -> ClientStream {
-        // The span is dropped on the first error, so a partial length is never recorded.
-        let state = (stream, 0u64, Some(Span::current()));
-        futures_util::stream::unfold(state, move |(mut stream, length, span)| async move {
-            match stream.next().await {
-                Some(Ok(chunk)) => {
-                    let length = length + chunk.len() as u64;
-                    Some((Ok(chunk), (stream, length, span)))
-                }
-                Some(Err(error)) => Some((Err(error), (stream, length, None))),
-                None => {
-                    if let Some(span) = span {
-                        span.record(field, length);
-                    }
-                    None
-                }
-            }
-        })
-        .boxed()
     }
 
     /// Records the scopes of `session`.
@@ -158,7 +126,7 @@ mod spans {
 mod noop {
     use std::future::Future;
 
-    use crate::{ClientStream, Session};
+    use crate::Session;
 
     // Logging macros that discard their input, mirroring the ones of `tracing`.
     macro_rules! trace {
@@ -204,10 +172,4 @@ mod noop {
 
     /// Records `value` in the field `field` of the current span.
     pub fn record_field<V>(_field: &'static str, _value: V) {}
-
-    /// Records the total number of bytes yielded by `stream` in the field `field` of the current
-    /// span.
-    pub fn record_stream_length(stream: ClientStream, _field: &'static str) -> ClientStream {
-        stream
-    }
 }
