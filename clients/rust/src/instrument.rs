@@ -52,6 +52,7 @@ mod spans {
                 sentry.op = op,
                 sentry.name = %format_args!("{op} {usecase}"),
                 objectstore.usecase = usecase,
+                objectstore.scopes = Empty,
                 objectstore.scopes.org = Empty,
                 objectstore.scopes.project = Empty,
                 objectstore.key = key,
@@ -78,6 +79,7 @@ mod spans {
                 sentry.op = "objectstore.batch",
                 sentry.name = %format_args!("objectstore.batch {usecase}"),
                 objectstore.usecase = usecase,
+                objectstore.scopes = Empty,
                 objectstore.scopes.org = Empty,
                 objectstore.scopes.project = Empty,
                 objectstore.operations = operations,
@@ -122,11 +124,18 @@ mod spans {
         .boxed()
     }
 
-    /// Records the well-known `org` and `project` scopes, as numbers where possible.
+    /// Records the scopes of `session`.
     ///
-    /// Span fields must be declared statically, so other scopes are not recorded.
+    /// Span fields must be declared statically, so all scopes are recorded together as
+    /// `objectstore.scopes`, for example `org=1;project=2;app=foo`. The well-known `org` and
+    /// `project` scopes are also recorded on their own, as numbers where possible.
     fn record_scopes(span: &Span, session: &Session) {
-        for scope in session.scope.scopes() {
+        let scopes = session.scope.scopes();
+        span.record(
+            "objectstore.scopes",
+            tracing::field::display(scopes.as_api_path()),
+        );
+        for scope in scopes {
             let field = match scope.name() {
                 "org" => "objectstore.scopes.org",
                 "project" => "objectstore.scopes.project",

@@ -6,14 +6,14 @@ mod common;
 
 use std::time::Duration;
 
-use objectstore_client::{Compression, ExpiryExtension};
+use objectstore_client::{Client, Compression, ExpiryExtension, Usecase};
 use sentry::integrations::tracing::SpanLayer;
 use sentry::protocol::{EnvelopeItem, Span, Value};
 use tracing::Instrument as _;
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::prelude::*;
 
-use common::{test_server, test_session};
+use common::{test_server, test_session, test_token_generator};
 
 /// Runs `future` in a root span and returns the Objectstore spans that Sentry captured.
 fn capture_spans<F>(future: F) -> Vec<Span>
@@ -68,7 +68,14 @@ fn data<'a>(span: &'a Span, key: &str) -> Option<&'a Value> {
 fn simple_operations() {
     let spans = capture_spans(async {
         let server = test_server().await;
-        let session = test_session(&server);
+        let client = Client::builder(server.url("/"))
+            .token(test_token_generator())
+            .build()
+            .unwrap();
+        let scope = Usecase::from_static("usecase")
+            .for_project(12345, 1337)
+            .push("app_slug", "email_app");
+        let session = client.session(scope).unwrap();
 
         session.put("payload").key("my-key").send().await.unwrap();
         session.get("my-key").send().await.unwrap().unwrap();
@@ -107,8 +114,16 @@ fn simple_operations() {
             Some(&Value::from("usecase"))
         );
         assert_eq!(
+            data(span, "objectstore.scopes"),
+            Some(&Value::from("org=12345;project=1337;app_slug=email_app"))
+        );
+        assert_eq!(
             data(span, "objectstore.scopes.org"),
             Some(&Value::from(12345))
+        );
+        assert_eq!(
+            data(span, "objectstore.scopes.project"),
+            Some(&Value::from(1337))
         );
         assert_eq!(data(span, "objectstore.key"), Some(&Value::from("my-key")));
         for (key, value) in expected_data {
