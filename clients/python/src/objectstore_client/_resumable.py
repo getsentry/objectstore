@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import random
 import time
 from collections.abc import Iterator
@@ -8,7 +9,7 @@ from dataclasses import dataclass
 from io import SEEK_END, BytesIO
 from os import PathLike
 from tempfile import TemporaryFile
-from typing import IO, TYPE_CHECKING
+from typing import IO, TYPE_CHECKING, cast
 from urllib.parse import urlencode
 
 import urllib3
@@ -20,6 +21,8 @@ from objectstore_client.metrics import measure_storage_operation
 from objectstore_client.tracing import storage_span
 
 if TYPE_CHECKING:
+    from _typeshed import WriteableBuffer
+
     from objectstore_client.client import Session
 
 
@@ -48,6 +51,14 @@ class NoUploadProgress(Exception):
 
     def __init__(self) -> None:
         super().__init__("Upload made no progress")
+
+
+class UploadBodyTruncated(OSError):
+    """The upload source ended before its declared length, e.g. a file shrank."""
+
+    def __init__(self, missing: int) -> None:
+        super().__init__(f"Upload source ended {missing} bytes early")
+        self.missing = missing
 
 
 @dataclass(frozen=True)
@@ -156,6 +167,8 @@ class ResumableUpload:
 
         if offset < 0 or length < 0:
             raise ValueError("Chunk offset and length must not be negative")
+        if not isinstance(body, bytes):
+            body = bounded_reader(body, length)
         if (
             self._granularity is not None
             and self._total_length is not None
@@ -292,6 +305,89 @@ def get_size(source: bytes | IO[bytes]) -> int | None:
         source.seek(start)
 
 
+class _BoundedReader(io.RawIOBase):
+    """
+    A readable stream over the next `length` bytes of `source`.
+
+    This keeps a body within its declared `Content-Length`, even if `source` grows
+    during the upload. If `source` ends early instead, reading raises
+    `UploadBodyTruncated`, which aborts the request rather than leaving the server
+    waiting for the missing bytes.
+
+    Positions are those of `source`, so urllib3 can rewind a seekable body for
+    retries and redirects. The stream covers positions from the start of the bound
+    to its end; seeking before the start fails. If `source` is not seekable,
+    neither is this reader. Closing this reader leaves `source` open.
+    """
+
+    def __init__(self, source: IO[bytes], length: int) -> None:
+        if length < 0:
+            raise ValueError("length must not be negative")
+        self._source = source
+        self._length = length
+        self._remaining = length
+        self._start: int | None = None
+        try:
+            if source.seekable():
+                self._start = source.tell()
+        except (AttributeError, OSError):
+            pass
+
+    def _check_open(self) -> None:
+        if self.closed:
+            raise ValueError("I/O operation on closed file")
+
+    def _check_seekable(self) -> int:
+        self._check_open()
+        if self._start is None:
+            raise io.UnsupportedOperation("source is not seekable")
+        return self._start
+
+    def readable(self) -> bool:
+        self._check_open()
+        return True
+
+    def readinto(self, buffer: WriteableBuffer, /) -> int:
+        self._check_open()
+        view = memoryview(buffer).cast("B")
+        data = self._source.read(min(len(view), self._remaining))
+        if not data and view and self._remaining:
+            raise UploadBodyTruncated(self._remaining)
+        view[: len(data)] = data
+        self._remaining -= len(data)
+        return len(data)
+
+    def seekable(self) -> bool:
+        self._check_open()
+        return self._start is not None
+
+    def tell(self) -> int:
+        self._check_seekable()
+        return self._source.tell()
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET, /) -> int:
+        start = self._check_seekable()
+        end = start + self._length
+        if whence == io.SEEK_SET:
+            target = offset
+        elif whence == io.SEEK_CUR:
+            target = self._source.tell() + offset
+        elif whence == io.SEEK_END:
+            target = end + offset
+        else:
+            raise ValueError(f"invalid whence: {whence}")
+        if target < start:
+            raise OSError("cannot seek before the start of the stream")
+        position = self._source.seek(target)
+        self._remaining = max(0, end - position)
+        return position
+
+
+def bounded_reader(source: IO[bytes], length: int) -> IO[bytes]:
+    """Return a stream yielding at most `length` bytes of `source` from its position."""
+    return cast(IO[bytes], _BoundedReader(source, length))
+
+
 def is_transient(error: Exception) -> bool:
     if isinstance(error, urllib3.exceptions.MaxRetryError):
         # Exhausted status retries carry ResponseError rather than the response.
@@ -300,6 +396,12 @@ def is_transient(error: Exception) -> bool:
         )
     if isinstance(error, RequestError):
         return error.status in (408, 429, 502, 503, 504)
+    if isinstance(error, urllib3.exceptions.ProtocolError) and any(
+        isinstance(arg, UploadBodyTruncated) for arg in error.args
+    ):
+        # urllib3 wraps errors from reading the body. A local source that ended
+        # early fails the same way on every attempt, so it is not retried.
+        return False
     return isinstance(
         error,
         (
