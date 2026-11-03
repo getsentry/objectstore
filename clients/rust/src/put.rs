@@ -124,9 +124,11 @@ impl Session {
 
     /// Creates or replaces an object using the contents of the file at `path`.
     ///
-    /// For resumable uploads, the path must stay readable and must not be modified, renamed,
-    /// removed, or replaced until the upload completes. Each attempt opens a new handle.
-    /// Handles may remain open until pending HTTP requests release their readers.
+    /// The path must stay readable and must not be modified, renamed, removed, or replaced
+    /// until the upload completes.
+    /// If the request is executed using a resumable upload, then multiple attempts may be
+    /// performed, and each attempt opens a new handle. Handles may remain open until pending
+    /// HTTP requests release their readers.
     ///
     /// Unlike [`put_file`](Session::put_file), this method defers opening the file until the
     /// request is actually sent. When enqueueing many file uploads via [`Session::many`], this
