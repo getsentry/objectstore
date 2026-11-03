@@ -398,15 +398,18 @@ pub(crate) async fn encode_body_buffered(
 ///
 /// For regular files, the length is taken from the file's metadata and the stream is capped to
 /// it, so that a file growing during the upload cannot exceed the declared length.
+///
+/// A reported size of zero is not trusted: virtual files such as those in `/proc` report zero
+/// bytes but still have content. These files, and empty ones, are streamed without a length.
 async fn encode_file(mut file: File) -> io::Result<EncodedBody> {
     let metadata = file.metadata().await?;
-    if metadata.is_file() {
+    if metadata.is_file() && metadata.len() > 0 {
         let position = file.stream_position().await?;
         let length = metadata.len().saturating_sub(position);
         let stream = ReaderStream::new(file.take(length));
         Ok(EncodedBody::sized(length, Body::wrap_stream(stream)))
     } else {
-        // Pipes and other special files do not report a meaningful size.
+        // Pipes, special files, and virtual files do not report a meaningful size.
         let stream = ReaderStream::new(file);
         Ok(EncodedBody::streamed(Body::wrap_stream(stream)))
     }
