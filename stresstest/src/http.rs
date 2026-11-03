@@ -13,6 +13,7 @@ use crate::workload::Payload;
 /// This must be a multiple of 8, since [`Payload`] generates its contents in 8-byte words and
 /// would otherwise produce different bytes depending on how it is read.
 const COMPARE_CHUNK_SIZE: usize = 64 * 1024;
+const _: () = assert!(COMPARE_CHUNK_SIZE.is_multiple_of(8));
 
 /// A remote implementation using HTTP to interact with objectstore.
 #[derive(Debug)]
@@ -103,8 +104,13 @@ async fn contents_match(
     mut actual: impl AsyncRead + Unpin,
     mut expected: Payload,
 ) -> std::io::Result<bool> {
-    let mut expected_chunk = vec![0; COMPARE_CHUNK_SIZE];
-    let mut actual_chunk = vec![0; COMPARE_CHUNK_SIZE];
+    // Small payloads don't need full-size chunks. Keep at least 8 bytes for the trailing data check.
+    let chunk_size = expected
+        .len
+        .next_multiple_of(8)
+        .clamp(8, COMPARE_CHUNK_SIZE as u64) as usize;
+    let mut expected_chunk = vec![0; chunk_size];
+    let mut actual_chunk = vec![0; chunk_size];
 
     loop {
         // `Payload` always fills the buffer completely until it is exhausted.
