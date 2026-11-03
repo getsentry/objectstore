@@ -8,9 +8,10 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use objectstore_types::metadata::Metadata;
 use reqwest::Body;
+use reqwest::header::CONTENT_LENGTH;
 use serde::Deserialize;
 use tokio::fs::File;
-use tokio::io::{AsyncBufRead, AsyncRead, BufReader};
+use tokio::io::{AsyncBufRead, AsyncRead, AsyncReadExt as _, AsyncSeekExt as _, BufReader};
 use tokio_util::io::{ReaderStream, StreamReader};
 #[cfg(feature = "tracing")]
 use tracing::debug;
@@ -309,10 +310,35 @@ impl PutBuilder {
     }
 }
 
+/// A request body along with its exact length, if known before sending.
+pub(crate) struct EncodedBody {
+    pub body: Body,
+    /// The number of bytes `body` yields, sent as `Content-Length` when known.
+    pub length: Option<u64>,
+}
+
+impl EncodedBody {
+    /// Creates a body whose length is known up front.
+    pub fn sized(length: u64, body: impl Into<Body>) -> Self {
+        Self {
+            body: body.into(),
+            length: Some(length),
+        }
+    }
+
+    /// Creates a body whose length is only known once it has been streamed.
+    pub fn streamed(body: Body) -> Self {
+        Self { body, length: None }
+    }
+}
+
 /// Turns the body into a request body, compressing it if the mode asks for it.
 ///
 /// Payloads declared as [`CompressionMode::Precompressed`] are forwarded verbatim.
-pub(crate) async fn encode_body(body: PutBody, mode: Option<CompressionMode>) -> io::Result<Body> {
+pub(crate) async fn encode_body(
+    body: PutBody,
+    mode: Option<CompressionMode>,
+) -> io::Result<EncodedBody> {
     let compression = match mode {
         Some(CompressionMode::Compress(compression)) => Some(compression),
         // The payload already carries the encoding, so nothing is left to do here.
@@ -321,18 +347,69 @@ pub(crate) async fn encode_body(body: PutBody, mode: Option<CompressionMode>) ->
 
     Ok(match compression {
         None => match body {
-            PutBody::Buffer(bytes) => bytes.into(),
-            PutBody::Stream(stream) => Body::wrap_stream(stream),
-            PutBody::File(file) => Body::wrap_stream(ReaderStream::new(file)),
-            PutBody::Path(path) => Body::wrap_stream(ReaderStream::new(File::open(path).await?)),
+            PutBody::Buffer(bytes) => EncodedBody::sized(bytes.len() as u64, bytes),
+            PutBody::Stream(stream) => EncodedBody::streamed(Body::wrap_stream(stream)),
+            PutBody::File(file) => encode_file(file).await?,
+            PutBody::Path(path) => encode_file(File::open(path).await?).await?,
         },
-        Some(compression) => match body {
+        Some(compression) => EncodedBody::streamed(match body {
             PutBody::Buffer(bytes) => compress(Cursor::new(bytes), compression),
             PutBody::Stream(stream) => compress(StreamReader::new(stream), compression),
             PutBody::File(file) => compress(BufReader::new(file), compression),
             PutBody::Path(path) => compress(BufReader::new(File::open(path).await?), compression),
-        },
+        }),
     })
+}
+
+/// Turns the body into a request body of known length, compressing it in memory if needed.
+///
+/// Unlike [`encode_body`], this buffers the entire compressed payload before sending, so it
+/// must only be used for small bodies.
+pub(crate) async fn encode_body_buffered(
+    body: PutBody,
+    mode: Option<CompressionMode>,
+) -> io::Result<EncodedBody> {
+    let Some(CompressionMode::Compress(compression)) = mode else {
+        return encode_body(body, mode).await;
+    };
+
+    let mut compressed = Vec::new();
+    match body {
+        PutBody::Buffer(bytes) => {
+            payload::compress_into(Cursor::new(bytes), compression, &mut compressed).await?
+        }
+        PutBody::Stream(stream) => {
+            payload::compress_into(StreamReader::new(stream), compression, &mut compressed).await?
+        }
+        PutBody::File(file) => {
+            payload::compress_into(BufReader::new(file), compression, &mut compressed).await?
+        }
+        PutBody::Path(path) => {
+            let reader = BufReader::new(File::open(path).await?);
+            payload::compress_into(reader, compression, &mut compressed).await?
+        }
+    };
+
+    let length = compressed.len() as u64;
+    Ok(EncodedBody::sized(length, compressed))
+}
+
+/// Streams the remainder of a file from its current position.
+///
+/// For regular files, the length is taken from the file's metadata and the stream is capped to
+/// it, so that a file growing during the upload cannot exceed the declared length.
+async fn encode_file(mut file: File) -> io::Result<EncodedBody> {
+    let metadata = file.metadata().await?;
+    if metadata.is_file() {
+        let position = file.stream_position().await?;
+        let length = metadata.len().saturating_sub(position);
+        let stream = ReaderStream::new(file.take(length));
+        Ok(EncodedBody::sized(length, Body::wrap_stream(stream)))
+    } else {
+        // Pipes and other special files do not report a meaningful size.
+        let stream = ReaderStream::new(file);
+        Ok(EncodedBody::streamed(Body::wrap_stream(stream)))
+    }
 }
 
 fn compress(reader: impl AsyncBufRead + Send + 'static, compression: Compression) -> Body {
@@ -379,11 +456,14 @@ impl PutBuilder {
             }
         }
 
-        let body = prepared.into_reqwest_body(self.compression).await?;
+        let EncodedBody { body, length } = prepared.into_reqwest_body(self.compression).await?;
         let mut builder = self
             .session
             .request(method, self.key.as_deref().unwrap_or_default())?;
         builder = builder.headers(headers);
+        if let Some(length) = length {
+            builder = builder.header(CONTENT_LENGTH, length);
+        }
         let response = builder.body(body).send().await?;
         Ok(response.error_for_status_and_drain().await?.json().await?)
     }
@@ -407,8 +487,10 @@ mod tests {
         PutBody::Stream(stream::iter(chunks).boxed())
     }
 
-    async fn collect(body: Body) -> Vec<u8> {
-        body.collect()
+    async fn collect(encoded: EncodedBody) -> Vec<u8> {
+        encoded
+            .body
+            .collect()
             .await
             .expect("body to be readable")
             .to_bytes()

@@ -559,6 +559,12 @@ class Session:
                         retries = pool_retries.new(read=0)
                     elif isinstance(pool_retries, int):
                         retries = urllib3.Retry(pool_retries, read=0)
+                elif "Content-Length" not in headers:
+                    # Uncompressed bodies are sent verbatim, so buffers and seekable
+                    # files know their size upfront and avoid chunked encoding.
+                    size = _resumable.get_size(original_body)
+                    if size is not None:
+                        headers = {**headers, "Content-Length": str(size)}
 
                 response = self._pool.request(
                     "POST" if not key else "PUT",

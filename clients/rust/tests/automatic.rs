@@ -255,7 +255,9 @@ async fn files_remain_direct_and_paths_open_lazily() {
     put.send().await.unwrap();
     let requests = server.finish();
     assert_eq!(requests[0].body, "data");
+    assert_eq!(requests[0].headers["content-length"], "4");
     assert_eq!(requests[1].body, "ata");
+    assert_eq!(requests[1].headers["content-length"], "3");
     assert!(
         requests[..2]
             .iter()
@@ -326,12 +328,10 @@ async fn compression_spooling_metadata_and_creation_fallback() {
                 requests[0].headers["upload-length"],
                 encoded.len().to_string()
             );
-            if !fallback {
-                assert_eq!(
-                    requests[1].headers["content-length"],
-                    encoded.len().to_string()
-                );
-            }
+            assert_eq!(
+                requests[1].headers["content-length"],
+                encoded.len().to_string()
+            );
             assert_eq!(requests[0].method, Method::PUT);
             let metadata =
                 objectstore_types::metadata::Metadata::from_headers(&requests[0].headers, "")
@@ -617,6 +617,7 @@ async fn non_regular_paths_use_direct_uploads() {
         .unwrap();
     let requests = server.finish();
     assert!(!requests[0].headers.contains_key("upload-length"));
+    assert!(!requests[0].headers.contains_key("content-length"));
     assert!(requests[0].body.is_empty());
 }
 

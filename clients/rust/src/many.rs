@@ -165,8 +165,14 @@ impl BatchOperation {
                 metadata.compression = compression.map(CompressionMode::compression);
                 headers.extend(metadata.to_headers("")?);
 
-                let body = put::encode_body(body, compression).await?;
-                Ok(Part::stream(body).headers(headers))
+                // Batched parts are small, so compressing them up front is cheap. A known length
+                // for every part lets the entire batch request carry a `Content-Length`.
+                let encoded = put::encode_body_buffered(body, compression).await?;
+                let part = match encoded.length {
+                    Some(length) => Part::stream_with_length(encoded.body, length),
+                    None => Part::stream(encoded.body),
+                };
+                Ok(part.headers(headers))
             }
             BatchOperation::Delete { key } => {
                 let headers = operation_headers("delete", Some(&key));
