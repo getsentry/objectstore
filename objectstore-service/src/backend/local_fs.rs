@@ -193,23 +193,20 @@ async fn create_directories(path: &Path) -> io::Result<()> {
 
 /// Creates `dir` and runs `f` to place a new entry in it.
 ///
-/// [`remove_empty_directories`] can remove `dir` after it is created but before `f` places its
-/// entry. When `f` fails with [`io::ErrorKind::NotFound`], the directory is created again and `f`
-/// retried, up to [`MAX_DIRECTORY_ATTEMPTS`] times.
+/// [`remove_empty_directories`] can remove `dir` or one of its parents while they are being
+/// created, or before `f` places its entry. When either step fails with
+/// [`io::ErrorKind::NotFound`], both are retried, up to [`MAX_DIRECTORY_ATTEMPTS`] times in total.
 fn run_in_directory<T>(dir: &Path, mut f: impl FnMut() -> io::Result<T>) -> io::Result<T> {
-    let mut attempt = 1;
-    loop {
-        directory_builder().create(dir)?;
-        match f() {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                if attempt == MAX_DIRECTORY_ATTEMPTS {
-                    return Err(error);
-                }
-                attempt += 1;
-            }
+    let mut attempt = || directory_builder().create(dir).and_then(|()| f());
+
+    for _ in 1..MAX_DIRECTORY_ATTEMPTS {
+        match attempt() {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
             result => return result,
         }
     }
+
+    attempt()
 }
 
 /// Removes the directories of a deleted object below `root` as long as they are empty.
