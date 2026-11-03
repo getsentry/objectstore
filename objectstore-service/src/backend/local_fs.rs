@@ -199,6 +199,7 @@ async fn create_directories(path: &Path) -> io::Result<()> {
 fn run_in_directory<T>(dir: &Path, mut f: impl FnMut() -> io::Result<T>) -> io::Result<T> {
     let mut attempt = || directory_builder().create(dir).and_then(|()| f());
 
+    // Retry on NotFound; the final attempt below returns its result as is, including NotFound.
     for _ in 1..MAX_DIRECTORY_ATTEMPTS {
         match attempt() {
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
