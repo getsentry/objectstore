@@ -1,8 +1,5 @@
 //! Primitives for concurrency limiting in the Tiered backend.
 //!
-//! [`ConcurrencyLimiter`] limits the concurrency of each backend independently. It requires
-//! both capacities. To disable tier concurrency limits, omit the limiter.
-//!
 //! High-volume operations are classified between `Start` (HV operations happening *before* any
 //! LT operations in a Tiered request) and `Continue` (HV operations happening *after* some LT operations).
 //! Both classes share the same limiter, but `Continue` operations always have priority over
