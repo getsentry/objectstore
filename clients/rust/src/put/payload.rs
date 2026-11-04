@@ -11,7 +11,7 @@ use tokio::fs::File;
 use tokio::io::{AsyncBufRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
 use tokio_util::io::ReaderStream;
 
-use crate::put::{CompressionMode, PutBody, encode_body};
+use crate::put::{CompressionMode, EncodedBody, PutBody, encode_body};
 use crate::{ClientStream, Compression};
 
 const READ_BUFFER_SIZE: usize = 4 * 1024;
@@ -25,10 +25,13 @@ impl PreparedBody {
     pub async fn into_reqwest_body(
         self,
         compression: Option<CompressionMode>,
-    ) -> io::Result<reqwest::Body> {
+    ) -> io::Result<EncodedBody> {
         match self {
             Self::OneShot(body) => encode_body(body, compression).await,
-            Self::Replayable(body) => Ok(reqwest::Body::wrap_stream(body.stream(0).await?)),
+            Self::Replayable(body) => Ok(EncodedBody::sized(
+                body.len(),
+                reqwest::Body::wrap_stream(body.stream(0).await?),
+            )),
         }
     }
 }
