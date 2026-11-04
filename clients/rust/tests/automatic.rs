@@ -255,7 +255,9 @@ async fn files_remain_direct_and_paths_open_lazily() {
     put.send().await.unwrap();
     let requests = server.finish();
     assert_eq!(requests[0].body, "data");
+    assert_eq!(requests[0].headers["content-length"], "4");
     assert_eq!(requests[1].body, "ata");
+    assert_eq!(requests[1].headers["content-length"], "3");
     assert!(
         requests[..2]
             .iter()
@@ -326,12 +328,10 @@ async fn compression_spooling_metadata_and_creation_fallback() {
                 requests[0].headers["upload-length"],
                 encoded.len().to_string()
             );
-            if !fallback {
-                assert_eq!(
-                    requests[1].headers["content-length"],
-                    encoded.len().to_string()
-                );
-            }
+            assert_eq!(
+                requests[1].headers["content-length"],
+                encoded.len().to_string()
+            );
             assert_eq!(requests[0].method, Method::PUT);
             let metadata =
                 objectstore_types::metadata::Metadata::from_headers(&requests[0].headers, "")
@@ -617,6 +617,7 @@ async fn non_regular_paths_use_direct_uploads() {
         .unwrap();
     let requests = server.finish();
     assert!(!requests[0].headers.contains_key("upload-length"));
+    assert!(!requests[0].headers.contains_key("content-length"));
     assert!(requests[0].body.is_empty());
 }
 
@@ -631,4 +632,37 @@ fn upload_futures_are_send() {
     assert_send(session.put("data").send());
     assert_send(session.put_path("data").send());
     assert_send(session.many().push(session.put("data")).send());
+}
+
+#[cfg(feature = "resumable-upload-api")]
+#[tokio::test]
+async fn resumable_stream_rejects_error_after_declared_length() {
+    for data in [b"hello".as_slice(), b""] {
+        for reader in [false, true] {
+            let server = Server::new([Reply::Complete]).await;
+            let upload = server
+                .session(None)
+                .resume_upload("key", objectstore_client::SessionToken::new(b"token"));
+            let body = stream::iter([
+                Ok(Bytes::from_static(data)),
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "checksum mismatch",
+                )),
+            ]);
+            let request = if reader {
+                upload.put_read(
+                    0,
+                    data.len() as u64,
+                    tokio_util::io::StreamReader::new(body),
+                )
+            } else {
+                upload.put_stream(0, data.len() as u64, body.boxed())
+            };
+
+            let result = request.send().await;
+            assert!(result.is_err(), "accepted an invalid source: {result:?}");
+            assert!(server.script.lock().unwrap().received.is_empty());
+        }
+    }
 }

@@ -559,6 +559,10 @@ class Session:
                         retries = pool_retries.new(read=0)
                     elif isinstance(pool_retries, int):
                         retries = urllib3.Retry(pool_retries, read=0)
+                elif isinstance(contents, bytes):
+                    # Buffers are sent verbatim and their size cannot change, so they
+                    # declare it upfront instead of using chunked encoding.
+                    headers = {**headers, "Content-Length": str(len(contents))}
 
                 response = self._pool.request(
                     "POST" if not key else "PUT",
