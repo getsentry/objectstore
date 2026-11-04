@@ -1,6 +1,7 @@
 use objectstore_types::metadata::Metadata;
 use reqwest::StatusCode;
 
+use crate::instrument::{OperationSpan, record_field};
 use crate::response::ResponseExt as _;
 use crate::{ObjectKey, Session};
 
@@ -32,16 +33,23 @@ pub struct HeadBuilder {
 impl HeadBuilder {
     /// Sends the head request.
     pub async fn send(self) -> crate::Result<HeadResponse> {
+        let span = OperationSpan::storage("objectstore.head", &self.session, Some(&self.key));
+        span.instrument(self.execute()).await
+    }
+
+    async fn execute(self) -> crate::Result<HeadResponse> {
         let response = self
             .session
             .request(reqwest::Method::HEAD, &self.key)?
             .send()
             .await?;
         if response.status() == StatusCode::NOT_FOUND {
+            record_field("objectstore.found", false);
             response.drain_body().await;
             return Ok(None);
         }
         let response = response.error_for_status_and_drain().await?;
+        record_field("objectstore.found", true);
         let metadata = Metadata::from_headers(response.headers(), "");
         response.drain_body().await;
         Ok(Some(metadata?))

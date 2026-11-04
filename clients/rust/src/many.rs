@@ -13,6 +13,7 @@ use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::multipart::Part;
 
 use crate::error::Error;
+use crate::instrument::OperationSpan;
 use crate::put::{CompressionMode, PutBody};
 use crate::response::ResponseExt as _;
 use crate::{
@@ -702,7 +703,8 @@ async fn execute_individual(op: BatchOperation, session: &Session) -> OperationR
 /// On batch-level failure, produces per-operation error results.
 async fn execute_batch(operations: Vec<BatchOperation>, session: &Session) -> Vec<OperationResult> {
     let contexts: Vec<_> = operations.iter().map(OperationContext::from).collect();
-    match send_batch(session, operations).await {
+    let span = OperationSpan::batch(session, operations.len());
+    match span.instrument(send_batch(session, operations)).await {
         Ok(results) => results,
         Err(e) => {
             let shared = Arc::new(e);

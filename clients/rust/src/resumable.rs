@@ -26,6 +26,7 @@ use tokio_util::io::ReaderStream;
 
 pub use objectstore_types::resumable::{SessionToken, UploadProgress};
 
+use crate::instrument::{OperationSpan, record_field};
 use crate::response::ResponseExt as _;
 use crate::{ClientStream, Compression, Error, ExpirationPolicy, ObjectKey, Session};
 
@@ -201,6 +202,10 @@ impl ResumableUpload {
         }
     }
 
+    fn span(&self, op: &'static str) -> OperationSpan {
+        OperationSpan::storage(op, &self.session, Some(&self.key))
+    }
+
     fn request(&self, method: Method) -> crate::Result<reqwest::RequestBuilder> {
         Ok(self
             .session
@@ -294,6 +299,15 @@ impl CreateResumableUploadBuilder {
     /// Returns `None` when the server declines resumable uploads for this object.
     /// Callers should fall back to a regular [`Session::put`] in that case.
     pub async fn send(self) -> crate::Result<Option<ResumableUpload>> {
+        let span = OperationSpan::storage(
+            "objectstore.resumable.create",
+            &self.session,
+            self.key.as_deref(),
+        );
+        span.instrument(self.execute()).await
+    }
+
+    async fn execute(self) -> crate::Result<Option<ResumableUpload>> {
         let method = if self.key.is_some() {
             Method::PUT
         } else {
@@ -325,6 +339,7 @@ impl CreateResumableUploadBuilder {
         }
 
         let response: CreateSessionResponse = response.json().await?;
+        record_field("objectstore.key", response.key.as_str());
         let upload = ResumableUpload {
             session: self.session,
             key: response.key,
@@ -350,6 +365,11 @@ impl UploadProgressBuilder {
     /// Returns [`Error::ResumableUploadUnavailable`] when the session expired, was canceled, or
     /// could not be found. The upload must be restarted with a new session in that case.
     pub async fn send(self) -> crate::Result<UploadProgress> {
+        let span = self.upload.span("objectstore.resumable.progress");
+        span.instrument(self.execute()).await
+    }
+
+    async fn execute(self) -> crate::Result<UploadProgress> {
         let response = self
             .upload
             .request(Method::PUT)?
@@ -457,7 +477,14 @@ impl PutChunkBuilder {
     /// };
     /// ```
     pub async fn send(self) -> crate::Result<UploadProgress> {
+        let span = self.upload.span("objectstore.resumable.put");
+        span.instrument(self.execute()).await
+    }
+
+    async fn execute(self) -> crate::Result<UploadProgress> {
         let length = self.chunk.len();
+        record_field("objectstore.offset", self.offset);
+        record_field("objectstore.size", length);
         self.upload.validate_chunk_length(self.offset, length)?;
         let body = self.chunk.into_body().await?;
         let response = self
@@ -486,6 +513,11 @@ impl CancelUploadBuilder {
     /// Returns [`Error::ResumableUploadUnavailable`] when the session expired, was already
     /// canceled, or could not be found.
     pub async fn send(self) -> crate::Result<()> {
+        let span = self.upload.span("objectstore.resumable.cancel");
+        span.instrument(self.execute()).await
+    }
+
+    async fn execute(self) -> crate::Result<()> {
         let response = self.upload.request(Method::DELETE)?.send().await?;
         match response.status() {
             StatusCode::NO_CONTENT => {

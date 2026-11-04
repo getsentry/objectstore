@@ -13,11 +13,10 @@ use serde::Deserialize;
 use tokio::fs::File;
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncReadExt as _, AsyncSeekExt as _, BufReader};
 use tokio_util::io::{ReaderStream, StreamReader};
-#[cfg(feature = "tracing")]
-use tracing::debug;
 
 pub use objectstore_types::metadata::{Compression, ExpirationPolicy};
 
+use crate::instrument::{OperationSpan, debug, record_field};
 use crate::response::ResponseExt as _;
 use crate::resumable::CreateResumableUploadBuilder;
 use crate::{ClientStream, ObjectKey, Session};
@@ -391,13 +390,26 @@ fn compress(reader: impl AsyncBufRead + Send + 'static, compression: Compression
 
 impl PutBuilder {
     /// Sends the built put request to the upstream service.
-    pub async fn send(mut self) -> crate::Result<PutResponse> {
+    pub async fn send(self) -> crate::Result<PutResponse> {
+        let span = OperationSpan::storage("objectstore.put", &self.session, self.key.as_deref());
+        span.instrument(self.execute()).await
+    }
+
+    async fn execute(mut self) -> crate::Result<PutResponse> {
         let method = match self.key {
             Some(_) => reqwest::Method::PUT,
             None => reqwest::Method::POST,
         };
 
         self.metadata.compression = self.compression.map(CompressionMode::compression);
+        record_field(
+            "objectstore.compression",
+            self.metadata
+                .compression
+                .as_ref()
+                .map_or("none", Compression::as_str),
+        );
+
         let headers = self.metadata.to_headers("")?;
         let prepared = payload::prepare(
             self.body,
@@ -414,12 +426,15 @@ impl PutBuilder {
                 self.metadata,
             );
             match create.send().await {
-                Ok(Some(upload)) => return automatic::upload(body, upload).await,
-                #[cfg(feature = "tracing")]
-                Err(error) => {
-                    debug!(%error, "Resumable upload creation failed; falling back to direct upload");
+                Ok(Some(upload)) => {
+                    let response = automatic::upload(body, upload).await?;
+                    record_field("objectstore.key", response.key.as_str());
+                    return Ok(response);
                 }
-                _ => {}
+                Ok(None) => {}
+                Err(_e) => {
+                    debug!(error = %_e, "Resumable upload creation failed; falling back to direct upload");
+                }
             }
         }
 
@@ -432,7 +447,9 @@ impl PutBuilder {
             builder = builder.header(CONTENT_LENGTH, length);
         }
         let response = builder.body(body).send().await?;
-        Ok(response.error_for_status_and_drain().await?.json().await?)
+        let response: PutResponse = response.error_for_status_and_drain().await?.json().await?;
+        record_field("objectstore.key", response.key.as_str());
+        Ok(response)
     }
 }
 

@@ -9,6 +9,7 @@ mod error;
 mod expiry;
 mod get;
 mod head;
+mod instrument;
 mod key;
 mod many;
 mod put;

@@ -1,3 +1,4 @@
+use crate::instrument::OperationSpan;
 use crate::response::ResponseExt as _;
 use crate::{ObjectKey, Session};
 
@@ -24,6 +25,11 @@ pub struct DeleteBuilder {
 impl DeleteBuilder {
     /// Sends the delete request.
     pub async fn send(self) -> crate::Result<DeleteResponse> {
+        let span = OperationSpan::storage("objectstore.delete", &self.session, Some(&self.key));
+        span.instrument(self.execute()).await
+    }
+
+    async fn execute(self) -> crate::Result<DeleteResponse> {
         self.session
             .request(reqwest::Method::DELETE, &self.key)?
             .send()
