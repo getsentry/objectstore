@@ -212,8 +212,6 @@ impl HighVolumeLimiter {
 }
 
 /// A waiter's place in line.
-///
-/// Borrows the state because it never outlives the pending `acquire` call that created it.
 struct QueueEntryGuard<'a> {
     state: &'a Mutex<State>,
     class: HighVolumeClass,
