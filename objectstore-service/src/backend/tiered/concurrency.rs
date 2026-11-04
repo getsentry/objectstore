@@ -188,7 +188,7 @@ impl HighVolumeLimiter {
             let (sender, receiver) = oneshot::channel();
             state.queue(class).insert(id, sender);
             let entry = QueueEntryGuard {
-                state: shared.clone(),
+                state: shared,
                 class,
                 id,
             };
@@ -212,13 +212,15 @@ impl HighVolumeLimiter {
 }
 
 /// A waiter's place in line.
-struct QueueEntryGuard {
-    state: Arc<Mutex<State>>,
+///
+/// Borrows the state because it never outlives the pending `acquire` call that created it.
+struct QueueEntryGuard<'a> {
+    state: &'a Mutex<State>,
     class: HighVolumeClass,
     id: u64,
 }
 
-impl Drop for QueueEntryGuard {
+impl Drop for QueueEntryGuard<'_> {
     fn drop(&mut self) {
         // Leave the queue if we gave up.
         self.state
