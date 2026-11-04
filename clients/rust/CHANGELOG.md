@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.3.1
+
+### New Features
+
+- Send Content-Length for uploads of known size by @jan-auer in [#751](https://github.com/getsentry/objectstore/pull/751)
+- Enable the new `tracing` feature to see every storage operation as a Sentry span in your traces, named the same as in the Python client by @jan-auer in [#757](https://github.com/getsentry/objectstore/pull/757)
+- `Session::put` now uses resumable uploads automatically for buffers and paths to regular files of 256 MiB or more, and resends only what the server hasn't stored after a failed write by @lcian with @sentry-junior in [#700](https://github.com/getsentry/objectstore/pull/700)
+  - Change the threshold with `Usecase::with_resumable_threshold_bytes` or per request with `.resumable_threshold_bytes(...)`; `None` disables automatic resumable uploads.
+  - Set `ClientBuilder::spool_dir` to choose where payloads compressed on the fly are spooled (defaults to the system temp dir).
+  - The `resumable-upload-api` feature only gates the manual resumable upload API. This new behavior is enabled regardless of that feature flag.
+- `Usecase::from_static` is now a `const fn` by @lcian and @jan-auer with @sentry-junior in [#712](https://github.com/getsentry/objectstore/pull/712)
+  - A `Usecase` can be a plain `static` without `LazyLock`, and an invalid name fails at compile time when evaluated in a const context.
+  - `InvalidUsecaseName::InvalidChar` now holds the byte position of the invalid character instead of the character.
+
+### Bug Fixes
+
+- Uploads from a stream with a declared length no longer hang when the stream ends early, for example because the file shrank during the upload; they now fail immediately with `UploadBodyTruncated` by @jan-auer in [#758](https://github.com/getsentry/objectstore/pull/758)
+- Reject resumable uploads with incomplete or invalid source streams. by @vjeranc and @codex in [#754](https://github.com/getsentry/objectstore/pull/754)
+
+### Other Changes
+
+- Remove IntoFuture TODO from PutBuilder by @jan-auer with @sentry-junior in [#752](https://github.com/getsentry/objectstore/pull/752)
+- `Error::TokenError` and `metadata::Error::ContentType` now wrap opaque error types instead of the `jsonwebtoken` and `mediatype` error types. by @jan-auer in [#745](https://github.com/getsentry/objectstore/pull/745)
+  - Code that matches on the variant with `_` needs no change. Code that inspects the inner error can use its message instead.
+
 ## 0.3.0
 
 ### Breaking Changes
