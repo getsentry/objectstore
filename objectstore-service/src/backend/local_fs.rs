@@ -1,5 +1,45 @@
 //! Local filesystem backend for development and testing.
 //!
+//! Stores each object as one file below the configured root directory. The file holds the
+//! object's metadata as a single JSON line, followed by the raw payload.
+//!
+//! ## Layout
+//!
+//! ```text
+//! {root}/
+//! ├── {usecase}/{scopes}/objects/{key}.obj   object files
+//! ├── .uploads/{upload_id}                   in-progress resumable uploads
+//! └── .locks/{xx}/{yy}                       lock slots
+//! ```
+//!
+//! Internal directories start with `.`, which usecase names cannot contain, so they never collide
+//! with objects.
+//!
+//! Each scope becomes one directory level named `{name}.{value}`, in scope order. Objects without
+//! scopes are stored directly under `{usecase}/objects/`.
+//!
+//! Each `/`-separated segment of the key becomes one directory level, and the last segment gets a
+//! `.obj` suffix. Segments are [encoded](#key-encoding) first. For example, the key `docs/report`
+//! in usecase `attachments` with scopes `org=17;project=42` is stored at
+//! `attachments/org.17/project.42/objects/docs/report.obj`. Because of the suffix, keys like `a`
+//! and `a/b` can coexist.
+//!
+//! ### Key encoding
+//!
+//! Key segments are stored mostly verbatim, so that paths stay readable. To keep every key inside
+//! the root and every key mapped to a distinct path, these characters are percent-encoded as
+//! `%XX`:
+//!
+//! - `%` itself and ASCII control characters, including NUL.
+//! - Characters reserved on Windows: `\ < > : " | ? *`.
+//! - A `.` at the start of a segment, so no segment is `.` or `..`, or a hidden file.
+//! - A `.` or space at the end of a segment, which Windows would strip.
+//! - The `.` of a trailing `.obj` (in any case), so no directory looks like an object file.
+//!
+//! Empty segments, such as in `a//b`, are stored as `%`.
+//!
+//! ## Concurrency
+//!
 //! Complete object files are published by atomically renaming same-directory drafts, so readers
 //! observe either the previous or next complete file. Unpublished drafts are removed automatically
 //! when dropped.
@@ -12,6 +52,16 @@
 //!
 //! Shared filesystems are supported only when locks propagate across the cluster, pathname
 //! visibility is coherent, and rename is atomic.
+//!
+//! ## Limitations
+//!
+//! - Keys that differ only in case or Unicode normalization collide on filesystems that ignore
+//!   those differences, such as the macOS default.
+//! - Each encoded key segment must fit the filesystem's file name limit, typically 255 bytes.
+//! - Windows additionally rejects reserved device names such as `CON` or `NUL`. These are stored
+//!   unescaped.
+//!
+//! ## Permissions
 //!
 //! Newly created files and directories are owner-only on Unix (0600 and 0700 respectively,
 //! further restricted by umask). Existing paths retain their permissions.
@@ -56,6 +106,62 @@ fn file_options() -> std::fs::OpenOptions {
         options.mode(0o600);
     }
     options
+}
+
+/// Directory below the usecase and scopes that holds the object files.
+const OBJECTS_DIR: &str = "objects";
+
+/// Encoded form of an empty key segment, which escaping can never produce otherwise.
+const EMPTY_KEY_SEGMENT: &str = "%";
+
+/// Suffix appended to the last key segment to form an object's file name.
+///
+/// [`encode_key`] escapes the `.` of a trailing `.obj` in any case, so encoded segments never end
+/// in this suffix. Object files therefore never collide with directories of keys nested below them.
+const OBJECT_FILE_SUFFIX: &str = ".obj";
+
+/// Encodes an object key into a relative path of safe directory and file names.
+///
+/// Each `/`-separated segment becomes one path component, and the last one gets
+/// [`OBJECT_FILE_SUFFIX`]. See the [module documentation](self#key-encoding) for the escaping rules.
+fn encode_key(key: &str) -> String {
+    let mut encoded = String::with_capacity(key.len() + OBJECT_FILE_SUFFIX.len());
+    for (segment_index, segment) in key.split('/').enumerate() {
+        if segment_index > 0 {
+            encoded.push('/');
+        }
+        if segment.is_empty() {
+            encoded.push_str(EMPTY_KEY_SEGMENT);
+            continue;
+        }
+
+        // Matched case-insensitively, since case-insensitive filesystems would treat them the same.
+        let suffix_start = segment
+            .len()
+            .checked_sub(OBJECT_FILE_SUFFIX.len())
+            .filter(|&start| {
+                segment.as_bytes()[start..].eq_ignore_ascii_case(OBJECT_FILE_SUFFIX.as_bytes())
+            });
+
+        let last_index = segment.len() - 1;
+        for (index, c) in segment.char_indices() {
+            let escape = match c {
+                '%' | '\\' | '<' | '>' | ':' | '"' | '|' | '?' | '*' => true,
+                // Windows strips trailing dots and spaces, which would merge `a.` into `a`.
+                '.' => index == 0 || index == last_index || Some(index) == suffix_start,
+                ' ' => index == last_index,
+                c => c.is_ascii_control(),
+            };
+            if escape {
+                // `escape` is only true for ASCII characters, so `c as u8` is lossless.
+                encoded.push_str(percent_encoding::percent_encode_byte(c as u8));
+            } else {
+                encoded.push(c);
+            }
+        }
+    }
+    encoded.push_str(OBJECT_FILE_SUFFIX);
+    encoded
 }
 
 /// Creates owner-only directories on Unix without changing existing permissions.
@@ -132,12 +238,21 @@ impl LocalFsBackend {
     }
 
     /// Returns the filesystem path for the given object ID.
+    ///
+    /// See the [module documentation](self) for the layout.
     fn path(&self, id: &ObjectId) -> PathBuf {
-        self.path.join(id.as_storage_path().to_string())
+        let mut path = self.path.join(id.usecase().as_str());
+        if !id.scopes().is_empty() {
+            // Scopes are `/`-separated, so each one becomes its own directory.
+            path.push(id.scopes().as_storage_path().to_string());
+        }
+        path.push(OBJECTS_DIR);
+        path.push(encode_key(id.key()));
+        path
     }
 
     fn upload_path(&self, upload_id: Uuid) -> PathBuf {
-        self.path.join("uploads").join(upload_id.to_string())
+        self.path.join(".uploads").join(upload_id.to_string())
     }
 }
 
@@ -819,7 +934,7 @@ mod tests {
         let upload_path = backend.upload_path(upload_id);
         assert_eq!(
             upload_path.parent().unwrap().file_name().unwrap(),
-            "uploads"
+            ".uploads"
         );
         assert!(!backend.path(&id).exists());
 
@@ -1124,6 +1239,148 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stream::read_to_vec(payload).await.unwrap(), b"payload");
+    }
+
+    #[tokio::test]
+    async fn traversal_keys_stay_inside_root() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path().join("root");
+        let backend = LocalFsBackend::new(
+            FileSystemConfig {
+                path: root.clone(),
+                cogs: None,
+            },
+            &ChangeStreamFactory::default(),
+        );
+
+        for key in [
+            "..",
+            "../escape",
+            "../../../../escape",
+            "a/../../..",
+            "/abs",
+            "./x",
+        ] {
+            let id = ObjectId::from_parts("testing".parse().unwrap(), Scopes::empty(), key.into());
+            let path = backend.path(&id);
+            assert!(path.starts_with(&root), "{key:?} maps to {path:?}");
+            assert!(
+                path.components()
+                    .all(|c| !matches!(c, std::path::Component::ParentDir)),
+                "{key:?} maps to {path:?}"
+            );
+
+            backend
+                .put_object(
+                    &id,
+                    &Metadata::default(),
+                    stream::single(key),
+                    Timestamp::now(),
+                )
+                .await
+                .unwrap();
+            let (_, _, payload) = backend
+                .get_object(&id, Timestamp::now(), None)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stream::read_to_vec(payload).await.unwrap(), key.as_bytes());
+        }
+
+        let outside: Vec<_> = std::fs::read_dir(tempdir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(outside, ["root"]);
+    }
+
+    #[tokio::test]
+    async fn parent_and_child_keys_coexist() {
+        let (_tempdir, backend) = make_backend();
+        let parent = ObjectId::from_parts("testing".parse().unwrap(), Scopes::empty(), "a".into());
+        let child = ObjectId::new(parent.context.clone(), "a/b".into());
+        // Directories named like the parent's object file must not collide with it.
+        let suffixed = ObjectId::new(parent.context.clone(), "a.obj/b".into());
+
+        for id in [&parent, &child, &suffixed] {
+            backend
+                .put_object(
+                    id,
+                    &Metadata::default(),
+                    stream::single(id.key().to_owned()),
+                    Timestamp::now(),
+                )
+                .await
+                .unwrap();
+        }
+        backend
+            .delete_object(&parent, Timestamp::now())
+            .await
+            .unwrap();
+
+        assert!(
+            backend
+                .get_object(&parent, Timestamp::now(), None)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let (_, _, payload) = backend
+            .get_object(&child, Timestamp::now(), None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stream::read_to_vec(payload).await.unwrap(), b"a/b");
+    }
+
+    #[test]
+    fn distinct_keys_map_to_distinct_paths() {
+        let (_tempdir, backend) = make_backend();
+        let path = |key: &str| {
+            let id = ObjectId::from_parts("testing".parse().unwrap(), Scopes::empty(), key.into());
+            backend.path(&id)
+        };
+
+        // Ordinary keys stay readable.
+        assert_eq!(
+            path("docs/report.pdf"),
+            backend.path.join("testing/objects/docs/report.pdf.obj")
+        );
+
+        // Escaped forms must not collide with the literal keys that produce them.
+        for (key, escaped) in [
+            ("a//b", "a/%/b"),    // empty segment
+            ("a:b", "a%3Ab"),     // reserved character
+            ("..", "%2E%2E"),     // dot segment
+            ("a.obj", "a%2Eobj"), // object file suffix
+        ] {
+            assert_ne!(path(key), path(escaped), "{key:?} vs {escaped:?}");
+        }
+    }
+
+    #[test]
+    fn trailing_dots_and_spaces_are_escaped() {
+        let (_tempdir, backend) = make_backend();
+        let path = |key: &str| {
+            let id = ObjectId::from_parts("testing".parse().unwrap(), Scopes::empty(), key.into());
+            backend.path(&id)
+        };
+
+        // Windows strips trailing dots and spaces, which would turn the directory `x.obj ` into
+        // `x.obj` and collide with the object file of key `x`.
+        assert_eq!(
+            path("x.obj /y"),
+            backend.path.join("testing/objects/x.obj%20/y.obj")
+        );
+        assert_eq!(
+            path("a./b"),
+            backend.path.join("testing/objects/a%2E/b.obj")
+        );
+        // Only the last character needs escaping, inner spaces stay readable.
+        assert_eq!(
+            path("a b . /c"),
+            backend.path.join("testing/objects/a b .%20/c.obj")
+        );
     }
 
     #[tokio::test]
@@ -1545,7 +1802,7 @@ mod tests {
     #[cfg(feature = "storage-cogs")]
     #[tokio::test]
     async fn change_stream_reports_size_written_to_disk() {
-        let (tempdir, backend, producer) = make_backend_with_change_stream();
+        let (_tempdir, backend, producer) = make_backend_with_change_stream();
         let id = make_id();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
@@ -1564,9 +1821,7 @@ mod tests {
             .await
             .unwrap();
 
-        let file = tokio::fs::read(tempdir.path().join(id.as_storage_path().to_string()))
-            .await
-            .unwrap();
+        let file = tokio::fs::read(backend.path(&id)).await.unwrap();
 
         let records = producer.records();
         assert_eq!(records.len(), 1);
@@ -1584,7 +1839,7 @@ mod tests {
     #[cfg(feature = "storage-cogs")]
     #[tokio::test]
     async fn change_stream_reports_resumable_upload_size() {
-        let (tempdir, backend, producer) = make_backend_with_change_stream();
+        let (_tempdir, backend, producer) = make_backend_with_change_stream();
         let id = make_id();
         let metadata = Metadata {
             expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(1)),
@@ -1621,9 +1876,7 @@ mod tests {
             UploadProgress::Complete
         );
 
-        let file = tokio::fs::read(tempdir.path().join(id.as_storage_path().to_string()))
-            .await
-            .unwrap();
+        let file = tokio::fs::read(backend.path(&id)).await.unwrap();
         let records = producer.records();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].op_type, OpType::Write);
