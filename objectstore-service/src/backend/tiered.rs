@@ -789,6 +789,7 @@ impl Backend for TieredStorage {
             }
         };
 
+        timer.set_tag("result", if result.is_some() { "hit" } else { "miss" });
         timer.record();
 
         Ok(result)
