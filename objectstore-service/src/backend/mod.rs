@@ -72,7 +72,11 @@ pub async fn from_config(
             let hv = hv_from_config(c.high_volume, streams).await?;
             let lt = from_leaf_config(*c.long_term, streams).await?;
             let log = Box::new(changelog::NoopChangeLog);
-            Box::new(tiered::TieredStorage::new(hv, lt, log))
+            let mut backend = tiered::TieredStorage::new(hv, lt, log);
+            if let Some(limits) = c.tiered_concurrency {
+                backend = backend.with_concurrency(limits);
+            }
+            Box::new(backend)
         }
         // All non-Tiered variants are handled by from_leaf_config. A wildcard
         // is intentional here: any new leaf variant should fall through to
