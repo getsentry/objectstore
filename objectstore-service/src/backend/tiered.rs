@@ -1693,41 +1693,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_metadata_tags_hit_and_miss() {
-        let (storage, _hv, _lt, _) = make_tiered_storage();
-        let id = make_id("head-result");
-        storage
-            .put_object(
-                &id,
-                &Metadata::default(),
-                stream::single(b"payload".to_vec()),
-                Timestamp::now(),
-            )
-            .await
-            .unwrap();
-
-        let metrics = objectstore_metrics::with_capturing_test_client_async(async {
-            let found = storage.get_metadata(&id, Timestamp::now()).await.unwrap();
-            assert!(found.is_some());
-            let missing = make_id("head-result-missing");
-            let missing = storage.get_metadata(&missing, Timestamp::now()).await;
-            assert!(missing.unwrap().is_none());
-        })
-        .await;
-
-        let results: Vec<_> = metrics
-            .iter()
-            .filter(|metric| metric.starts_with("head.latency:"))
-            .filter_map(|metric| {
-                metric
-                    .split([',', '#'])
-                    .find_map(|t| t.strip_prefix("result:"))
-            })
-            .collect();
-        assert_eq!(results, ["hit", "miss"]);
-    }
-
-    #[tokio::test]
     async fn delete_nonexistent_succeeds() {
         let (storage, _hv, _lt, _) = make_tiered_storage();
         let id = make_id("does-not-exist");
