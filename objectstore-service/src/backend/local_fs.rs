@@ -906,8 +906,19 @@ impl DraftDirectory {
 
 impl Drop for DraftDirectory {
     fn drop(&mut self) {
-        if !self.kept {
-            remove_empty_directories_sync(&self.root, &self.object_path);
+        if self.kept {
+            return;
+        }
+
+        let root = std::mem::take(&mut self.root);
+        let object_path = std::mem::take(&mut self.object_path);
+        let cleanup = move || remove_empty_directories_sync(&root, &object_path);
+
+        // Drafts are usually dropped on an async worker, which must not block on filesystem calls.
+        // Without a runtime, there is no blocking pool, so clean up in place.
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => drop(runtime.spawn_blocking(cleanup)),
+            Err(_) => cleanup(),
         }
     }
 }
