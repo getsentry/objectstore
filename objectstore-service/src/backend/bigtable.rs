@@ -876,8 +876,7 @@ impl BigTableBackend {
 
     /// Reads a single row by key, returning parsed row data.
     ///
-    /// Returns `None` if the row is absent or has expired. Records the outcome as `result` on
-    /// the span: `hit`, `miss` (no row), or `expired` (row present but past its expiry).
+    /// Returns `None` if the row is absent or has expired.
     #[tracing::instrument(
         level = "debug",
         fields(action, result = tracing::field::Empty),
