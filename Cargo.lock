@@ -2988,6 +2988,7 @@ dependencies = [
  "objectstore-metrics",
  "objectstore-types",
  "papaya",
+ "percent-encoding",
  "quick-xml",
  "regex",
  "reqwest 0.13.5",

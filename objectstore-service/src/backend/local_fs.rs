@@ -33,7 +33,7 @@
 //! - `%` itself and ASCII control characters, including NUL.
 //! - Characters reserved on Windows: `\ < > : " | ? *`.
 //! - A `.` at the start of a segment, so no segment is `.` or `..`, or a hidden file.
-//! - A `.` at the end of a segment, which Windows would strip.
+//! - A `.` or space at the end of a segment, which Windows would strip.
 //! - The `.` of a trailing `.obj` (in any case), so no directory looks like an object file.
 //!
 //! Empty segments, such as in `a//b`, are stored as `%`.
@@ -58,15 +58,14 @@
 //! - Keys that differ only in case or Unicode normalization collide on filesystems that ignore
 //!   those differences, such as the macOS default.
 //! - Each encoded key segment must fit the filesystem's file name limit, typically 255 bytes.
-//! - Windows additionally rejects reserved device names such as `CON` or `NUL`, and strips trailing
-//!   spaces from names. These are stored unescaped.
+//! - Windows additionally rejects reserved device names such as `CON` or `NUL`. These are stored
+//!   unescaped.
 //!
 //! ## Permissions
 //!
 //! Newly created files and directories are owner-only on Unix (0600 and 0700 respectively,
 //! further restricted by umask). Existing paths retain their permissions.
 
-use std::fmt::Write as _;
 use std::fs::File;
 use std::io;
 use std::num::NonZeroU64;
@@ -144,16 +143,18 @@ fn encode_key(key: &str) -> String {
                 segment.as_bytes()[start..].eq_ignore_ascii_case(OBJECT_FILE_SUFFIX.as_bytes())
             });
 
+        let last_index = segment.len() - 1;
         for (index, c) in segment.char_indices() {
             let escape = match c {
                 '%' | '\\' | '<' | '>' | ':' | '"' | '|' | '?' | '*' => true,
-                // Windows strips trailing dots, which would merge `a.` into `a`.
-                '.' => index == 0 || index == segment.len() - 1 || Some(index) == suffix_start,
+                // Windows strips trailing dots and spaces, which would merge `a.` into `a`.
+                '.' => index == 0 || index == last_index || Some(index) == suffix_start,
+                ' ' => index == last_index,
                 c => c.is_ascii_control(),
             };
             if escape {
-                // INVARIANT: Formatting into a `String` cannot fail.
-                write!(encoded, "%{:02X}", u32::from(c)).expect("writing to a String never fails");
+                // `escape` is only true for ASCII characters, so `c as u8` is lossless.
+                encoded.push_str(percent_encoding::percent_encode_byte(c as u8));
             } else {
                 encoded.push(c);
             }
@@ -1355,6 +1356,31 @@ mod tests {
         ] {
             assert_ne!(path(key), path(escaped), "{key:?} vs {escaped:?}");
         }
+    }
+
+    #[test]
+    fn trailing_dots_and_spaces_are_escaped() {
+        let (_tempdir, backend) = make_backend();
+        let path = |key: &str| {
+            let id = ObjectId::from_parts("testing".parse().unwrap(), Scopes::empty(), key.into());
+            backend.path(&id)
+        };
+
+        // Windows strips trailing dots and spaces, which would turn the directory `x.obj ` into
+        // `x.obj` and collide with the object file of key `x`.
+        assert_eq!(
+            path("x.obj /y"),
+            backend.path.join("testing/objects/x.obj%20/y.obj")
+        );
+        assert_eq!(
+            path("a./b"),
+            backend.path.join("testing/objects/a%2E/b.obj")
+        );
+        // Only the last character needs escaping, inner spaces stay readable.
+        assert_eq!(
+            path("a b . /c"),
+            backend.path.join("testing/objects/a b .%20/c.obj")
+        );
     }
 
     #[tokio::test]
