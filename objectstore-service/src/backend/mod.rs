@@ -63,16 +63,22 @@ pub enum StorageConfig {
 ///
 /// Backends that configured a [`ChangeStream`](crate::change_stream::ChangeStream) get one
 /// from `streams`; the rest report nothing.
+/// `concurrency_timeout` bounds waits for tiered high-volume capacity.
 pub async fn from_config(
     config: StorageConfig,
     streams: &ChangeStreamFactory,
+    concurrency_timeout: std::time::Duration,
 ) -> Result<Box<dyn common::Backend>> {
     Ok(match config {
         StorageConfig::Tiered(c) => {
             let hv = hv_from_config(c.high_volume, streams).await?;
             let lt = from_leaf_config(*c.long_term, streams).await?;
             let log = Box::new(changelog::NoopChangeLog);
-            Box::new(tiered::TieredStorage::new(hv, lt, log))
+            let mut backend = tiered::TieredStorage::new(hv, lt, log);
+            if let Some(limits) = c.tiered_concurrency {
+                backend = backend.with_concurrency(limits, concurrency_timeout);
+            }
+            Box::new(backend)
         }
         // All non-Tiered variants are handled by from_leaf_config. A wildcard
         // is intentional here: any new leaf variant should fall through to

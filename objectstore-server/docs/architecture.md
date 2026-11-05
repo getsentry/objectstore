@@ -299,3 +299,27 @@ batch `INSERT` operations. Explicit expiry extensions through `PATCH` also enfor
 the maximum duration, measured from request time.
 
 See [`usecases`] for the full configuration schema and YAML examples.
+
+### Tiered backend concurrency
+
+Tiered storage can enable two limits under `storage.tiered_concurrency`:
+
+```yaml
+tiered_concurrency:
+  high_volume_concurrency: 100
+  long_term_concurrency: 50
+```
+
+These numbers are examples. Omitting the section disables both limits. When present,
+both positive capacities are required. High-volume sections share one capacity;
+CONTINUE sections after long-term work take priority over START sections. Both
+classes wait up to `service.concurrency_timeout`. Long-term admission rejects
+immediately when full and holds capacity through the operation, including a GET
+response stream until EOF, error, or drop. Background cleanup and recovery bypass
+these limits. A publication timeout uses the existing change-guard cleanup.
+
+The total service limit still applies to backend methods, and is released when
+the method returns. Choose the long-term capacity below `service.max_concurrency`
+to leave capacity for high-volume-only requests; startup warns otherwise.
+`tiered.concurrency.*` metrics report limits, usage, waiting, wait duration, and
+rejections with `tier` and, for high-volume queues, `class` tags.

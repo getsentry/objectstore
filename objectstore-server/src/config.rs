@@ -651,7 +651,7 @@ pub struct Service {
     /// Maximum time a caller may wait for a concurrency permit.
     ///
     /// Applies to both queued normal requests and bulk operations
-    /// waiting for the bulk and execution semaphores.
+    /// waiting for the bulk and execution semaphores, and tiered high-volume sections.
     ///
     /// # Default
     ///

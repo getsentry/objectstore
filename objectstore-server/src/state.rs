@@ -82,7 +82,20 @@ impl Services {
                 cipher
             }
         };
-        let backend = backend::from_config(config.storage.clone(), &streams).await?;
+        if let backend::StorageConfig::Tiered(storage) = &config.storage
+            && let Some(limits) = &storage.tiered_concurrency
+            && limits.long_term_concurrency.get() >= config.service.max_concurrency
+        {
+            objectstore_log::warn!(
+                "Tiered long-term concurrency is at least service.max_concurrency; long-term stalls can exhaust total capacity"
+            );
+        }
+        let backend = backend::from_config(
+            config.storage.clone(),
+            &streams,
+            config.service.concurrency_timeout,
+        )
+        .await?;
         let concurrency = ConcurrencyLimiter::new(config.service.max_concurrency)
             .with_queue(config.service.concurrency_queue)
             .with_timeout(config.service.concurrency_timeout)
