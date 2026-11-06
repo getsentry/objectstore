@@ -11,8 +11,10 @@ pub mod sqlite;
 use std::fmt::Debug;
 
 use objectstore_types::time::Timestamp;
+use serde::{Deserialize, Serialize};
 
 use crate::change_stream::ChangeStreamError;
+use crate::garbage_collector::sqlite::SqliteGarbageCollectorConfig;
 use crate::id::ObjectId;
 
 /// Stores object expiration metadata for the garbage collector.
@@ -48,4 +50,28 @@ pub trait GcStorage: Send + Sync + Debug {
         now: Timestamp,
         limit: u64,
     ) -> Result<Vec<ObjectId>, ChangeStreamError>;
+}
+
+/// Backend selection for the garbage collector's expiration index.
+///
+/// Each variant wraps that backend's own configuration and corresponds to a [`GcStorage`]
+/// implementation. The enum is internally tagged: in YAML the variant is named by a `type`
+/// key, and through environment variables by the `OS__GARBAGE_COLLECTOR__TYPE` prefix plus
+/// the variant's fields (e.g. `OS__GARBAGE_COLLECTOR__TYPE=sqlite`).
+///
+/// ```yaml
+/// garbage_collector:
+///   type: sqlite
+///   path: /data/objectstore.db
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum GarbageCollectorConfig {
+    /// SQLite-backed index, serialized as `type: sqlite`.
+    ///
+    /// Stores one row per object in a local SQLite database, see
+    /// [`SqliteGarbageCollectorConfig`] for its fields. The database file must live on
+    /// storage that survives restarts and is shared by every server that writes objects,
+    /// otherwise the index diverges from the objects actually stored.
+    Sqlite(SqliteGarbageCollectorConfig),
 }
