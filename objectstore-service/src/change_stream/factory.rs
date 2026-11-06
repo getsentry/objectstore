@@ -3,17 +3,21 @@
 
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 #[cfg(feature = "storage-cogs")]
 use objectstore_inventory_tracker::SharedProducer;
 #[cfg(all(test, feature = "storage-cogs"))]
 use objectstore_inventory_tracker::test_utils;
+use objectstore_types::time::Timestamp;
 #[cfg(feature = "storage-cogs")]
 use serde::{Deserialize, Serialize};
+use tonic::async_trait;
 
 #[cfg(feature = "storage-cogs")]
-use super::CostTrackerStream;
-use super::{ChangeStream, CostTrackerStreamConfig, NoopStream};
+use crate::change_stream::CostTrackerStream;
+use crate::change_stream::{ChangeStream, ChangeStreamError, CostTrackerStreamConfig, NoopStream};
+use crate::id::ObjectId;
 
 /// Where every backend's change stream records are carried for cost tracking.
 ///
@@ -24,6 +28,79 @@ use super::{ChangeStream, CostTrackerStreamConfig, NoopStream};
 pub enum CostTrackerConfig {
     /// Reports onto a Kafka topic.
     Kafka(objectstore_inventory_tracker::kafka::KafkaConfig),
+}
+
+/// Fans every change out to each contained stream, in order.
+///
+/// Nothing constructs one yet: the service has a single sink (the cost tracker) per
+/// backend, so composition has no caller. Kept compiled so that changes to
+/// [`ChangeStream`] break the library build rather than only the tests.
+#[allow(dead_code)]
+#[derive(Default, Debug)]
+struct MultiStream {
+    streams: Vec<Box<dyn ChangeStream>>,
+}
+
+#[allow(dead_code)]
+impl MultiStream {
+    pub fn with_stream(mut self, stream: Box<dyn ChangeStream>) -> Self {
+        self.streams.push(stream);
+        self
+    }
+}
+
+#[async_trait]
+impl ChangeStream for MultiStream {
+    async fn begin_write(
+        &self,
+        id: &ObjectId,
+        expires_at: Option<Timestamp>,
+    ) -> Result<(), ChangeStreamError> {
+        for stream in self.streams.iter() {
+            stream.begin_write(id, expires_at).await?;
+        }
+        Ok(())
+    }
+
+    async fn commit_write(&self, id: &ObjectId, size: u64, expires_at: Option<Timestamp>) {
+        for stream in self.streams.iter() {
+            stream.commit_write(id, size, expires_at).await;
+        }
+    }
+
+    async fn begin_update(
+        &self,
+        id: &ObjectId,
+        expires_at: Option<Timestamp>,
+    ) -> Result<(), ChangeStreamError> {
+        for stream in self.streams.iter() {
+            stream.begin_update(id, expires_at).await?;
+        }
+        Ok(())
+    }
+
+    /// Reports that `id`'s expiration moved, with its stored size unchanged.
+    async fn commit_update(&self, id: &ObjectId, expires_at: Option<Timestamp>) {
+        for stream in self.streams.iter() {
+            stream.commit_update(id, expires_at).await;
+        }
+    }
+
+    async fn commit_delete(&self, id: &ObjectId) {
+        for stream in self.streams.iter() {
+            stream.commit_delete(id).await;
+        }
+    }
+
+    async fn join(&self, timeout: Duration) {
+        let _ = futures_util::future::join_all(
+            self.streams
+                .iter()
+                .map(|stream| stream.join(timeout))
+                .collect::<Vec<_>>(),
+        )
+        .await;
+    }
 }
 
 /// Builds the [`ChangeStream`] impl(s) a backend reports to.
@@ -124,6 +201,70 @@ pub(crate) fn dummy_factory() -> (ChangeStreamFactory, test_utils::DummyProducer
 mod tests {
     use super::*;
 
+    use std::sync::RwLock;
+
+    type SharedMessages = Arc<RwLock<Vec<(&'static str, &'static str, String)>>>;
+
+    #[derive(Default, Debug)]
+    struct RecordingStream {
+        name: &'static str,
+        pub messages: SharedMessages,
+    }
+
+    impl RecordingStream {
+        pub fn new(name: &'static str, messages: SharedMessages) -> Self {
+            Self { name, messages }
+        }
+
+        fn record(&self, call: &'static str, id: &ObjectId) {
+            self.messages.write().unwrap().push((
+                self.name,
+                call,
+                id.as_storage_path().to_string(),
+            ));
+        }
+    }
+
+    #[async_trait]
+    impl ChangeStream for RecordingStream {
+        async fn begin_write(
+            &self,
+            id: &ObjectId,
+            _expires_at: Option<Timestamp>,
+        ) -> Result<(), ChangeStreamError> {
+            self.record("begin_write", id);
+            Ok(())
+        }
+
+        async fn commit_write(&self, id: &ObjectId, _size: u64, _expires_at: Option<Timestamp>) {
+            self.record("commit_write", id);
+        }
+
+        async fn begin_update(
+            &self,
+            id: &ObjectId,
+            _expires_at: Option<Timestamp>,
+        ) -> Result<(), ChangeStreamError> {
+            self.record("begin_update", id);
+            Ok(())
+        }
+
+        async fn commit_update(&self, id: &ObjectId, _expires_at: Option<Timestamp>) {
+            self.record("commit_update", id);
+        }
+
+        async fn commit_delete(&self, id: &ObjectId) {
+            self.record("commit_delete", id);
+        }
+
+        async fn join(&self, _timeout: Duration) {
+            self.messages
+                .write()
+                .unwrap()
+                .push((self.name, "join", String::new()));
+        }
+    }
+
     fn config() -> CostTrackerStreamConfig {
         CostTrackerStreamConfig {
             shared_resource_id: "bigtable_objectstore".into(),
@@ -178,5 +319,41 @@ mod tests {
         ));
 
         assert!(!reports(&factory.build(Some(&config()))));
+    }
+
+    #[tokio::test]
+    async fn multi_stream_forwards_every_change_to_each_stream() {
+        // Both recording streams log into the same message list.
+        let messages = Arc::new(RwLock::new(vec![]));
+        let s1 = Box::new(RecordingStream::new("s1", messages.clone()));
+        let s2 = Box::new(RecordingStream::new("s2", messages.clone()));
+        let ms = MultiStream::default().with_stream(s1).with_stream(s2);
+
+        let id = ObjectId::from_storage_path("foo/objects/bar").unwrap();
+
+        // Issue one call of every kind `MultiStream` forwards.
+        ms.begin_write(&id, None).await.unwrap();
+        ms.commit_write(&id, 3, None).await;
+        ms.begin_update(&id, None).await.unwrap();
+        ms.commit_update(&id, None).await;
+        ms.commit_delete(&id).await;
+        ms.join(Duration::from_secs(3)).await;
+
+        // Each stream saw every call, in order.
+        let mut expected = Vec::new();
+        for call in [
+            "begin_write",
+            "commit_write",
+            "begin_update",
+            "commit_update",
+            "commit_delete",
+        ] {
+            expected.push(("s1", call, "foo/objects/bar".to_owned()));
+            expected.push(("s2", call, "foo/objects/bar".to_owned()));
+        }
+        expected.push(("s1", "join", String::new()));
+        expected.push(("s2", "join", String::new()));
+
+        assert_eq!(*messages.read().unwrap(), expected);
     }
 }
