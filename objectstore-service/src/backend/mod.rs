@@ -21,6 +21,7 @@ mod extensions;
 pub mod gcs;
 pub mod in_memory;
 pub mod local_fs;
+pub mod rocksdb;
 pub mod s3_compatible;
 pub mod tiered;
 
