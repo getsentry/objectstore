@@ -1,6 +1,7 @@
 use std::str::FromStr;
 
 use async_trait::async_trait;
+use objectstore_log::Level;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode};
@@ -54,37 +55,28 @@ impl GcStorage for SqliteGarbageCollector {
         id: &ObjectId,
         expires_at: Option<objectstore_types::time::Timestamp>,
     ) -> Result<(), ChangeStreamError> {
-        let pool = self.pool.clone();
-        let id = id.clone();
-
-        let query_result = sqlx::query("INSERT INTO garbage_collector (object_id, expires_at) VALUES (?, ?) ON CONFLICT (object_id) DO UPDATE SET expires_at = excluded.expires_at WHERE excluded.expires_at IS NULL OR garbage_collector.expires_at IS NULL OR garbage_collector.expires_at < excluded.expires_at")
-            .bind(id.as_storage_path().to_string())
-            .bind(expires_at.map(|t| i64::try_from(t.as_secs()).ok()))
-            .execute(&pool)
-            .await;
-
-        if query_result.is_err() {
-            let error = query_result.err();
-            match error {
-                Some(err) => return Err(ChangeStreamError::Failure(Box::new(err))),
-                None => {
-                    return Err(ChangeStreamError::Failure(
-                        "failed to insert row into garbage_collector".into(),
-                    ));
-                }
-            }
-        }
+        let _ = sqlx::query(
+            r#"INSERT INTO garbage_collector (object_id, expires_at)
+                VALUES (?, ?)
+                ON CONFLICT (object_id)
+                DO UPDATE
+                SET expires_at = excluded.expires_at
+                WHERE garbage_collector.expires_at IS NOT NULL
+                    AND garbage_collector.expires_at < excluded.expires_at"#,
+        )
+        .bind(id.as_storage_path().to_string())
+        .bind(expires_at.map(|t| i64::try_from(t.as_secs()).ok()))
+        .execute(&self.pool)
+        .await
+        .map_err(|e| ChangeStreamError::Failure(Box::new(e)))?;
 
         Ok(())
     }
 
     async fn remove(&self, id: &ObjectId) {
-        let pool = self.pool.clone();
-        let id = id.clone();
-
         let _ = sqlx::query("DELETE FROM garbage_collector WHERE object_id = ?")
             .bind(id.as_storage_path().to_string())
-            .execute(&pool)
+            .execute(&self.pool)
             .await;
     }
 
@@ -93,13 +85,21 @@ impl GcStorage for SqliteGarbageCollector {
         now: objectstore_types::time::Timestamp,
         limit: u64,
     ) -> Result<Vec<ObjectId>, ChangeStreamError> {
-        let pool = self.pool.clone();
         let query_result: Result<Vec<String>, sqlx::Error> = sqlx::query_scalar::<_, String>(
-            "SELECT object_id FROM garbage_collector WHERE expires_at IS NOT NULL AND expires_at <= ? ORDER BY expires_at LIMIT ?",
+            r#"SELECT
+                object_id
+            FROM
+                garbage_collector
+            WHERE
+                expires_at IS NOT NULL
+                AND expires_at <= ?
+            ORDER BY
+                expires_at
+            LIMIT ?"#,
         )
         .bind(i64::try_from(now.as_secs()).ok())
         .bind(i64::try_from(limit).unwrap_or(i64::MAX))
-        .fetch_all(&pool)
+        .fetch_all(&self.pool)
         .await;
 
         match query_result {
@@ -107,7 +107,15 @@ impl GcStorage for SqliteGarbageCollector {
                 let mut ids = Vec::new();
                 for row in rows {
                     let id = row.clone();
-                    ids.push(ObjectId::from_storage_path(&id).unwrap());
+                    if let Some(object_id) = ObjectId::from_storage_path(&id) {
+                        ids.push(object_id);
+                    } else {
+                        objectstore_log::event!(
+                            Level::WARN,
+                            object_id = id,
+                            "cannot resolve object id from storage path"
+                        );
+                    }
                 }
                 Ok(ids)
             }
@@ -259,31 +267,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upsert_none_clears_an_existing_deadline() {
+    async fn upsert_infinite_duration_does_not_update_expiry() {
         let (_dir, collector) = make_collector().await;
         let id = id_for("key");
 
-        collector.upsert(&id, Some(ts(100))).await.unwrap();
         collector.upsert(&id, None).await.unwrap();
+        collector.upsert(&id, Some(ts(100))).await.unwrap();
 
         assert!(
             collector
-                .list_expired(ts(MAX_SECS), 10)
+                .list_expired(ts(100), 10)
                 .await
                 .unwrap()
                 .is_empty()
         );
-    }
-
-    #[tokio::test]
-    async fn upsert_after_no_expiration_records_a_deadline() {
-        let (_dir, collector) = make_collector().await;
-        let id = id_for("key");
-
-        collector.upsert(&id, None).await.unwrap();
-        collector.upsert(&id, Some(ts(100))).await.unwrap();
-
-        assert_eq!(collector.list_expired(ts(100), 10).await.unwrap(), vec![id]);
     }
 
     #[tokio::test]
@@ -295,6 +292,23 @@ mod tests {
         collector.upsert(&id, Some(ts(100))).await.unwrap();
 
         assert_eq!(collector.list_expired(ts(100), 10).await.unwrap(), vec![id]);
+    }
+
+    #[tokio::test]
+    async fn upserting_the_same_id_twice_does_not_duplicate_it_infinite_expiry() {
+        let (_dir, collector) = make_collector().await;
+        let id = id_for("key");
+
+        collector.upsert(&id, None).await.unwrap();
+        collector.upsert(&id, None).await.unwrap();
+
+        assert!(
+            collector
+                .list_expired(ts(100), 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
