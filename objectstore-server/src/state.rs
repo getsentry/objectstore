@@ -82,7 +82,20 @@ impl Services {
                 cipher
             }
         };
-        let backend = backend::from_config(config.storage.clone(), &streams).await?;
+        if let objectstore_service::backend::StorageConfig::Tiered(storage) = &config.storage
+            && let Some(limit) = storage.long_term_concurrency
+            && limit.get() >= config.service.max_concurrency
+        {
+            anyhow::bail!(
+                "storage.long_term_concurrency must be less than service.max_concurrency"
+            );
+        }
+        let backend = backend::from_config(
+            config.storage.clone(),
+            &streams,
+            config.service.concurrency_timeout,
+        )
+        .await?;
         let concurrency = ConcurrencyLimiter::new(config.service.max_concurrency)
             .with_queue(config.service.concurrency_queue)
             .with_timeout(config.service.concurrency_timeout)

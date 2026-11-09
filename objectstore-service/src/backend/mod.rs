@@ -62,17 +62,24 @@ pub enum StorageConfig {
 /// Constructs a type-erased [`Backend`](common::Backend) from the given [`StorageConfig`].
 ///
 /// Backends that configured a [`ChangeStream`](crate::change_stream::ChangeStream) get one
-/// from `streams`; the rest report nothing.
+/// from `streams`; the rest report nothing. `concurrency_timeout` is the service
+/// admission timeout, also used for tiered high-volume admission.
 pub async fn from_config(
     config: StorageConfig,
     streams: &ChangeStreamFactory,
+    concurrency_timeout: std::time::Duration,
 ) -> Result<Box<dyn common::Backend>> {
     Ok(match config {
         StorageConfig::Tiered(c) => {
             let hv = hv_from_config(c.high_volume, streams).await?;
             let lt = from_leaf_config(*c.long_term, streams).await?;
             let log = Box::new(changelog::NoopChangeLog);
-            Box::new(tiered::TieredStorage::new(hv, lt, log))
+            Box::new(tiered::TieredStorage::new(hv, lt, log).with_concurrency(
+                c.high_volume_concurrency,
+                c.long_term_concurrency,
+                concurrency_timeout,
+                c.long_term_concurrency_timeout,
+            ))
         }
         // All non-Tiered variants are handled by from_leaf_config. A wildcard
         // is intentional here: any new leaf variant should fall through to

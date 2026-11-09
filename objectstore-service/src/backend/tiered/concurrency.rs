@@ -8,7 +8,7 @@
 //!
 //! Each acquisition has its own timeout, covering all waiting within that
 //! acquisition. A zero timeout allows only an immediate attempt. Release a tier's
-//! permit before acquiring another tier; hold LT permits through streamed reads
+//! HV permit before LT calls. Keep LT permits through final HV work and streamed reads
 //! with [`ConcurrencyPermit::guard_stream`].
 
 use std::future::Future;
@@ -29,6 +29,7 @@ pub(super) struct TierLimit {
 }
 
 /// Independent capacity and timeout settings for the two tiers.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 pub(super) struct TieredConcurrencyConfig {
     pub high_volume: TierLimit,
@@ -73,62 +74,81 @@ pub(super) struct LongTermStats {
 /// [`crate::error::ErrorKind::AtCapacity`]. No backend operation is started here.
 #[derive(Clone, Debug)]
 pub(super) struct TieredConcurrencyLimiter {
-    start: Limiter,
-    continuation: Limiter,
-    long_term: Limiter,
+    start: Option<Limiter>,
+    continuation: Option<Limiter>,
+    long_term: Option<Limiter>,
 }
 
 impl TieredConcurrencyLimiter {
     /// Creates both pools; zero LT timeout preserves immediate rejection when full.
+    #[cfg(test)]
     pub fn new(config: TieredConcurrencyConfig) -> Self {
-        let high_volume = PermitPool::new(config.high_volume.capacity.get(), Scheduling::Priority);
-        let wait = WaitConfig {
-            queue: QueueLimit::Unbounded,
-            timeout: config.high_volume.timeout,
+        Self::optional(Some(config.high_volume), Some(config.long_term))
+    }
+
+    /// Creates independently optional limits; unset tiers do not acquire permits.
+    pub fn optional(high_volume: Option<TierLimit>, long_term: Option<TierLimit>) -> Self {
+        let (start, continuation) = match high_volume {
+            Some(limit) => {
+                let pool = PermitPool::new(limit.capacity.get(), Scheduling::Priority);
+                let wait = WaitConfig {
+                    queue: QueueLimit::Unbounded,
+                    timeout: limit.timeout,
+                };
+                (
+                    Some(Limiter::new(pool.clone(), Priority::Normal, wait)),
+                    Some(Limiter::new(pool, Priority::High, wait)),
+                )
+            }
+            None => (None, None),
         };
         Self {
-            start: Limiter::new(high_volume.clone(), Priority::Normal, wait),
-            continuation: Limiter::new(high_volume, Priority::High, wait),
-            long_term: Limiter::new(
-                PermitPool::new(config.long_term.capacity.get(), Scheduling::Fifo),
-                Priority::Normal,
-                WaitConfig {
-                    queue: QueueLimit::Unbounded,
-                    timeout: config.long_term.timeout,
-                },
-            ),
+            start,
+            continuation,
+            long_term: long_term.map(|limit| {
+                Limiter::new(
+                    PermitPool::new(limit.capacity.get(), Scheduling::Fifo),
+                    Priority::Normal,
+                    WaitConfig {
+                        queue: QueueLimit::Unbounded,
+                        timeout: limit.timeout,
+                    },
+                )
+            }),
         }
     }
 
     /// Acquires shared HV capacity in the selected priority lane.
     pub async fn acquire_high_volume(&self, class: HighVolumeClass) -> Result<ConcurrencyPermit> {
         match class {
-            HighVolumeClass::Start => self.start.acquire().await,
-            HighVolumeClass::Continue => self.continuation.acquire().await,
+            HighVolumeClass::Start => acquire(&self.start).await,
+            HighVolumeClass::Continue => acquire(&self.continuation).await,
         }
     }
 
     /// Acquires LT capacity, waiting up to the configured LT timeout.
     pub async fn acquire_long_term(&self) -> Result<ConcurrencyPermit> {
-        self.long_term.acquire().await
+        acquire(&self.long_term).await
     }
 
     /// Attempts LT acquisition once, regardless of its configured timeout.
     pub fn try_acquire_long_term(&self) -> Result<ConcurrencyPermit> {
-        self.long_term.try_acquire()
+        self.long_term
+            .as_ref()
+            .map_or_else(|| Ok(ConcurrencyPermit::unlimited()), Limiter::try_acquire)
     }
 
     /// Reads shared HV usage once and each handle's waiting count separately.
     pub fn stats(&self) -> TieredStats {
         TieredStats {
             high_volume: HighVolumeStats {
-                in_use: self.start.pool().in_use(),
-                waiting_start: self.start.waiting(),
-                waiting_continue: self.continuation.waiting(),
+                in_use: self.start.as_ref().map_or(0, |l| l.pool().in_use()),
+                waiting_start: self.start.as_ref().map_or(0, Limiter::waiting),
+                waiting_continue: self.continuation.as_ref().map_or(0, Limiter::waiting),
             },
             long_term: LongTermStats {
-                in_use: self.long_term.pool().in_use(),
-                waiting: self.long_term.waiting(),
+                in_use: self.long_term.as_ref().map_or(0, |l| l.pool().in_use()),
+                waiting: self.long_term.as_ref().map_or(0, Limiter::waiting),
             },
         }
     }
@@ -140,6 +160,13 @@ impl TieredConcurrencyLimiter {
         Fut: Future<Output = ()>,
     {
         limiter::run_emitter(|| self.stats(), emit).await;
+    }
+}
+
+async fn acquire(limiter: &Option<Limiter>) -> Result<ConcurrencyPermit> {
+    match limiter {
+        Some(limiter) => limiter.acquire().await,
+        None => Ok(ConcurrencyPermit::unlimited()),
     }
 }
 

@@ -237,6 +237,16 @@ pub struct ConcurrencyPermit {
 }
 
 impl ConcurrencyPermit {
+    /// A no-op guard for a disabled limit.
+    pub(crate) fn unlimited() -> Self {
+        static RELEASED: std::sync::OnceLock<Arc<Notify>> = std::sync::OnceLock::new();
+        Self {
+            task_permit: None,
+            bulk_permit: None,
+            released: RELEASED.get_or_init(|| Arc::new(Notify::new())).clone(),
+        }
+    }
+
     /// Holds this permit until the stream ends, returns its first error, or is dropped.
     ///
     /// The wrapped stream is dropped before capacity is released. After EOF or

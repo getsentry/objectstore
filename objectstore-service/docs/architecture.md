@@ -305,6 +305,28 @@ The default execution limit is
 [`DEFAULT_CONCURRENCY_LIMIT`](service::DEFAULT_CONCURRENCY_LIMIT). See
 [`StorageService::with_concurrency`] for configuration.
 
+## Tiered Admission
+
+Tiered storage can additionally set `storage.high_volume_concurrency` and
+`storage.long_term_concurrency`. Both are optional positive capacities and are
+unlimited when unset. LT capacity must be less than `service.max_concurrency`.
+
+The HV gate covers consecutive HV calls and releases capacity before LT calls.
+HV work after LT gets CONTINUE priority over new START work. Both classes use
+`service.concurrency_timeout`. LT capacity stays held until the operation ends,
+including final HV calls; downloads hold it until stream EOF, error, or drop.
+`storage.long_term_concurrency_timeout` enables LT waiting; its default `0s`
+rejects immediately when full. Waiting for LT capacity never occupies HV capacity.
+Waiting callers still hold service permits: enabling LT waiting can fill the
+service limit during an LT stall until the configured waits expire. The default
+zero timeout preserves immediate rejection and the intended stall isolation.
+Background cleanup and recovery are outside these gates.
+
+`tiered.concurrency.*` metrics report configured limits (zero means disabled),
+HV and LT usage and queues, HV admission wait by class, and admission rejections.
+The service admission limit and bulk budget still apply independently.
+See the tiered backend's concurrency module for scheduling details.
+
 ## Resumable Uploads
 
 A resumable upload writes one object across several requests: the payload arrives
