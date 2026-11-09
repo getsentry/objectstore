@@ -5,21 +5,23 @@
 //! Both classes share the same limiter, but `Continue` operations always have priority over
 //! `Start` ones, as we don't want to reject requests after performing the (usually) expensive LT calls.
 //! Requests queue in FIFO order within each class and wait up to a configured timeout.
+//! Sustained CONTINUE traffic can starve START. A START waiter may need to resume and return
+//! an assigned permit before CONTINUE can receive it. Other START waiters wait for the lane
+//! holder to finish acquiring, even if capacity is available.
 //!
-//! The long-term limit uses a semaphore that accepts or rejects LT operations directly, without
-//! queuing or waiting.
+//! The long-term limit uses FIFO scheduling without priority. Both tiers have an
+//! independent wait timeout. A zero timeout accepts or rejects immediately.
 
-use std::collections::BTreeMap;
 use std::future::Future;
 use std::num::NonZeroU32;
-use std::sync::{Arc, Mutex, PoisonError};
 use std::task::Poll;
 use std::time::Duration;
 
 use futures_util::{StreamExt, stream};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
+use tokio::sync::OwnedSemaphorePermit;
 
-use crate::error::{ErrorKind, Result};
+use crate::concurrency::limiter::{Limiter, Priority, Scheduling};
+use crate::error::Result;
 use crate::stream::PayloadStream;
 
 const METRICS_EMITTER_INTERVAL: Duration = Duration::from_secs(1);
@@ -30,7 +32,7 @@ pub(super) enum HighVolumeClass {
     Continue,
 }
 
-/// Usage snapshot for both tiers.
+/// Approximate usage snapshot for both tiers; fields are read independently.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct Stats {
     /// High-volume snapshot.
@@ -39,51 +41,27 @@ pub(super) struct Stats {
     pub(super) long_term: LongTermStats,
 }
 
-/// Snapshot of high-volume permits and queue.
+/// Approximate snapshot of high-volume permits and outstanding acquisitions.
+///
+/// Fields are read independently. Waiting counts include acquisitions with assigned
+/// permits that have not resumed yet.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct HighVolumeStats {
     /// Permits currently in use.
     pub(super) in_use: u32,
-    /// `Start` acquisitions waiting in queue.
+    /// Outstanding `Start` acquisitions, including those waiting for the lane lock.
     pub(super) waiting_start: usize,
-    /// `Continue` acquisitions waiting in queue.
+    /// Outstanding `Continue` acquisitions.
     pub(super) waiting_continue: usize,
 }
 
-/// Snapshot of long-term permits.
+/// Approximate snapshot of long-term permits and outstanding acquisitions.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct LongTermStats {
     /// Permits currently in use.
     pub(super) in_use: u32,
-}
-
-/// A queue of waiters, keyed by arrival order.
-type Queue = BTreeMap<u64, oneshot::Sender<HighVolumePermit>>;
-
-#[derive(Debug)]
-struct State {
-    capacity: u32,
-    free: u32,
-    next_id: u64,
-    start_queue: Queue,
-    continue_queue: Queue,
-}
-
-impl State {
-    fn queue(&mut self, class: HighVolumeClass) -> &mut Queue {
-        match class {
-            HighVolumeClass::Start => &mut self.start_queue,
-            HighVolumeClass::Continue => &mut self.continue_queue,
-        }
-    }
-
-    fn pop_next_waiter(&mut self) -> Option<oneshot::Sender<HighVolumePermit>> {
-        let (_, sender) = self
-            .continue_queue
-            .pop_first()
-            .or_else(|| self.start_queue.pop_first())?;
-        Some(sender)
-    }
+    /// Outstanding acquisitions, including assigned permits not yet received.
+    pub(super) waiting: usize,
 }
 
 /// Concurrency limiter for the Tiered backend.
@@ -94,21 +72,22 @@ pub(super) struct ConcurrencyLimiter {
 }
 
 impl ConcurrencyLimiter {
-    /// Creates the limiter with the given capacities and high-volume wait timeout.
+    /// Creates independent tier limits with their own capacities and wait timeouts.
     pub(super) fn new(
         high_volume_capacity: NonZeroU32,
         long_term_capacity: NonZeroU32,
         high_volume_timeout: Duration,
+        long_term_timeout: Duration,
     ) -> Self {
         Self {
             high_volume: HighVolumeLimiter::new(high_volume_capacity, high_volume_timeout),
-            long_term: LongTermLimiter::new(long_term_capacity),
+            long_term: LongTermLimiter::new(long_term_capacity, long_term_timeout),
         }
     }
 
-    /// Acquires high-volume capacity, waiting at most the configured timeout once queued.
+    /// Acquires high-volume capacity, waiting at most the configured timeout in total.
     ///
-    /// Returns [`ErrorKind::AtCapacity`] if a permit cannot be acquired within the timeout.
+    /// Returns [`crate::error::ErrorKind::AtCapacity`] if a permit cannot be acquired within the timeout.
     /// Dropping this future returns an already assigned permit or frees up the corresponding slot
     /// in the queue.
     pub(super) async fn acquire_high_volume(
@@ -118,7 +97,14 @@ impl ConcurrencyLimiter {
         self.high_volume.acquire(class).await
     }
 
-    /// Tries once to acquire long-term capacity, returning [`ErrorKind::AtCapacity`] if full.
+    /// Acquires long-term capacity within its configured timeout.
+    ///
+    /// A zero timeout returns [`crate::error::ErrorKind::AtCapacity`] immediately when full.
+    pub(super) async fn acquire_long_term(&self) -> Result<LongTermPermit> {
+        self.long_term.acquire().await
+    }
+
+    /// Tries once to acquire long-term capacity, returning [`crate::error::ErrorKind::AtCapacity`] if full.
     pub(super) fn try_acquire_long_term(&self) -> Result<LongTermPermit> {
         self.long_term.try_acquire()
     }
@@ -146,144 +132,70 @@ impl ConcurrencyLimiter {
     }
 }
 
-/// Shared high-volume capacity with CONTINUE priority and FIFO queuing within each class.
+/// Shared high-volume capacity with CONTINUE priority and FIFO within each class.
 ///
-/// Note that queues here are unbounded. A separate component is expected to limit the
-/// amount of requests that can queue up in the first place.
+/// Queues are unbounded. Service admission must limit incoming requests.
 #[derive(Clone, Debug)]
 struct HighVolumeLimiter {
-    timeout: Duration,
-    state: Arc<Mutex<State>>,
+    inner: Limiter,
 }
 
 impl HighVolumeLimiter {
     fn new(capacity: NonZeroU32, timeout: Duration) -> Self {
         Self {
-            timeout,
-            state: Arc::new(Mutex::new(State {
-                capacity: capacity.get(),
-                free: capacity.get(),
-                next_id: 0,
-                start_queue: Queue::new(),
-                continue_queue: Queue::new(),
-            })),
+            inner: Limiter::new(capacity, Scheduling::Priority, timeout),
         }
     }
 
     async fn acquire(&self, class: HighVolumeClass) -> Result<HighVolumePermit> {
-        let shared = &self.state;
-        let (_entry, receiver) = {
-            let mut state = shared.lock().unwrap_or_else(PoisonError::into_inner);
-            if state.free > 0 {
-                state.free -= 1;
-                return Ok(HighVolumePermit {
-                    state: shared.clone(),
-                });
-            }
-            if self.timeout.is_zero() {
-                return Err(ErrorKind::AtCapacity.into());
-            }
-            let id = state.next_id;
-            state.next_id = id.wrapping_add(1);
-            let (sender, receiver) = oneshot::channel();
-            state.queue(class).insert(id, sender);
-            let entry = QueueEntryGuard {
-                state: shared,
-                class,
-                id,
-            };
-            (entry, receiver)
+        let priority = match class {
+            HighVolumeClass::Start => Priority::Normal,
+            HighVolumeClass::Continue => Priority::High,
         };
-        // A permit sent after this times out is dropped with the receiver, which passes its slot on.
-        match tokio::time::timeout(self.timeout, receiver).await {
-            Ok(Ok(permit)) => Ok(permit),
-            _ => Err(ErrorKind::AtCapacity.into()),
-        }
+        self.inner.acquire(priority).await
     }
 
     fn stats(&self) -> HighVolumeStats {
-        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let stats = self.inner.stats();
         HighVolumeStats {
-            in_use: state.capacity - state.free,
-            waiting_start: state.start_queue.len(),
-            waiting_continue: state.continue_queue.len(),
+            in_use: stats.in_use,
+            waiting_start: stats.waiting_normal,
+            waiting_continue: stats.waiting_high,
         }
     }
 }
 
-/// A waiter's place in line.
-struct QueueEntryGuard<'a> {
-    state: &'a Mutex<State>,
-    class: HighVolumeClass,
-    id: u64,
-}
+/// One owned high-volume permit, released on drop.
+pub(super) type HighVolumePermit = OwnedSemaphorePermit;
 
-impl Drop for QueueEntryGuard<'_> {
-    fn drop(&mut self) {
-        // Leave the queue if we gave up.
-        self.state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .queue(self.class)
-            .remove(&self.id);
-    }
-}
-
-/// One high-volume permit, released on drop.
-#[derive(Debug)]
-pub(super) struct HighVolumePermit {
-    state: Arc<Mutex<State>>,
-}
-
-impl Drop for HighVolumePermit {
-    // Hands the slot directly to the next waiter if there is one, or return it to the
-    // pool otherwise.
-    //
-    // We cannot simply always return the slot to the pool, as a request that comes in at the right
-    // time might observer `free > 0` and overtake a waiter that hasn't woken up yet.
-    fn drop(&mut self) {
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        let Some(sender) = state.pop_next_waiter() else {
-            state.free += 1;
-            return;
-        };
-        // Unlock before sending: if the waiter is gone, `send` returns the permit, and dropping it
-        // re-enters this function which locks it again.
-        drop(state);
-        let _ = sender.send(Self {
-            state: self.state.clone(),
-        });
-    }
-}
-
-/// Long-term capacity acquired without waiting.
+/// Long-term capacity with FIFO scheduling and a configurable wait timeout.
 #[derive(Clone, Debug)]
 struct LongTermLimiter {
-    semaphore: Arc<Semaphore>,
-    capacity: u32,
+    inner: Limiter,
 }
 
 impl LongTermLimiter {
-    fn new(capacity: NonZeroU32) -> Self {
-        let capacity = capacity.get();
+    fn new(capacity: NonZeroU32, timeout: Duration) -> Self {
         Self {
-            semaphore: Arc::new(Semaphore::new(capacity as usize)),
-            capacity,
+            inner: Limiter::new(capacity, Scheduling::Fifo, timeout),
         }
     }
 
+    async fn acquire(&self) -> Result<LongTermPermit> {
+        let permit = self.inner.acquire(Priority::Normal).await?;
+        Ok(LongTermPermit { _permit: permit })
+    }
+
     fn try_acquire(&self) -> Result<LongTermPermit> {
-        let permit = self
-            .semaphore
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| ErrorKind::AtCapacity)?;
+        let permit = self.inner.try_acquire(Priority::Normal)?;
         Ok(LongTermPermit { _permit: permit })
     }
 
     fn stats(&self) -> LongTermStats {
+        let stats = self.inner.stats();
         LongTermStats {
-            in_use: self.capacity - self.semaphore.available_permits() as u32,
+            in_use: stats.in_use,
+            waiting: stats.waiting_normal,
         }
     }
 }
@@ -316,9 +228,11 @@ impl LongTermPermit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ErrorKind;
     use bytes::Bytes;
     use futures_util::{Stream, poll};
     use std::io;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     const TIMEOUT: Duration = Duration::from_secs(1);
@@ -351,7 +265,12 @@ mod tests {
     }
 
     fn hv(capacity: u32) -> ConcurrencyLimiter {
-        ConcurrencyLimiter::new(NonZeroU32::new(capacity).unwrap(), NonZeroU32::MIN, TIMEOUT)
+        ConcurrencyLimiter::new(
+            NonZeroU32::new(capacity).unwrap(),
+            NonZeroU32::MIN,
+            TIMEOUT,
+            Duration::ZERO,
+        )
     }
 
     #[tokio::test(start_paused = true)]
@@ -375,12 +294,14 @@ mod tests {
             HighVolumeStats {
                 in_use: 1,
                 waiting_start: 2,
-                waiting_continue: 1
+                waiting_continue: 2
             }
         );
         let clone = limiter.clone();
         let mut newcomer = Box::pin(clone.acquire_high_volume(HighVolumeClass::Start));
         assert!(poll!(&mut newcomer).is_pending());
+        // START was first in the semaphore queue. It must return its assigned permit.
+        assert!(poll!(&mut s1).is_pending());
         assert!(poll!(&mut c2).is_pending());
         drop(c1.await.unwrap());
         drop(c2.await.unwrap());
@@ -422,7 +343,7 @@ mod tests {
         assert!(poll!(&mut cancelled).is_pending());
         assert!(poll!(&mut next).is_pending());
 
-        // The slot is sent to `cancelled`, which is dropped before reading it.
+        // The semaphore assigns a slot to `cancelled`, which is dropped before receiving it.
         drop(held);
         drop(cancelled);
         drop(next.await.unwrap());
@@ -431,7 +352,12 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn timeouts_remove_waiters() {
-        let immediate = ConcurrencyLimiter::new(NonZeroU32::MIN, NonZeroU32::MIN, Duration::ZERO);
+        let immediate = ConcurrencyLimiter::new(
+            NonZeroU32::MIN,
+            NonZeroU32::MIN,
+            Duration::ZERO,
+            Duration::ZERO,
+        );
         let held = immediate
             .acquire_high_volume(HighVolumeClass::Start)
             .await
@@ -466,8 +392,8 @@ mod tests {
         assert_eq!(limiter.stats().high_volume, HighVolumeStats::default());
     }
 
-    /// Races releases against timeouts and cancellations on several threads, including a
-    /// releaser picking a waiter that is already gone. Not guaranteed to hit every race on each
+    /// Races releases against timeouts and cancellations on several threads, including
+    /// cancellation after the semaphore assigns a permit. Not guaranteed to hit every race on each
     /// run, but checks that no slot is ever lost or returned twice.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_releases_timeouts_and_cancellations_keep_accounting() {
@@ -476,6 +402,7 @@ mod tests {
             NonZeroU32::new(CAPACITY).unwrap(),
             NonZeroU32::MIN,
             Duration::from_millis(2),
+            Duration::ZERO,
         );
 
         let tasks: Vec<_> = (0..200)
@@ -529,6 +456,53 @@ mod tests {
         drop(permit);
         assert_eq!(limiter.stats().long_term.in_use, 0);
         drop(limiter.try_acquire_long_term().unwrap());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn long_term_has_its_own_timeout_and_fifo_queue() {
+        let limiter = ConcurrencyLimiter::new(
+            NonZeroU32::MIN,
+            NonZeroU32::MIN,
+            TIMEOUT,
+            Duration::from_millis(100),
+        );
+        let held = limiter.acquire_long_term().await.unwrap();
+        let clone = limiter.clone();
+        let mut cancelled = Box::pin(clone.acquire_long_term());
+        assert!(poll!(&mut cancelled).is_pending());
+        assert_eq!(limiter.stats().long_term.waiting, 1);
+        drop(cancelled);
+        assert_eq!(limiter.stats().long_term.waiting, 0);
+
+        let mut timeout = Box::pin(limiter.acquire_long_term());
+        assert!(poll!(&mut timeout).is_pending());
+        tokio::time::advance(Duration::from_millis(100)).await;
+        assert_eq!(timeout.await.unwrap_err().kind(), ErrorKind::AtCapacity);
+        assert_eq!(limiter.stats().long_term.waiting, 0);
+
+        let mut first = Box::pin(limiter.acquire_long_term());
+        let mut second = Box::pin(limiter.acquire_long_term());
+        assert!(poll!(&mut first).is_pending());
+        assert!(poll!(&mut second).is_pending());
+        drop(held);
+        assert!(poll!(&mut second).is_pending());
+        drop(first.await.unwrap());
+        drop(second.await.unwrap());
+        assert_eq!(limiter.stats(), Stats::default());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn long_term_zero_timeout_rejects_immediately() {
+        let limiter = hv(1);
+        let held = limiter.acquire_long_term().await.unwrap();
+        let before = tokio::time::Instant::now();
+        assert_eq!(
+            limiter.acquire_long_term().await.unwrap_err().kind(),
+            ErrorKind::AtCapacity
+        );
+        assert_eq!(tokio::time::Instant::now(), before);
+        assert_eq!(limiter.stats().long_term.waiting, 0);
+        drop(held);
     }
 
     #[tokio::test(start_paused = true)]

@@ -9,6 +9,8 @@
 //! [`spawn_metered`] starts the same task without waiting. Both provide panic
 //! recovery and `service.task.*` metric emission.
 
+pub(crate) mod limiter;
+
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
