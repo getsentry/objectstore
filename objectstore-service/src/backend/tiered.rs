@@ -135,10 +135,6 @@ use crate::id::ObjectId;
 use crate::resumable::{BackendToken, Session};
 use crate::stream::{ClientStream, SizedPeek, counting_stream};
 
-// These primitives will be used by tiered operations in a subsequent PR.
-#[cfg_attr(not(test), expect(dead_code, unused_imports))]
-mod concurrency;
-
 /// The threshold up until which we will go to the "high volume" backend.
 const BACKEND_SIZE_THRESHOLD: usize = 1024 * 1024; // 1 MiB
 
