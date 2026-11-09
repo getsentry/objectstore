@@ -135,6 +135,13 @@ use crate::id::ObjectId;
 use crate::resumable::{BackendToken, Session};
 use crate::stream::{ClientStream, SizedPeek, counting_stream};
 
+// Admission is defined and tested separately before wiring it into backend operations.
+#[allow(
+    dead_code,
+    reason = "Tier admission is not wired into backend operations yet"
+)]
+mod concurrency;
+
 /// The threshold up until which we will go to the "high volume" backend.
 const BACKEND_SIZE_THRESHOLD: usize = 1024 * 1024; // 1 MiB
 

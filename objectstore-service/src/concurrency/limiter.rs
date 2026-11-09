@@ -19,7 +19,6 @@ use crate::error::{ErrorKind, Result};
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Scheduling {
     Fifo,
-    #[allow(dead_code, reason = "Used by tier admission when it is integrated")]
     Priority,
 }
 
@@ -27,7 +26,6 @@ pub(crate) enum Scheduling {
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Priority {
     Normal,
-    #[allow(dead_code, reason = "Used by tier admission when it is integrated")]
     High,
 }
 

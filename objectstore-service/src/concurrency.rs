@@ -14,8 +14,9 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures_util::FutureExt;
+use futures_util::{FutureExt, StreamExt, stream};
 use sentry::{Hub, SentryFutureExt, TransactionContext};
+use std::task::Poll;
 use tokio::sync::{Notify, OwnedSemaphorePermit};
 
 pub(crate) mod limiter;
@@ -233,6 +234,31 @@ pub struct ConcurrencyPermit {
     task_permit: Option<OwnedSemaphorePermit>,
     bulk_permit: Option<OwnedSemaphorePermit>,
     released: Arc<Notify>,
+}
+
+impl ConcurrencyPermit {
+    /// Holds this permit until the stream ends, returns its first error, or is dropped.
+    ///
+    /// The wrapped stream is dropped before capacity is released. After EOF or
+    /// the first error, subsequent polls return EOF without polling the source.
+    pub fn guard_stream(
+        self,
+        stream: crate::stream::PayloadStream,
+    ) -> crate::stream::PayloadStream {
+        // Tuple fields drop in declaration order.
+        let mut guarded = Some((stream, self));
+        stream::poll_fn(move |cx| {
+            let Some((stream, _)) = guarded.as_mut() else {
+                return Poll::Ready(None);
+            };
+            let result = stream.as_mut().poll_next(cx);
+            if matches!(result, Poll::Ready(None | Some(Err(_)))) {
+                guarded.take();
+            }
+            result
+        })
+        .boxed()
+    }
 }
 
 impl std::fmt::Debug for ConcurrencyPermit {
