@@ -306,7 +306,7 @@ The default execution limit is
 [`StorageService::with_concurrency`] for configuration.
 
 The [`limiter`] module provides standalone FIFO and priority limiters with
-configurable wait timeouts and owned permits.
+configurable queue limits, wait timeouts, and owned permits.
 
 ## Resumable Uploads
 
