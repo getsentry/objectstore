@@ -13,6 +13,8 @@
 //!
 //! The long-term limit uses FIFO queuing without priority. Both tiers have an independent
 //! wait timeout. A zero timeout accepts or rejects immediately.
+//! Both use `Limiter<S>`: `Prioritized` supplies HV scheduling, and `Fifo` supplies LT scheduling.
+//! Only the priority limiter accepts a priority argument and contains priority state.
 
 use std::future::Future;
 use std::num::NonZeroU32;
@@ -22,7 +24,7 @@ use std::task::Poll;
 use std::time::Duration;
 
 use futures_util::{FutureExt, StreamExt, stream};
-use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{AcquireError, Mutex, Notify, OwnedSemaphorePermit, Semaphore};
 
 use crate::error::{ErrorKind, Result};
 use crate::stream::PayloadStream;
@@ -68,8 +70,8 @@ pub(super) struct LongTermStats {
 /// Concurrency limiter for the Tiered backend.
 #[derive(Clone, Debug)]
 pub(super) struct ConcurrencyLimiter {
-    high_volume: HighVolumeLimiter,
-    long_term: LongTermLimiter,
+    high_volume: Arc<Limiter<Prioritized>>,
+    long_term: Arc<Limiter<Fifo>>,
 }
 
 impl ConcurrencyLimiter {
@@ -81,8 +83,8 @@ impl ConcurrencyLimiter {
         long_term_timeout: Duration,
     ) -> Self {
         Self {
-            high_volume: HighVolumeLimiter::new(high_volume_capacity, high_volume_timeout),
-            long_term: LongTermLimiter::new(long_term_capacity, long_term_timeout),
+            high_volume: Arc::new(Limiter::new(high_volume_capacity, high_volume_timeout)),
+            long_term: Arc::new(Limiter::new(long_term_capacity, long_term_timeout)),
         }
     }
 
@@ -95,20 +97,32 @@ impl ConcurrencyLimiter {
         &self,
         class: HighVolumeClass,
     ) -> Result<HighVolumePermit> {
-        self.high_volume.acquire(class).await
+        let priority = match class {
+            HighVolumeClass::Start => Priority::Normal,
+            HighVolumeClass::Continue => Priority::High,
+        };
+        self.high_volume.acquire(priority).await
     }
 
     /// Acquires long-term capacity within its configured timeout.
     ///
     /// A zero timeout returns [`ErrorKind::AtCapacity`] immediately when full.
     pub(super) async fn acquire_long_term(&self) -> Result<LongTermPermit> {
-        self.long_term.acquire().await
+        let permit = self.long_term.acquire().await?;
+        Ok(LongTermPermit { _permit: permit })
     }
 
     fn stats(&self) -> Stats {
+        let scheduling = &self.high_volume.scheduling;
         Stats {
-            high_volume: self.high_volume.stats(),
-            long_term: self.long_term.stats(),
+            high_volume: HighVolumeStats {
+                in_use: self.high_volume.in_use(),
+                waiting_start: scheduling.waiting_normal.load(Ordering::Relaxed),
+                waiting_continue: scheduling.waiting_high.load(Ordering::Relaxed),
+            },
+            long_term: LongTermStats {
+                in_use: self.long_term.in_use(),
+            },
         }
     }
 
@@ -128,99 +142,128 @@ impl ConcurrencyLimiter {
     }
 }
 
-/// Shared high-volume capacity with CONTINUE priority and FIFO queuing within each class.
+/// Capacity and timeout shared by FIFO and priority scheduling.
 ///
-/// Note that queues here are unbounded. A separate component is expected to limit the
-/// amount of requests that can queue up in the first place.
-#[derive(Clone, Debug)]
-struct HighVolumeLimiter {
-    timeout: Duration,
-    state: Arc<HighVolumeState>,
-}
-
+/// Queues are unbounded. Service admission must limit incoming requests.
 #[derive(Debug)]
-struct HighVolumeState {
+struct Limiter<S> {
     capacity: u32,
     semaphore: Arc<Semaphore>,
-    start_lane: Mutex<()>,
-    waiting_start: AtomicUsize,
-    waiting_continue: AtomicUsize,
-    continue_drained: Notify,
+    timeout: Duration,
+    scheduling: S,
 }
 
-impl HighVolumeLimiter {
-    fn new(capacity: NonZeroU32, timeout: Duration) -> Self {
+/// FIFO scheduling without priority state.
+#[derive(Debug, Default)]
+struct Fifo;
+
+/// FIFO within each priority, with high-priority waiters admitted first.
+#[derive(Debug, Default)]
+struct Prioritized {
+    normal_lane: Mutex<()>,
+    waiting_normal: AtomicUsize,
+    waiting_high: AtomicUsize,
+    high_drained: Notify,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Priority {
+    Normal,
+    High,
+}
+
+impl<S> Limiter<S> {
+    fn new(capacity: NonZeroU32, timeout: Duration) -> Self
+    where
+        S: Default,
+    {
         Self {
+            capacity: capacity.get(),
+            semaphore: Arc::new(Semaphore::new(capacity.get() as usize)),
             timeout,
-            state: Arc::new(HighVolumeState {
-                capacity: capacity.get(),
-                semaphore: Arc::new(Semaphore::new(capacity.get() as usize)),
-                start_lane: Mutex::new(()),
-                waiting_start: AtomicUsize::new(0),
-                waiting_continue: AtomicUsize::new(0),
-                continue_drained: Notify::new(),
-            }),
+            scheduling: S::default(),
         }
     }
 
-    async fn acquire(&self, class: HighVolumeClass) -> Result<HighVolumePermit> {
-        let state = &self.state;
-        state.waiting(class).fetch_add(1, Ordering::AcqRel);
-        let _waiting = WaitingGuard { state, class };
-        let acquire = async {
-            if class == HighVolumeClass::Continue {
-                return state.semaphore.clone().acquire_owned().await;
-            }
+    fn in_use(&self) -> u32 {
+        self.capacity - self.semaphore.available_permits() as u32
+    }
 
-            // Only one START waiter can enter the semaphore queue at a time.
-            let _lane = state.start_lane.lock().await;
-            loop {
-                state.wait_until_continue_drained().await;
-                let permit = state.semaphore.clone().acquire_owned().await?;
-                if state.waiting_continue.load(Ordering::Acquire) == 0 {
-                    return Ok(permit);
-                }
-                // CONTINUE registered while START was queued. Return the permit and wait
-                // for CONTINUE to drain, including tasks that have not joined the queue yet.
-                drop(permit);
-            }
-        };
-
-        // A zero timeout polls once, including the lane lock, without waiting or using a timer.
+    async fn wait_for_permit(
+        &self,
+        acquire: impl Future<Output = std::result::Result<OwnedSemaphorePermit, AcquireError>>,
+    ) -> Result<OwnedSemaphorePermit> {
+        // A zero timeout polls once without waiting or using a timer.
         let permit = if self.timeout.is_zero() {
             acquire.now_or_never().ok_or(ErrorKind::AtCapacity)?
         } else {
-            // One deadline covers the lane lock, priority drain, and all semaphore attempts.
+            // One deadline covers the complete acquisition, including priority scheduling.
             tokio::time::timeout(self.timeout, acquire)
                 .await
                 .map_err(|_| ErrorKind::AtCapacity)?
         };
         permit.map_err(|_| ErrorKind::AtCapacity.into())
     }
+}
 
-    fn stats(&self) -> HighVolumeStats {
-        let state = &self.state;
-        HighVolumeStats {
-            in_use: state.capacity - state.semaphore.available_permits() as u32,
-            waiting_start: state.waiting_start.load(Ordering::Relaxed),
-            waiting_continue: state.waiting_continue.load(Ordering::Relaxed),
+impl Limiter<Fifo> {
+    async fn acquire(&self) -> Result<OwnedSemaphorePermit> {
+        // FIFO has no scheduling gates, so a zero timeout can try the semaphore directly.
+        if self.timeout.is_zero() {
+            return self
+                .semaphore
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| ErrorKind::AtCapacity.into());
         }
+        self.wait_for_permit(self.semaphore.clone().acquire_owned())
+            .await
     }
 }
 
-impl HighVolumeState {
-    fn waiting(&self, class: HighVolumeClass) -> &AtomicUsize {
-        match class {
-            HighVolumeClass::Start => &self.waiting_start,
-            HighVolumeClass::Continue => &self.waiting_continue,
+impl Limiter<Prioritized> {
+    async fn acquire(&self, priority: Priority) -> Result<OwnedSemaphorePermit> {
+        let scheduling = &self.scheduling;
+        scheduling.waiting(priority).fetch_add(1, Ordering::AcqRel);
+        let _waiting = WaitingGuard {
+            scheduling,
+            priority,
+        };
+        let acquire = async {
+            if priority == Priority::High {
+                return self.semaphore.clone().acquire_owned().await;
+            }
+
+            // Only one normal waiter can enter the semaphore queue at a time.
+            let _lane = scheduling.normal_lane.lock().await;
+            loop {
+                scheduling.wait_until_high_drained().await;
+                let permit = self.semaphore.clone().acquire_owned().await?;
+                if scheduling.waiting_high.load(Ordering::Acquire) == 0 {
+                    return Ok(permit);
+                }
+                // High-priority work registered while this task was queued. Return the permit
+                // and wait for it to drain, including tasks that have not joined the queue yet.
+                drop(permit);
+            }
+        };
+        self.wait_for_permit(acquire).await
+    }
+}
+
+impl Prioritized {
+    fn waiting(&self, priority: Priority) -> &AtomicUsize {
+        match priority {
+            Priority::Normal => &self.waiting_normal,
+            Priority::High => &self.waiting_high,
         }
     }
 
-    async fn wait_until_continue_drained(&self) {
+    async fn wait_until_high_drained(&self) {
         loop {
             // notify_waiters reaches this future from creation, before its first poll.
-            let drained = self.continue_drained.notified();
-            if self.waiting_continue.load(Ordering::Acquire) == 0 {
+            let drained = self.high_drained.notified();
+            if self.waiting_high.load(Ordering::Acquire) == 0 {
                 return;
             }
             drained.await;
@@ -230,64 +273,24 @@ impl HighVolumeState {
 
 /// Tracks an acquisition until completion, timeout, or cancellation.
 struct WaitingGuard<'a> {
-    state: &'a HighVolumeState,
-    class: HighVolumeClass,
+    scheduling: &'a Prioritized,
+    priority: Priority,
 }
 
 impl Drop for WaitingGuard<'_> {
     fn drop(&mut self) {
         let previous = self
-            .state
-            .waiting(self.class)
+            .scheduling
+            .waiting(self.priority)
             .fetch_sub(1, Ordering::AcqRel);
-        if self.class == HighVolumeClass::Continue && previous == 1 {
-            self.state.continue_drained.notify_waiters();
+        if self.priority == Priority::High && previous == 1 {
+            self.scheduling.high_drained.notify_waiters();
         }
     }
 }
 
 /// One owned high-volume permit, released on drop.
 pub(super) type HighVolumePermit = OwnedSemaphorePermit;
-
-/// Long-term capacity with FIFO queuing and a configurable wait timeout.
-#[derive(Clone, Debug)]
-struct LongTermLimiter {
-    semaphore: Arc<Semaphore>,
-    capacity: u32,
-    timeout: Duration,
-}
-
-impl LongTermLimiter {
-    fn new(capacity: NonZeroU32, timeout: Duration) -> Self {
-        let capacity = capacity.get();
-        Self {
-            semaphore: Arc::new(Semaphore::new(capacity as usize)),
-            capacity,
-            timeout,
-        }
-    }
-
-    async fn acquire(&self) -> Result<LongTermPermit> {
-        let permit = if self.timeout.is_zero() {
-            self.semaphore
-                .clone()
-                .try_acquire_owned()
-                .map_err(|_| ErrorKind::AtCapacity)?
-        } else {
-            tokio::time::timeout(self.timeout, self.semaphore.clone().acquire_owned())
-                .await
-                .map_err(|_| ErrorKind::AtCapacity)?
-                .map_err(|_| ErrorKind::AtCapacity)?
-        };
-        Ok(LongTermPermit { _permit: permit })
-    }
-
-    fn stats(&self) -> LongTermStats {
-        LongTermStats {
-            in_use: self.capacity - self.semaphore.available_permits() as u32,
-        }
-    }
-}
 
 /// Owned long-term permit, released on drop or by a guarded stream.
 #[derive(Debug)]
@@ -452,16 +455,16 @@ mod tests {
         assert!(poll!(&mut start).is_pending());
 
         // Pause CONTINUE between registering and joining the semaphore queue.
-        let state = &limiter.high_volume.state;
-        state.waiting_continue.fetch_add(1, Ordering::AcqRel);
+        let scheduling = &limiter.high_volume.scheduling;
+        scheduling.waiting_high.fetch_add(1, Ordering::AcqRel);
         let pending = WaitingGuard {
-            state,
-            class: HighVolumeClass::Continue,
+            scheduling,
+            priority: Priority::High,
         };
         drop(held);
         // START must return its permit and suspend rather than take it again in a loop.
         assert!(poll!(&mut start).is_pending());
-        assert_eq!(state.semaphore.available_permits(), 1);
+        assert_eq!(limiter.high_volume.semaphore.available_permits(), 1);
 
         // Cancelling that CONTINUE registration must wake START.
         drop(pending);
