@@ -58,7 +58,7 @@ impl Permit {
 /// Snapshot of permits in use by a simple limiter.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct LimiterStats {
-    /// Permits currently in use.
+    /// Permits held by callers or assigned to acquisitions that have not resumed yet.
     pub in_use: u32,
 }
 
@@ -74,7 +74,8 @@ pub struct Limiter {
 impl Limiter {
     /// Creates a FIFO limiter with the given capacity, wait timeout, and queue limit.
     ///
-    /// `None` allows unlimited waiting acquisitions. `Some(0)` disables waiting.
+    /// `None` allows unlimited waiting. `Some(n)` allows at most `n` queued acquisitions.
+    /// `Some(0)` disables waiting. Immediate acquisitions do not consume queue capacity.
     pub fn new(capacity: NonZeroU32, timeout: Duration, max_queue_size: Option<u32>) -> Self {
         let capacity = capacity.get();
         Self {
@@ -89,6 +90,7 @@ impl Limiter {
     ///
     /// Returns [`ErrorKind::AtCapacity`] when the queue is full or the wait times out.
     /// A zero timeout rejects immediately when no permit is available.
+    /// Dropping the future releases its queue slot and any assigned permit.
     pub async fn acquire(&self) -> Result<Permit> {
         if let Ok(permit) = self.semaphore.clone().try_acquire_owned() {
             return Ok(Permit { _permit: permit });
@@ -127,9 +129,13 @@ pub enum Priority {
 }
 
 /// Approximate snapshot of permits and outstanding acquisitions by priority.
+///
+/// Fields are read independently. The waiting counts include unfinished acquisition calls,
+/// including permits assigned to tasks that have not resumed yet. Immediate acquisitions and
+/// rejected attempts are also counted briefly, so these values can exceed the queue limits.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PriorityLimiterStats {
-    /// Permits currently in use.
+    /// Permits held by callers or assigned to acquisitions that have not resumed yet.
     pub in_use: u32,
     /// Outstanding normal-priority acquisitions, including those waiting for the lane lock.
     pub waiting_normal: usize,
@@ -162,7 +168,8 @@ struct PriorityState {
 impl PriorityLimiter {
     /// Creates a priority limiter with shared capacity and separate queue limits.
     ///
-    /// `None` allows unlimited waiting acquisitions. `Some(0)` disables waiting.
+    /// `None` allows unlimited waiting. `Some(n)` allows at most `n` queued acquisitions.
+    /// `Some(0)` disables waiting. Immediate acquisitions do not consume queue capacity.
     /// Each queue limit applies only to acquisitions with that priority.
     pub fn new(
         capacity: NonZeroU32,
@@ -189,6 +196,7 @@ impl PriorityLimiter {
     /// Acquires capacity with the given priority within the configured timeout.
     ///
     /// Returns [`ErrorKind::AtCapacity`] when this priority's queue is full or the wait times out.
+    /// A zero timeout rejects immediately if acquisition cannot finish without waiting.
     /// Dropping the future releases its queue slot and any assigned permit.
     /// The timeout includes the normal-priority lane lock.
     pub async fn acquire(&self, priority: Priority) -> Result<Permit> {
