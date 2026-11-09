@@ -5,16 +5,9 @@
 //! Both classes share the same limiter, but `Continue` operations always have priority over
 //! `Start` ones, as we don't want to reject requests after performing the (usually) expensive LT calls.
 //! Requests queue in FIFO order within each class and wait up to a configured timeout.
-//! Sustained CONTINUE traffic can starve START. A START waiter may need to resume and return
-//! an assigned permit before CONTINUE can receive it. Other START waiters wait for the lane
-//! holder to finish acquiring, even if capacity is available.
-//! CONTINUE remains pending until its task receives the assigned permit, so START can also
-//! wait for that task to resume while other permits are free.
 //!
 //! The long-term limit uses FIFO queuing without priority. Both tiers have an independent
 //! wait timeout. A zero timeout accepts or rejects immediately.
-//! Both use `Limiter<S>`: `Prioritized` supplies HV scheduling, and `Fifo` supplies LT scheduling.
-//! Only the priority limiter accepts a priority argument and contains priority state.
 
 use std::future::Future;
 use std::num::NonZeroU32;
@@ -158,6 +151,9 @@ struct Limiter<S> {
 struct Fifo;
 
 /// FIFO within each priority, with high-priority waiters admitted first.
+///
+/// Sustained high-priority traffic can starve normal waiters. Admission can wait for an
+/// assigned waiter to resume, even while capacity is available.
 #[derive(Debug, Default)]
 struct Prioritized {
     normal_lane: Mutex<()>,
