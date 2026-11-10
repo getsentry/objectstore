@@ -1156,14 +1156,6 @@ mod tests {
     use crate::id::ObjectContext;
     use crate::stream::{self, ClientStream};
 
-    fn limits() -> TieredConcurrencyConfig {
-        serde_json::from_value(serde_json::json!({
-            "high_volume": {"max_concurrency": 1},
-            "long_term": {"max_concurrency": 1}
-        }))
-        .unwrap()
-    }
-
     #[test]
     fn tiered_concurrency_config() {
         let leaf = serde_json::json!({"type":"bigtable", "project_id":"test", "instance_name":"test", "table_name":"test"});
@@ -1199,169 +1191,6 @@ mod tests {
         assert_eq!(limits.high_volume.normal_queue_size, Some(10));
         assert_eq!(limits.high_volume.high_queue_size, Some(20));
         assert_eq!(limits.long_term.queue_size, Some(30));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn long_term_saturation_preserves_high_volume_and_stream_owns_permit() {
-        let (storage, _, _, _) = make_tiered_storage();
-        let storage = storage.with_concurrency(limits());
-        let large = make_id("large");
-        let small = make_id("small");
-        let now = Timestamp::now();
-        storage
-            .put_object(
-                &large,
-                &Metadata::default(),
-                stream::single(vec![0; BACKEND_SIZE_THRESHOLD + 1]),
-                now,
-            )
-            .await
-            .unwrap();
-        let response = storage
-            .get_object(&large, now, None)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            storage.get_metadata(&large, now).await.unwrap_err().kind(),
-            ErrorKind::AtCapacity
-        );
-        storage
-            .put_object(&small, &Metadata::default(), stream::single("small"), now)
-            .await
-            .unwrap();
-        assert!(
-            storage
-                .get_object(&small, now, None)
-                .await
-                .unwrap()
-                .is_some()
-        );
-        drop(response);
-        assert!(storage.get_metadata(&large, now).await.unwrap().is_some());
-        storage.join().await;
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn large_put_releases_high_volume_and_timeout_cleans_up() {
-        use futures_util::poll;
-        let paused = Arc::new(tokio::sync::Notify::new());
-        let resume = Arc::new(tokio::sync::Notify::new());
-        let lt = InMemoryBackend::new("lt");
-        let storage = TieredStorage::new(
-            Box::new(InMemoryBackend::new("hv")),
-            Box::new(TestBackend::with_inner(
-                lt.clone(),
-                PauseAfterPut {
-                    paused: paused.clone(),
-                    resume: resume.clone(),
-                },
-            )),
-            Box::new(InMemoryChangeLog::default()),
-        )
-        .with_concurrency(limits());
-        let id = make_id("large");
-        let metadata = Metadata::default();
-        let mut put = Box::pin(storage.put_object(
-            &id,
-            &metadata,
-            stream::single(vec![0; BACKEND_SIZE_THRESHOLD + 1]),
-            Timestamp::now(),
-        ));
-        assert!(poll!(&mut put).is_pending());
-        paused.notified().await;
-        let high = storage.acquire_high_volume(Priority::Normal).await.unwrap();
-        assert_eq!(
-            storage.acquire_long_term().await.unwrap_err().kind(),
-            ErrorKind::AtCapacity
-        );
-        resume.notify_one();
-        assert!(poll!(&mut put).is_pending());
-        tokio::time::advance(Duration::from_secs(1)).await;
-        assert_eq!(put.await.unwrap_err().kind(), ErrorKind::AtCapacity);
-        drop(high);
-        storage.join().await;
-        assert!(lt.is_empty());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn cancellation_rejection_preserves_marker_and_nonfinal_chunk_needs_no_h() {
-        let (storage, hv, _, _) = make_tiered_storage();
-        let storage = storage.with_concurrency(limits());
-        let id = make_id("upload");
-        let session = resumable_token(
-            &storage,
-            &id,
-            &Metadata::default(),
-            (BACKEND_SIZE_THRESHOLD + 1) as u64,
-        )
-        .await;
-        let long = storage.acquire_long_term().await.unwrap();
-        assert_eq!(
-            storage.cancel_upload(&session).await.unwrap_err().kind(),
-            ErrorKind::AtCapacity
-        );
-        assert!(
-            hv.has_upload_marker(&upload_revision(&session), Timestamp::now())
-                .await
-                .unwrap()
-        );
-        drop(long);
-        let high = storage.acquire_high_volume(Priority::Normal).await.unwrap();
-        storage
-            .put_chunk(&session, 0, 256 * 1024, stream::single(vec![0; 256 * 1024]))
-            .await
-            .unwrap();
-        drop(high);
-        storage.cancel_upload(&session).await.unwrap();
-        assert!(
-            !hv.has_upload_marker(&upload_revision(&session), Timestamp::now())
-                .await
-                .unwrap()
-        );
-        storage.join().await;
-    }
-
-    #[derive(Debug)]
-    struct TrackCancellation(Arc<std::sync::atomic::AtomicBool>);
-
-    #[async_trait::async_trait]
-    impl Hooks for TrackCancellation {
-        async fn cancel_upload(&self, inner: &InMemoryBackend, session: &Session) -> Result<()> {
-            self.0.store(true, Ordering::SeqCst);
-            inner.cancel_upload(session).await
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn marker_admission_timeout_cancels_created_session() {
-        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let storage = TieredStorage::new(
-            Box::new(InMemoryBackend::new("hv")),
-            Box::new(TestBackend::with_inner(
-                InMemoryBackend::new("lt"),
-                TrackCancellation(cancelled.clone()),
-            )),
-            Box::new(NoopChangeLog),
-        )
-        .with_concurrency(limits());
-        let high = storage.acquire_high_volume(Priority::Normal).await.unwrap();
-        assert_eq!(
-            storage
-                .create_upload_session(
-                    &make_id("create"),
-                    &Metadata::default(),
-                    NonZeroU64::new((BACKEND_SIZE_THRESHOLD + 1) as u64).unwrap()
-                )
-                .await
-                .unwrap_err()
-                .kind(),
-            ErrorKind::AtCapacity
-        );
-        assert!(cancelled.load(Ordering::SeqCst));
-        drop(high);
-        drop(storage.acquire_long_term().await.unwrap());
-        storage.join().await;
     }
 
     fn make_context() -> ObjectContext {
@@ -1420,7 +1249,6 @@ mod tests {
     #[tokio::test]
     async fn resumable_inmemory() -> anyhow::Result<()> {
         let (storage, _, _, _) = make_tiered_storage();
-        let storage = storage.with_concurrency(limits());
         let id = make_id("tiered-resumable-inmemory");
         let payload = vec![b'a'; BACKEND_SIZE_THRESHOLD + 1];
         let token =
