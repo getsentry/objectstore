@@ -305,9 +305,6 @@ The default execution limit is
 [`DEFAULT_CONCURRENCY_LIMIT`](service::DEFAULT_CONCURRENCY_LIMIT). See
 [`StorageService::with_concurrency`] for configuration.
 
-The [`limiter`] module provides standalone FIFO and priority limiters with
-configurable queue limits, wait timeouts, and owned permits.
-
 ## Resumable Uploads
 
 A resumable upload writes one object across several requests: the payload arrives

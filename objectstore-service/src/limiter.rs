@@ -15,22 +15,7 @@ use crate::stream::PayloadStream;
 
 const METRICS_EMITTER_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Passes a usage snapshot to `emit` immediately and once per second thereafter.
-///
-/// The caller supplies the snapshot and can spawn this future as a background task.
-pub async fn run_emitter<S, F, Fut>(mut snapshot: impl FnMut() -> S, mut emit: F)
-where
-    F: FnMut(S) -> Fut,
-    Fut: Future<Output = ()>,
-{
-    let mut ticker = tokio::time::interval(METRICS_EMITTER_INTERVAL);
-    loop {
-        ticker.tick().await;
-        emit(snapshot()).await;
-    }
-}
-
-/// Owned permit, released on drop or by a guarded stream.
+/// Owned permit, released on drop.
 #[derive(Debug)]
 pub struct Permit {
     _permit: OwnedSemaphorePermit,
@@ -58,8 +43,21 @@ impl Permit {
 /// Snapshot of permits in use by a simple limiter.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct LimiterStats {
-    /// Permits held by callers or assigned to acquisitions that have not resumed yet.
+    /// Permits currently in use.
     pub in_use: u32,
+}
+
+/// Shared interval loop for the metric emitters.
+async fn run_emitter<S, F, Fut>(mut snapshot: impl FnMut() -> S, mut emit: F)
+where
+    F: FnMut(S) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    let mut ticker = tokio::time::interval(METRICS_EMITTER_INTERVAL);
+    loop {
+        ticker.tick().await;
+        emit(snapshot()).await;
+    }
 }
 
 /// Limits concurrent operations with FIFO queuing and a configurable wait timeout.
@@ -73,9 +71,6 @@ pub struct Limiter {
 
 impl Limiter {
     /// Creates a FIFO limiter with the given capacity, wait timeout, and queue limit.
-    ///
-    /// `None` allows unlimited waiting. `Some(n)` allows at most `n` queued acquisitions.
-    /// `Some(0)` disables waiting. Immediate acquisitions do not consume queue capacity.
     pub fn new(capacity: NonZeroU32, timeout: Duration, max_queue_size: Option<u32>) -> Self {
         let capacity = capacity.get();
         Self {
@@ -89,7 +84,6 @@ impl Limiter {
     /// Acquires capacity within the configured timeout, preserving FIFO order.
     ///
     /// Returns [`ErrorKind::AtCapacity`] when the queue is full or the wait times out.
-    /// A zero timeout rejects immediately when no permit is available.
     /// Dropping the future releases its queue slot and any assigned permit.
     pub async fn acquire(&self) -> Result<Permit> {
         if let Ok(permit) = self.semaphore.clone().try_acquire_owned() {
@@ -117,27 +111,32 @@ impl Limiter {
             in_use: self.capacity - self.semaphore.available_permits() as u32,
         }
     }
+
+    /// Passes this limiter's stats to `emit` immediately and once per second thereafter.
+    pub async fn run_emitter<F, Fut>(&self, emit: F)
+    where
+        F: FnMut(LimiterStats) -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        run_emitter(|| self.stats(), emit).await;
+    }
 }
 
 /// Priority for an acquisition from [`PriorityLimiter`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Priority {
-    /// Waits until no high-priority acquisitions are pending.
+    /// Normal priority.
     Normal,
-    /// Takes precedence over pending normal-priority acquisitions.
+    /// High priority, always takes precedence over pending normal-priority acquisitions.
     High,
 }
 
 /// Approximate snapshot of permits and outstanding acquisitions by priority.
-///
-/// Fields are read independently. The waiting counts include unfinished acquisition calls,
-/// including permits assigned to tasks that have not resumed yet. Immediate acquisitions and
-/// rejected attempts are also counted briefly, so these values can exceed the queue limits.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PriorityLimiterStats {
-    /// Permits held by callers or assigned to acquisitions that have not resumed yet.
+    /// Permits currently in use.
     pub in_use: u32,
-    /// Outstanding normal-priority acquisitions, including those waiting for the lane lock.
+    /// Outstanding normal-priority acquisitions.
     pub waiting_normal: usize,
     /// Outstanding high-priority acquisitions.
     pub waiting_high: usize,
@@ -145,11 +144,13 @@ pub struct PriorityLimiterStats {
 
 /// Limits concurrent operations with high-priority admission and FIFO within each priority.
 ///
-/// Each priority has its own optional queue limit; execution capacity is shared.
-/// Sustained high-priority traffic can starve normal-priority waiters.
+/// Each priority has its own wait timeout and optional queue limit; execution capacity is shared.
+/// High priority acquisitions always takes precedence over pending normal-priority acquisitions,
+/// so sustained high-priority traffic can starve normal-priority waiters.
 #[derive(Clone, Debug)]
 pub struct PriorityLimiter {
-    timeout: Duration,
+    normal_timeout: Duration,
+    high_timeout: Duration,
     state: Arc<PriorityState>,
 }
 
@@ -166,19 +167,21 @@ struct PriorityState {
 }
 
 impl PriorityLimiter {
-    /// Creates a priority limiter with shared capacity and separate queue limits.
+    /// Creates a priority limiter with shared capacity and separate timeouts and queue limits.
     ///
     /// `None` allows unlimited waiting. `Some(n)` allows at most `n` queued acquisitions.
     /// `Some(0)` disables waiting. Immediate acquisitions do not consume queue capacity.
-    /// Each queue limit applies only to acquisitions with that priority.
+    /// Each timeout and queue limit applies only to acquisitions with that priority.
     pub fn new(
         capacity: NonZeroU32,
-        timeout: Duration,
+        normal_timeout: Duration,
+        high_timeout: Duration,
         max_normal_queue_size: Option<u32>,
         max_high_queue_size: Option<u32>,
     ) -> Self {
         Self {
-            timeout,
+            normal_timeout,
+            high_timeout,
             state: Arc::new(PriorityState {
                 capacity: capacity.get(),
                 semaphore: Arc::new(Semaphore::new(capacity.get() as usize)),
@@ -193,7 +196,7 @@ impl PriorityLimiter {
         }
     }
 
-    /// Acquires capacity with the given priority within the configured timeout.
+    /// Acquires capacity within the timeout configured for the given priority.
     ///
     /// Returns [`ErrorKind::AtCapacity`] when this priority's queue is full or the wait times out.
     /// A zero timeout rejects immediately if acquisition cannot finish without waiting.
@@ -201,6 +204,10 @@ impl PriorityLimiter {
     /// The timeout includes the normal-priority lane lock.
     pub async fn acquire(&self, priority: Priority) -> Result<Permit> {
         let state = &self.state;
+        let (timeout, queue) = match priority {
+            Priority::Normal => (self.normal_timeout, &state.normal_queue),
+            Priority::High => (self.high_timeout, &state.high_queue),
+        };
         state.waiting(priority).fetch_add(1, Ordering::AcqRel);
         let _waiting = WaitingGuard { state, priority };
         let acquire = async {
@@ -228,20 +235,16 @@ impl PriorityLimiter {
         let permit = match acquire.as_mut().now_or_never() {
             Some(permit) => permit,
             None => {
-                if self.timeout.is_zero() {
+                if timeout.is_zero() {
                     return Err(ErrorKind::AtCapacity.into());
                 }
-                let queue = match priority {
-                    Priority::Normal => &state.normal_queue,
-                    Priority::High => &state.high_queue,
-                };
                 let _queued = queue
                     .as_ref()
                     .map(|queue| queue.try_acquire())
                     .transpose()
                     .map_err(|_| ErrorKind::AtCapacity)?;
                 // One deadline covers the lane lock, priority drain, and semaphore attempts.
-                tokio::time::timeout(self.timeout, acquire)
+                tokio::time::timeout(timeout, acquire)
                     .await
                     .map_err(|_| ErrorKind::AtCapacity)?
             }
@@ -258,6 +261,17 @@ impl PriorityLimiter {
             waiting_normal: state.waiting_normal.load(Ordering::Relaxed),
             waiting_high: state.waiting_high.load(Ordering::Relaxed),
         }
+    }
+
+    /// Passes this limiter's stats to `emit` immediately and once per second thereafter.
+    ///
+    /// The caller can spawn this future as a background task.
+    pub async fn run_emitter<F, Fut>(&self, emit: F)
+    where
+        F: FnMut(PriorityLimiterStats) -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        run_emitter(|| self.stats(), emit).await;
     }
 }
 
@@ -311,33 +325,36 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn emitter_reports_current_limiter_usage() {
-        let priority = PriorityLimiter::new(NonZeroU32::MIN, TIMEOUT, None, None);
+        let priority = PriorityLimiter::new(NonZeroU32::MIN, TIMEOUT, TIMEOUT, None, None);
         let simple = Limiter::new(NonZeroU32::MIN, Duration::ZERO, None);
         let priority_permit = priority.acquire(Priority::Normal).await.unwrap();
         let simple_permit = simple.acquire().await.unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let emitter = run_emitter(
-            || (priority.stats(), simple.stats()),
-            |stats| {
-                sender.send(stats).unwrap();
-                std::future::ready(())
-            },
-        );
-        tokio::pin!(emitter);
-        assert!(poll!(&mut emitter).is_pending());
-        let busy = receiver.try_recv().unwrap();
-        assert_eq!(busy.0.in_use, 1);
-        assert_eq!(busy.1.in_use, 1);
+        let (priority_sender, mut priority_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (simple_sender, mut simple_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let priority_emitter = priority.run_emitter(|stats| {
+            priority_sender.send(stats).unwrap();
+            std::future::ready(())
+        });
+        let simple_emitter = simple.run_emitter(|stats| {
+            simple_sender.send(stats).unwrap();
+            std::future::ready(())
+        });
+        tokio::pin!(priority_emitter, simple_emitter);
+        assert!(poll!(&mut priority_emitter).is_pending());
+        assert!(poll!(&mut simple_emitter).is_pending());
+        assert_eq!(priority_receiver.try_recv().unwrap().in_use, 1);
+        assert_eq!(simple_receiver.try_recv().unwrap().in_use, 1);
 
         drop(priority_permit);
         drop(simple_permit);
         tokio::time::advance(Duration::from_secs(1)).await;
-        assert!(poll!(&mut emitter).is_pending());
-        let idle = receiver.try_recv().unwrap();
+        assert!(poll!(&mut priority_emitter).is_pending());
+        assert!(poll!(&mut simple_emitter).is_pending());
         assert_eq!(
-            idle,
-            (PriorityLimiterStats::default(), LimiterStats::default())
+            priority_receiver.try_recv().unwrap(),
+            PriorityLimiterStats::default()
         );
+        assert_eq!(simple_receiver.try_recv().unwrap(), LimiterStats::default());
     }
 
     #[tokio::test(start_paused = true)]
@@ -455,7 +472,13 @@ mod tests {
     }
 
     fn priority_limiter(capacity: u32) -> PriorityLimiter {
-        PriorityLimiter::new(NonZeroU32::new(capacity).unwrap(), TIMEOUT, None, None)
+        PriorityLimiter::new(
+            NonZeroU32::new(capacity).unwrap(),
+            TIMEOUT,
+            TIMEOUT,
+            None,
+            None,
+        )
     }
 
     #[tokio::test(start_paused = true)]
@@ -497,7 +520,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn cancelled_waiter_leaves_queue() {
         for priority in [Priority::Normal, Priority::High] {
-            let limiter = PriorityLimiter::new(NonZeroU32::MIN, TIMEOUT, Some(1), Some(1));
+            let limiter = PriorityLimiter::new(NonZeroU32::MIN, TIMEOUT, TIMEOUT, Some(1), Some(1));
             let held = limiter.acquire(Priority::Normal).await.unwrap();
             let mut cancelled = Box::pin(limiter.acquire(priority));
             assert!(poll!(&mut cancelled).is_pending());
@@ -524,7 +547,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn cancelled_after_grant_passes_slot_on() {
-        let limiter = PriorityLimiter::new(NonZeroU32::MIN, TIMEOUT, Some(2), Some(1));
+        let limiter = PriorityLimiter::new(NonZeroU32::MIN, TIMEOUT, TIMEOUT, Some(2), Some(1));
         let held = limiter.acquire(Priority::Normal).await.unwrap();
         let mut cancelled = Box::pin(limiter.acquire(Priority::Normal));
         let mut next = Box::pin(limiter.acquire(Priority::Normal));
@@ -551,12 +574,18 @@ mod tests {
     async fn timeouts_remove_waiters() {
         for timeout in [Duration::ZERO, TIMEOUT] {
             for priority in [Priority::Normal, Priority::High] {
-                let (normal_queue, high_queue) = match priority {
-                    Priority::Normal => (Some(0), Some(1)),
-                    Priority::High => (Some(1), Some(0)),
+                let queue_limit = if timeout.is_zero() { None } else { Some(0) };
+                let (normal_timeout, high_timeout, normal_queue, high_queue) = match priority {
+                    Priority::Normal => (timeout, TIMEOUT, queue_limit, Some(1)),
+                    Priority::High => (TIMEOUT, timeout, Some(1), queue_limit),
                 };
-                let immediate =
-                    PriorityLimiter::new(NonZeroU32::MIN, timeout, normal_queue, high_queue);
+                let immediate = PriorityLimiter::new(
+                    NonZeroU32::MIN,
+                    normal_timeout,
+                    high_timeout,
+                    normal_queue,
+                    high_queue,
+                );
                 let held = immediate.acquire(priority).await.unwrap();
                 let before = tokio::time::Instant::now();
                 assert_eq!(
@@ -564,32 +593,40 @@ mod tests {
                     ErrorKind::AtCapacity
                 );
                 assert_eq!(tokio::time::Instant::now(), before);
-                if !timeout.is_zero() {
-                    let other_priority = match priority {
-                        Priority::Normal => Priority::High,
-                        Priority::High => Priority::Normal,
-                    };
-                    let mut other = Box::pin(immediate.acquire(other_priority));
-                    assert!(poll!(&mut other).is_pending());
-                }
+                let other_priority = match priority {
+                    Priority::Normal => Priority::High,
+                    Priority::High => Priority::Normal,
+                };
+                let mut other = Box::pin(immediate.acquire(other_priority));
+                assert!(poll!(&mut other).is_pending());
+                drop(other);
                 drop(held);
             }
         }
 
         for priority in [Priority::Normal, Priority::High] {
-            let limiter = PriorityLimiter::new(NonZeroU32::MIN, TIMEOUT, Some(1), Some(1));
+            let (normal_timeout, high_timeout, other_priority) = match priority {
+                Priority::Normal => (TIMEOUT / 2, TIMEOUT, Priority::High),
+                Priority::High => (TIMEOUT, TIMEOUT / 2, Priority::Normal),
+            };
+            let limiter = PriorityLimiter::new(
+                NonZeroU32::MIN,
+                normal_timeout,
+                high_timeout,
+                Some(1),
+                Some(1),
+            );
             let held = limiter.acquire(Priority::Normal).await.unwrap();
             let mut waiting = Box::pin(limiter.acquire(priority));
+            let mut other = Box::pin(limiter.acquire(other_priority));
             assert!(poll!(&mut waiting).is_pending());
-            tokio::time::advance(TIMEOUT).await;
+            assert!(poll!(&mut other).is_pending());
+            tokio::time::advance(TIMEOUT / 2).await;
             assert_eq!(waiting.await.unwrap_err().kind(), ErrorKind::AtCapacity);
-            assert_eq!(
-                limiter.stats(),
-                PriorityLimiterStats {
-                    in_use: 1,
-                    ..Default::default()
-                }
-            );
+            // The other priority's longer timeout has not elapsed.
+            assert!(poll!(&mut other).is_pending());
+            assert_eq!(limiter.stats().in_use, 1);
+            drop(other);
             let mut retry = Box::pin(limiter.acquire(priority));
             assert!(poll!(&mut retry).is_pending());
             drop(held);
@@ -606,6 +643,7 @@ mod tests {
         const CAPACITY: u32 = 4;
         let limiter = PriorityLimiter::new(
             NonZeroU32::new(CAPACITY).unwrap(),
+            Duration::from_millis(2),
             Duration::from_millis(2),
             Some(CAPACITY),
             Some(CAPACITY),
