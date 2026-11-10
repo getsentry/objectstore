@@ -201,16 +201,14 @@ pub struct TieredConcurrencyConfig {
 pub struct HighVolumeConcurrencyConfig {
     /// Maximum simultaneous high-volume sections.
     pub max_concurrency: NonZeroU32,
-    /// Maximum wait for normal-priority work. Defaults to one second.
+    /// Maximum wait for capacity at either priority. Defaults to one second.
     #[serde(default = "default_concurrency_timeout", with = "humantime_serde")]
-    pub normal_timeout: Duration,
-    /// Maximum queued normal-priority acquisitions. Unset means unlimited; zero disables waiting.
-    pub normal_queue_size: Option<u32>,
-    /// Maximum wait for high-priority work. Defaults to one second.
-    #[serde(default = "default_concurrency_timeout", with = "humantime_serde")]
-    pub high_timeout: Duration,
-    /// Maximum queued high-priority acquisitions. Unset means unlimited; zero disables waiting.
-    pub high_queue_size: Option<u32>,
+    pub timeout: Duration,
+    /// Total queue capacity, split between normal and high priority.
+    ///
+    /// High priority receives the extra slot for odd sizes. Unset means unlimited;
+    /// zero disables waiting.
+    pub queue_size: Option<u32>,
 }
 
 /// Concurrency limits for long-term storage.
@@ -316,10 +314,10 @@ impl TieredStorage {
     pub fn with_concurrency(mut self, config: TieredConcurrencyConfig) -> Self {
         let high_volume = PriorityLimiter::new(
             config.high_volume.max_concurrency,
-            config.high_volume.normal_timeout,
-            config.high_volume.high_timeout,
-            config.high_volume.normal_queue_size,
-            config.high_volume.high_queue_size,
+            config.high_volume.timeout,
+            config.high_volume.timeout,
+            config.high_volume.queue_size.map(|size| size / 2),
+            config.high_volume.queue_size.map(|size| size - size / 2),
         );
         let long_term = Limiter::new(
             config.long_term.max_concurrency,
@@ -1174,21 +1172,16 @@ mod tests {
             assert!(serde_json::from_value::<TieredStorageConfig>(config.clone()).is_err());
         }
         config["concurrency"] = serde_json::json!({
-            "high_volume": {"max_concurrency": 100, "normal_timeout": "250ms", "normal_queue_size": 10, "high_timeout": "2s", "high_queue_size": 20},
+            "high_volume": {"max_concurrency": 100, "timeout": "250ms", "queue_size": 30},
             "long_term": {"max_concurrency": 50, "timeout": "3s", "queue_size": 30}
         });
         let limits = serde_json::from_value::<TieredStorageConfig>(config)
             .unwrap()
             .concurrency
             .unwrap();
-        assert_eq!(
-            limits.high_volume.normal_timeout,
-            Duration::from_millis(250)
-        );
-        assert_eq!(limits.high_volume.high_timeout, Duration::from_secs(2));
+        assert_eq!(limits.high_volume.timeout, Duration::from_millis(250));
         assert_eq!(limits.long_term.timeout, Duration::from_secs(3));
-        assert_eq!(limits.high_volume.normal_queue_size, Some(10));
-        assert_eq!(limits.high_volume.high_queue_size, Some(20));
+        assert_eq!(limits.high_volume.queue_size, Some(30));
         assert_eq!(limits.long_term.queue_size, Some(30));
     }
 
