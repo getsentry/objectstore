@@ -153,48 +153,6 @@ pub struct PriorityLimiter {
     state: Arc<PriorityState>,
 }
 
-// Both priorities share `semaphore`.
-//
-// High-priority waiters increment `waiting_high`, and acquire `semaphore` directly.
-//
-// Normal-priority waiters lock `normal_lane`, so only one attempts acquisition at a time.
-// That waiter first tries an immediate acquisition if `waiting_high == 0`.
-// Otherwise, it waits on `high_drained` until `waiting_high == 0`, then acquires `semaphore`.
-// If high-priority work arrives after this check, this one normal waiter can acquire first.
-// Other normal waiters wait for `normal_lane` in the meantime.
-#[derive(Debug)]
-struct PriorityState {
-    capacity: u32,
-    semaphore: Arc<Semaphore>,
-    normal_queue: Option<Semaphore>,
-    high_queue: Option<Semaphore>,
-    normal_lane: Mutex<()>,
-    waiting_normal: AtomicUsize,
-    waiting_high: AtomicUsize,
-    high_drained: Notify,
-}
-
-impl PriorityState {
-    fn waiting(&self, priority: Priority) -> &AtomicUsize {
-        match priority {
-            Priority::Normal => &self.waiting_normal,
-            Priority::High => &self.waiting_high,
-        }
-    }
-
-    async fn wait_until_high_drained(&self) {
-        loop {
-            // Create the notification future before checking the counter, so a notification
-            // between the check and `.await` is not lost.
-            let drained = self.high_drained.notified();
-            if self.waiting_high.load(Ordering::Acquire) == 0 {
-                return;
-            }
-            drained.await;
-        }
-    }
-}
-
 impl PriorityLimiter {
     /// Creates a priority limiter with shared capacity and separate timeouts and queue limits.
     pub fn new(
@@ -292,6 +250,48 @@ impl PriorityLimiter {
         Fut: Future<Output = ()>,
     {
         run_emitter(|| self.stats(), emit).await;
+    }
+}
+
+// Both priorities share `semaphore`.
+//
+// High-priority waiters increment `waiting_high`, and acquire `semaphore` directly.
+//
+// Normal-priority waiters lock `normal_lane`, so only one attempts acquisition at a time.
+// That waiter first tries an immediate acquisition if `waiting_high == 0`.
+// Otherwise, it waits on `high_drained` until `waiting_high == 0`, then acquires `semaphore`.
+// If high-priority work arrives after this check, this one normal waiter can acquire first.
+// Other normal waiters wait for `normal_lane` in the meantime.
+#[derive(Debug)]
+struct PriorityState {
+    capacity: u32,
+    semaphore: Arc<Semaphore>,
+    normal_queue: Option<Semaphore>,
+    high_queue: Option<Semaphore>,
+    normal_lane: Mutex<()>,
+    waiting_normal: AtomicUsize,
+    waiting_high: AtomicUsize,
+    high_drained: Notify,
+}
+
+impl PriorityState {
+    fn waiting(&self, priority: Priority) -> &AtomicUsize {
+        match priority {
+            Priority::Normal => &self.waiting_normal,
+            Priority::High => &self.waiting_high,
+        }
+    }
+
+    async fn wait_until_high_drained(&self) {
+        loop {
+            // Create the notification future before checking the counter, so a notification
+            // between the check and `.await` is not lost.
+            let drained = self.high_drained.notified();
+            if self.waiting_high.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            drained.await;
+        }
     }
 }
 
