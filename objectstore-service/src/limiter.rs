@@ -127,7 +127,7 @@ impl Limiter {
 pub enum Priority {
     /// Normal priority.
     Normal,
-    /// High priority, always takes precedence over pending normal-priority acquisitions.
+    /// High priority, blocks normal-priority waiters from entering the semaphore queue.
     High,
 }
 
@@ -145,8 +145,7 @@ pub struct PriorityLimiterStats {
 /// Limits concurrent operations with high-priority admission and FIFO within each priority.
 ///
 /// Each priority has its own wait timeout and optional queue limit; execution capacity is shared.
-/// High priority acquisitions always takes precedence over pending normal-priority acquisitions,
-/// so sustained high-priority traffic can starve normal-priority waiters.
+/// Sustained high-priority traffic can starve normal-priority waiters.
 #[derive(Clone, Debug)]
 pub struct PriorityLimiter {
     normal_timeout: Duration,
@@ -154,6 +153,14 @@ pub struct PriorityLimiter {
     state: Arc<PriorityState>,
 }
 
+// Both priorities share `semaphore`.
+//
+// High-priority waiters increment `waiting_high`, and acquire `semaphore` directly.
+//
+// Normal-priority waiters lock `normal_lane`, so only one attempts acquisition at a time.
+// That waiter waits on `high_drained` until `waiting_high == 0`, then acquires `semaphore`.
+// If high-priority work arrives after this check, this one normal waiter can acquire first.
+// Other normal waiters wait for `normal_lane` in the meantime.
 #[derive(Debug)]
 struct PriorityState {
     capacity: u32,
@@ -166,12 +173,28 @@ struct PriorityState {
     high_drained: Notify,
 }
 
+impl PriorityState {
+    fn waiting(&self, priority: Priority) -> &AtomicUsize {
+        match priority {
+            Priority::Normal => &self.waiting_normal,
+            Priority::High => &self.waiting_high,
+        }
+    }
+
+    async fn wait_until_high_drained(&self) {
+        loop {
+            // notify_waiters reaches this future from creation, before its first poll.
+            let drained = self.high_drained.notified();
+            if self.waiting_high.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            drained.await;
+        }
+    }
+}
+
 impl PriorityLimiter {
     /// Creates a priority limiter with shared capacity and separate timeouts and queue limits.
-    ///
-    /// `None` allows unlimited waiting. `Some(n)` allows at most `n` queued acquisitions.
-    /// `Some(0)` disables waiting. Immediate acquisitions do not consume queue capacity.
-    /// Each timeout and queue limit applies only to acquisitions with that priority.
     pub fn new(
         capacity: NonZeroU32,
         normal_timeout: Duration,
@@ -199,9 +222,7 @@ impl PriorityLimiter {
     /// Acquires capacity within the timeout configured for the given priority.
     ///
     /// Returns [`ErrorKind::AtCapacity`] when this priority's queue is full or the wait times out.
-    /// A zero timeout rejects immediately if acquisition cannot finish without waiting.
     /// Dropping the future releases its queue slot and any assigned permit.
-    /// The timeout includes the normal-priority lane lock.
     pub async fn acquire(&self, priority: Priority) -> Result<Permit> {
         let state = &self.state;
         let (timeout, queue) = match priority {
@@ -209,7 +230,7 @@ impl PriorityLimiter {
             Priority::High => (self.high_timeout, &state.high_queue),
         };
         state.waiting(priority).fetch_add(1, Ordering::AcqRel);
-        let _waiting = WaitingGuard { state, priority };
+        let _guard = WaitingGuard { state, priority };
         let acquire = async {
             if priority == Priority::High {
                 return state.semaphore.clone().acquire_owned().await;
@@ -217,16 +238,8 @@ impl PriorityLimiter {
 
             // Only one normal-priority waiter can enter the semaphore queue at a time.
             let _lane = state.normal_lane.lock().await;
-            loop {
-                state.wait_until_high_drained().await;
-                let permit = state.semaphore.clone().acquire_owned().await?;
-                if state.waiting_high.load(Ordering::Acquire) == 0 {
-                    return Ok(permit);
-                }
-                // High-priority work registered while this task was queued. Return the permit
-                // and wait for it to drain, including tasks that have not joined the queue yet.
-                drop(permit);
-            }
+            state.wait_until_high_drained().await;
+            state.semaphore.clone().acquire_owned().await
         };
 
         tokio::pin!(acquire);
@@ -243,7 +256,7 @@ impl PriorityLimiter {
                     .map(|queue| queue.try_acquire())
                     .transpose()
                     .map_err(|_| ErrorKind::AtCapacity)?;
-                // One deadline covers the lane lock, priority drain, and semaphore attempts.
+                // One deadline covers the lane lock, priority drain, and semaphore acquisition.
                 tokio::time::timeout(timeout, acquire)
                     .await
                     .map_err(|_| ErrorKind::AtCapacity)?
@@ -264,34 +277,12 @@ impl PriorityLimiter {
     }
 
     /// Passes this limiter's stats to `emit` immediately and once per second thereafter.
-    ///
-    /// The caller can spawn this future as a background task.
     pub async fn run_emitter<F, Fut>(&self, emit: F)
     where
         F: FnMut(PriorityLimiterStats) -> Fut,
         Fut: Future<Output = ()>,
     {
         run_emitter(|| self.stats(), emit).await;
-    }
-}
-
-impl PriorityState {
-    fn waiting(&self, priority: Priority) -> &AtomicUsize {
-        match priority {
-            Priority::Normal => &self.waiting_normal,
-            Priority::High => &self.waiting_high,
-        }
-    }
-
-    async fn wait_until_high_drained(&self) {
-        loop {
-            // notify_waiters reaches this future from creation, before its first poll.
-            let drained = self.high_drained.notified();
-            if self.waiting_high.load(Ordering::Acquire) == 0 {
-                return;
-            }
-            drained.await;
-        }
     }
 }
 
@@ -505,13 +496,14 @@ mod tests {
         let clone = limiter.clone();
         let mut newcomer = Box::pin(clone.acquire(Priority::Normal));
         assert!(poll!(&mut newcomer).is_pending());
-        // The normal-priority waiter must return its assigned permit to high-priority work.
-        assert!(poll!(&mut normal1).is_pending());
+        // One normal waiter entered the semaphore queue before high-priority work arrived.
+        drop(normal1.await.unwrap());
+        // Other normal waiters must wait for all high-priority acquisitions to finish.
+        assert!(poll!(&mut normal2).is_pending());
         assert!(poll!(&mut high2).is_pending());
         drop(high1.await.unwrap());
-        drop(high2.await.unwrap());
         assert!(poll!(&mut normal2).is_pending());
-        drop(normal1.await.unwrap());
+        drop(high2.await.unwrap());
         drop(normal2.await.unwrap());
         drop(newcomer.await.unwrap());
         assert_eq!(limiter.stats(), PriorityLimiterStats::default());
