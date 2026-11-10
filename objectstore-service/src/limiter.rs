@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Poll;
 use std::time::Duration;
 
-use futures_util::{FutureExt, StreamExt, stream};
+use futures_util::{StreamExt, stream};
 use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore};
 
 use crate::error::{ErrorKind, Result};
@@ -191,45 +191,42 @@ impl PriorityLimiter {
         state.waiting(priority).fetch_add(1, Ordering::AcqRel);
         let _waiting = WaitingGuard { state, priority };
 
+        // Try immediate acquisition without consuming queue capacity.
+        let mut normal_lane = None;
+        let can_acquire = match priority {
+            Priority::High => true,
+            Priority::Normal => {
+                normal_lane = state.normal_lane.try_lock().ok();
+                normal_lane.is_some() && state.waiting_high.load(Ordering::Acquire) == 0
+            }
+        };
+        if can_acquire && let Ok(permit) = state.semaphore.clone().try_acquire_owned() {
+            return Ok(Permit { _permit: permit });
+        }
+        if timeout.is_zero() {
+            return Err(ErrorKind::AtCapacity.into());
+        }
+
+        let _queued = queue
+            .as_ref()
+            .map(|queue| queue.try_acquire())
+            .transpose()
+            .map_err(|_| ErrorKind::AtCapacity)?;
         let acquire = async {
-            if priority == Priority::High {
-                return state.semaphore.clone().acquire_owned().await;
+            if priority == Priority::Normal {
+                // Keep any lock from the immediate attempt so other normal waiters cannot pass us.
+                if normal_lane.is_none() {
+                    normal_lane = Some(state.normal_lane.lock().await);
+                }
+                state.wait_until_high_drained().await;
             }
 
-            let _lane = match state.normal_lane.try_lock() {
-                Ok(lane) => lane,
-                Err(_) => state.normal_lane.lock().await,
-            };
-            if state.waiting_high.load(Ordering::Acquire) == 0
-                && let Ok(permit) = state.semaphore.clone().try_acquire_owned()
-            {
-                return Ok(permit);
-            }
-
-            state.wait_until_high_drained().await;
             state.semaphore.clone().acquire_owned().await
         };
-        tokio::pin!(acquire);
-
-        // Immediate acquisition does not consume queue capacity. Keep the same future if it
-        // needs to wait, preserving its position in the lane or semaphore queue.
-        let permit = match acquire.as_mut().now_or_never() {
-            Some(permit) => permit,
-            None => {
-                if timeout.is_zero() {
-                    return Err(ErrorKind::AtCapacity.into());
-                }
-                let _queued = queue
-                    .as_ref()
-                    .map(|queue| queue.try_acquire())
-                    .transpose()
-                    .map_err(|_| ErrorKind::AtCapacity)?;
-                tokio::time::timeout(timeout, acquire)
-                    .await
-                    .map_err(|_| ErrorKind::AtCapacity)?
-            }
-        };
-        let permit = permit.map_err(|_| ErrorKind::AtCapacity)?;
+        let permit = tokio::time::timeout(timeout, acquire)
+            .await
+            .map_err(|_| ErrorKind::AtCapacity)?
+            .map_err(|_| ErrorKind::AtCapacity)?;
         Ok(Permit { _permit: permit })
     }
 
