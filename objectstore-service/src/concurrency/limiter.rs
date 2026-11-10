@@ -1,13 +1,15 @@
 //! Simple and priority-based FIFO concurrency limiters.
 
 use std::future::Future;
+use std::io;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Poll;
 use std::time::Duration;
 
-use futures_util::{StreamExt, stream};
+use bytes::Bytes;
+use futures_util::{Stream, stream};
 use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore};
 
 use crate::error::{ErrorKind, Result};
@@ -23,7 +25,9 @@ pub struct Permit {
 
 impl Permit {
     /// Wraps `stream` so that it holds this permit until EOF, the first error, or stream drop.
-    pub fn guard_stream(self, stream: PayloadStream) -> PayloadStream {
+    ///
+    /// Returns an unboxed stream; call `.boxed()` if a [`PayloadStream`] is needed.
+    pub fn guard_stream(self, stream: PayloadStream) -> impl Stream<Item = io::Result<Bytes>> {
         // Tuple field order ensures the stream drops before its permit.
         let mut guarded = Some((stream, self));
         stream::poll_fn(move |cx| {
@@ -36,7 +40,6 @@ impl Permit {
             }
             result
         })
-        .boxed()
     }
 }
 
@@ -313,9 +316,7 @@ impl Drop for WaitingGuard<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
-    use futures_util::{Stream, poll};
-    use std::io;
+    use futures_util::{StreamExt, poll};
     use std::sync::atomic::{AtomicBool, Ordering};
 
     const TIMEOUT: Duration = Duration::from_secs(1);
