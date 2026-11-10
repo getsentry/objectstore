@@ -130,12 +130,11 @@ use crate::backend::common::{
     TieredWrite, Tombstone,
 };
 use crate::backend::{HighVolumeStorageConfig, StorageConfig};
+use crate::concurrency::{Limiter, Permit, Priority, PriorityLimiter};
 use crate::error::{ErrorKind, Result, ResultExt as _};
 use crate::id::ObjectId;
 use crate::resumable::{BackendToken, Session};
 use crate::stream::{ClientStream, SizedPeek, counting_stream};
-
-use crate::limiter::{Limiter, Permit, Priority, PriorityLimiter};
 
 /// The threshold up until which we will go to the "high volume" backend.
 const BACKEND_SIZE_THRESHOLD: usize = 1024 * 1024; // 1 MiB
@@ -920,7 +919,7 @@ impl Backend for TieredStorage {
                     .await?
                     .map(|(meta, range, stream)| {
                         let stream = match long {
-                            Some(permit) => permit.guard_stream(stream),
+                            Some(permit) => permit.guard_stream(stream).boxed(),
                             None => stream,
                         };
                         (align_expiry(meta, &tombstone), range, stream)
