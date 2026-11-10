@@ -158,15 +158,16 @@ pub struct PriorityLimiter {
 // High-priority waiters increment `waiting_high`, and acquire `semaphore` directly.
 //
 // Normal-priority waiters lock `normal_lane`, so only one attempts acquisition at a time.
-// That waiter waits on `high_drained` until `waiting_high == 0`, then acquires `semaphore`.
+// That waiter first tries an immediate acquisition if `waiting_high == 0`.
+// Otherwise, it waits on `high_drained` until `waiting_high == 0`, then acquires `semaphore`.
 // If high-priority work arrives after this check, this one normal waiter can acquire first.
 // Other normal waiters wait for `normal_lane` in the meantime.
 #[derive(Debug)]
 struct PriorityState {
     capacity: u32,
     semaphore: Arc<Semaphore>,
-    normal_queue: Option<Arc<Semaphore>>,
-    high_queue: Option<Arc<Semaphore>>,
+    normal_queue: Option<Semaphore>,
+    high_queue: Option<Semaphore>,
     normal_lane: Mutex<()>,
     waiting_normal: AtomicUsize,
     waiting_high: AtomicUsize,
@@ -209,9 +210,8 @@ impl PriorityLimiter {
             state: Arc::new(PriorityState {
                 capacity: capacity.get(),
                 semaphore: Arc::new(Semaphore::new(capacity.get() as usize)),
-                normal_queue: max_normal_queue_size
-                    .map(|size| Arc::new(Semaphore::new(size as usize))),
-                high_queue: max_high_queue_size.map(|size| Arc::new(Semaphore::new(size as usize))),
+                normal_queue: max_normal_queue_size.map(|size| Semaphore::new(size as usize)),
+                high_queue: max_high_queue_size.map(|size| Semaphore::new(size as usize)),
                 normal_lane: Mutex::new(()),
                 waiting_normal: AtomicUsize::new(0),
                 waiting_high: AtomicUsize::new(0),
@@ -238,7 +238,16 @@ impl PriorityLimiter {
                 return state.semaphore.clone().acquire_owned().await;
             }
 
-            let _lane = state.normal_lane.lock().await;
+            let _lane = match state.normal_lane.try_lock() {
+                Ok(lane) => lane,
+                Err(_) => state.normal_lane.lock().await,
+            };
+            if state.waiting_high.load(Ordering::Acquire) == 0
+                && let Ok(permit) = state.semaphore.clone().try_acquire_owned()
+            {
+                return Ok(permit);
+            }
+
             state.wait_until_high_drained().await;
             state.semaphore.clone().acquire_owned().await
         };
@@ -504,8 +513,12 @@ mod tests {
         drop(high1.await.unwrap());
         assert!(poll!(&mut normal2).is_pending());
         drop(high2.await.unwrap());
+        // A free permit must not let a new normal waiter bypass the lane's older waiters.
+        let mut latecomer = Box::pin(limiter.acquire(Priority::Normal));
+        assert!(poll!(&mut latecomer).is_pending());
         drop(normal2.await.unwrap());
         drop(newcomer.await.unwrap());
+        drop(latecomer.await.unwrap());
         assert_eq!(limiter.stats(), PriorityLimiterStats::default());
     }
 
