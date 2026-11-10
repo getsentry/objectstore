@@ -277,19 +277,12 @@ fn default_concurrency_timeout() -> Duration {
 ///
 /// # Concurrency
 ///
-/// Optional per-tier limits keep long-term storage stalls from using all capacity.
-/// High-volume work waits for a permit. Work that continues an operation after
-/// long-term storage access has high priority; other work has normal priority.
-/// This lets operations already in progress finish first. Resumable requests use
-/// normal priority until final publication, which has high priority.
+/// Optional per-tier limits keep stalls in one backend from using all capacity.
 ///
-/// Long-term work is rejected immediately by default when its limit is full. Downloads hold
-/// their long-term permit until the response stream ends or is dropped. Background
-/// cleanup and recovery are outside these limits.
-///
-/// Configure both positive capacities in [`TieredStorageConfig::concurrency`].
-/// Omitting that section disables the limits. Each priority has its own timeout and
-/// optional queue limit, independent of the total service limit.
+/// High-volume work that continues an operation after long-term storage access
+/// has high priority; other work has normal priority. The high-volume concurrency
+/// is shared between these two priority classes.
+/// This lets operations already in progress finish first.
 ///
 /// # Usage
 ///
