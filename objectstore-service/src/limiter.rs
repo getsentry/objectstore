@@ -183,7 +183,8 @@ impl PriorityState {
 
     async fn wait_until_high_drained(&self) {
         loop {
-            // notify_waiters reaches this future from creation, before its first poll.
+            // Create the notification future before checking the counter, so a notification
+            // between the check and `.await` is not lost.
             let drained = self.high_drained.notified();
             if self.waiting_high.load(Ordering::Acquire) == 0 {
                 return;
@@ -230,19 +231,19 @@ impl PriorityLimiter {
             Priority::High => (self.high_timeout, &state.high_queue),
         };
         state.waiting(priority).fetch_add(1, Ordering::AcqRel);
-        let _guard = WaitingGuard { state, priority };
+        let _waiting = WaitingGuard { state, priority };
+
         let acquire = async {
             if priority == Priority::High {
                 return state.semaphore.clone().acquire_owned().await;
             }
 
-            // Only one normal-priority waiter can enter the semaphore queue at a time.
             let _lane = state.normal_lane.lock().await;
             state.wait_until_high_drained().await;
             state.semaphore.clone().acquire_owned().await
         };
-
         tokio::pin!(acquire);
+
         // Immediate acquisition does not consume queue capacity. Keep the same future if it
         // needs to wait, preserving its position in the lane or semaphore queue.
         let permit = match acquire.as_mut().now_or_never() {
@@ -256,7 +257,6 @@ impl PriorityLimiter {
                     .map(|queue| queue.try_acquire())
                     .transpose()
                     .map_err(|_| ErrorKind::AtCapacity)?;
-                // One deadline covers the lane lock, priority drain, and semaphore acquisition.
                 tokio::time::timeout(timeout, acquire)
                     .await
                     .map_err(|_| ErrorKind::AtCapacity)?
