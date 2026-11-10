@@ -412,12 +412,12 @@ impl TieredStorage {
 
     /// Checks that the upload is still authorized before contacting LT.
     async fn check_upload_marker(&self, revision: &ObjectId) -> Result<()> {
-        let exists = self
+        if !self
             .inner
             .high_volume
             .has_upload_marker(revision, Timestamp::now())
-            .await?;
-        if !exists {
+            .await?
+        {
             return Err(ErrorKind::UploadSessionGone.into());
         }
         Ok(())
@@ -425,12 +425,12 @@ impl TieredStorage {
 
     /// Consumes permission to finalize or cancel the upload.
     async fn delete_upload_marker(&self, revision: &ObjectId) -> Result<()> {
-        let deleted = self
+        if !self
             .inner
             .high_volume
             .delete_upload_marker(revision, Timestamp::now())
-            .await?;
-        if !deleted {
+            .await?
+        {
             return Err(ErrorKind::UploadSessionGone.into());
         }
         Ok(())
@@ -625,12 +625,12 @@ impl Backend for TieredStorage {
 
         let lt_guard = self.acquire_long_term().await?;
         let revision = new_long_term_revision(id);
-        let result = self
+        let Some(inner) = self
             .inner
             .long_term
             .create_upload_session(&revision, metadata, upload_length)
-            .await?;
-        let Some(inner) = result else {
+            .await?
+        else {
             return Ok(None);
         };
 
@@ -655,8 +655,7 @@ impl Backend for TieredStorage {
                 upload_length,
                 backend_token: inner,
             };
-            let cleanup_result = self.inner.long_term.cancel_upload(&session).await;
-            if let Err(cleanup_error) = cleanup_result {
+            if let Err(cleanup_error) = self.inner.long_term.cancel_upload(&session).await {
                 objectstore_log::warn!(
                     !!&cleanup_error,
                     "Failed to cancel upload after marker creation failed"
@@ -1008,12 +1007,12 @@ impl Backend for TieredStorage {
         access_time: Timestamp,
     ) -> Result<SetExpiryResponse> {
         let hv_guard = self.acquire_high_volume(Priority::Normal).await?;
-        let result = self
+        match self
             .inner
             .high_volume
             .get_tiered_metadata(id, access_time)
-            .await?;
-        match result {
+            .await?
+        {
             TieredMetadata::NotFound => Ok(SetExpiryResponse::NotFound),
             TieredMetadata::Object(_) => {
                 self.inner
@@ -1063,12 +1062,12 @@ impl Backend for TieredStorage {
         self.tag_backend(&mut timer, &BackendChoice::HighVolume);
 
         let _high = self.acquire_high_volume(Priority::Normal).await?;
-        let result = self
+        if let Some(tombstone) = self
             .inner
             .high_volume
             .delete_non_tombstone(id, access_time)
-            .await?;
-        if let Some(tombstone) = result {
+            .await?
+        {
             self.tag_backend(&mut timer, &BackendChoice::LongTerm);
 
             let mut guard = self
