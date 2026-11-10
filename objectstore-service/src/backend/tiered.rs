@@ -280,6 +280,8 @@ fn default_concurrency_timeout() -> Duration {
 /// has high priority; other work has normal priority. The high-volume concurrency
 /// is shared between these two priority classes.
 /// This lets operations already in progress finish first.
+/// Permits cover calls to their own backend, not waits for the other tier.
+/// Long-term downloads retain their permit while the response stream is active.
 ///
 /// # Usage
 ///
@@ -436,6 +438,12 @@ impl TieredStorage {
         Ok(())
     }
 
+    /// Cancels the remote upload while holding only long-term capacity.
+    async fn cancel_long_term_upload(&self, session: &Session) -> Result<()> {
+        let _lt_guard = self.acquire_long_term().await?;
+        self.inner.long_term.cancel_upload(session).await
+    }
+
     /// Returns the name of the backend corresponding to the given routing choice.
     fn backend_type(&self, choice: &BackendChoice) -> &'static str {
         match choice {
@@ -472,12 +480,13 @@ impl TieredStorage {
         payload: Bytes,
         access_time: Timestamp,
     ) -> Result<()> {
-        let _high = self.acquire_high_volume(Priority::Normal).await?;
+        let hv_guard = self.acquire_high_volume(Priority::Normal).await?;
         let tombstone_opt = self
             .inner
             .high_volume
             .put_non_tombstone(id, metadata, payload.clone(), access_time)
             .await?;
+        drop(hv_guard);
 
         let Some(Tombstone { target, .. }) = tombstone_opt else {
             // No tombstone exists - write succeeded
@@ -496,12 +505,14 @@ impl TieredStorage {
         let write = TieredWrite::Object(metadata.clone(), payload);
         guard.advance(ChangePhase::Written);
 
+        let hv_guard = self.acquire_high_volume(Priority::Normal).await?;
         let written = self
             .inner
             .high_volume
             .compare_and_write(id, Some(&target), write, access_time)
             .await?;
 
+        drop(hv_guard);
         // Update guard and let it schedule cleanup in the background.
         guard.advance(ChangePhase::compare_and_write(written));
 
@@ -533,7 +544,6 @@ impl TieredStorage {
             _ => None,
         };
 
-        let lt_guard = self.acquire_long_term().await?;
         // 2. Write payload to long-term at a unique revision key.
         let new = new_long_term_revision(id);
         let mut guard = self
@@ -544,12 +554,13 @@ impl TieredStorage {
             })
             .await?;
 
+        let lt_guard = self.acquire_long_term().await?;
         self.inner
             .long_term
             .put_object(&new, metadata, stream, access_time)
             .await?;
-        guard.advance(ChangePhase::Written);
         drop(lt_guard);
+        guard.advance(ChangePhase::Written);
 
         let _high = self.acquire_high_volume(Priority::High).await?;
         // 3. CAS commit: write tombstone only if HV state matches what we saw.
@@ -623,18 +634,18 @@ impl Backend for TieredStorage {
             return Ok(None);
         }
 
-        let lt_guard = self.acquire_long_term().await?;
         let revision = new_long_term_revision(id);
-        let Some(inner) = self
+        let lt_guard = self.acquire_long_term().await?;
+        let result = self
             .inner
             .long_term
             .create_upload_session(&revision, metadata, upload_length)
-            .await?
-        else {
+            .await?;
+        drop(lt_guard);
+        let Some(inner) = result else {
             return Ok(None);
         };
 
-        // Keep long-term capacity for inline cancellation if marker creation fails.
         let hv_guard = self.acquire_high_volume(Priority::Normal).await;
         let result = match hv_guard {
             Ok(hv_guard) => {
@@ -655,7 +666,7 @@ impl Backend for TieredStorage {
                 upload_length,
                 backend_token: inner,
             };
-            if let Err(cleanup_error) = self.inner.long_term.cancel_upload(&session).await {
+            if let Err(cleanup_error) = self.cancel_long_term_upload(&session).await {
                 objectstore_log::warn!(
                     !!&cleanup_error,
                     "Failed to cancel upload after marker creation failed"
@@ -663,7 +674,6 @@ impl Backend for TieredStorage {
             }
             return Err(error);
         }
-        drop(lt_guard);
         if metadata.origin.is_none() {
             objectstore_metrics::count!("put.origin_missing", usecase = id.usecase().to_string());
         }
@@ -716,9 +726,9 @@ impl Backend for TieredStorage {
             .into());
         }
 
-        let lt_guard = self.acquire_long_term().await?;
         // Non-final request; just forward the chunk.
         if end != session.upload_length.get() {
+            let lt_guard = self.acquire_long_term().await?;
             let progress = self
                 .inner
                 .long_term
@@ -734,8 +744,14 @@ impl Backend for TieredStorage {
         }
 
         // Read the publication precondition while verifying the LT offset.
-        let (progress, current) =
-            tokio::join!(self.inner.long_term.upload_offset(&inner_session), async {
+        let (progress, current) = tokio::join!(
+            async {
+                let lt_guard = self.acquire_long_term().await?;
+                let result = self.inner.long_term.upload_offset(&inner_session).await;
+                drop(lt_guard);
+                result
+            },
+            async {
                 let hv_guard = self.acquire_high_volume(Priority::Normal).await?;
                 let result = self
                     .inner
@@ -744,7 +760,8 @@ impl Backend for TieredStorage {
                     .await;
                 drop(hv_guard);
                 result
-            },);
+            },
+        );
         match progress? {
             UploadProgress::Complete => return Err(ErrorKind::UploadSessionGone.into()),
             UploadProgress::Incomplete { offset: actual } if actual < offset => {
@@ -777,16 +794,17 @@ impl Backend for TieredStorage {
             })
             .await?;
 
+        let lt_guard = self.acquire_long_term().await?;
         let progress = self
             .inner
             .long_term
             .put_chunk(&inner_session, offset, content_length, stream)
             .await?;
+        drop(lt_guard);
         if progress != UploadProgress::Complete {
             return Err(ErrorKind::UploadSessionGone.into());
         }
         guard.advance(ChangePhase::Written);
-        drop(lt_guard);
 
         let _high = self.acquire_high_volume(Priority::High).await?;
         let written = self
@@ -837,12 +855,10 @@ impl Backend for TieredStorage {
     async fn cancel_upload(&self, session: &Session) -> Result<()> {
         let tiered = TieredResumableToken::decode(&session.backend_token)?;
         let inner_session = tiered.into_inner_session(session);
-        let lt_guard = self.acquire_long_term().await?;
         let hv_guard = self.acquire_high_volume(Priority::Normal).await?;
         self.delete_upload_marker(&inner_session.object_id).await?;
         drop(hv_guard);
-        let result = self.inner.long_term.cancel_upload(&inner_session).await;
-        drop(lt_guard);
+        let result = self.cancel_long_term_upload(&inner_session).await;
         if let Err(error) = result {
             objectstore_log::warn!(!!&error, "Failed to cancel upload after deleting marker");
         }
@@ -1007,21 +1023,22 @@ impl Backend for TieredStorage {
         access_time: Timestamp,
     ) -> Result<SetExpiryResponse> {
         let hv_guard = self.acquire_high_volume(Priority::Normal).await?;
-        match self
+        let result = self
             .inner
             .high_volume
             .get_tiered_metadata(id, access_time)
-            .await?
-        {
+            .await?;
+        drop(hv_guard);
+        match result {
             TieredMetadata::NotFound => Ok(SetExpiryResponse::NotFound),
             TieredMetadata::Object(_) => {
+                let _hv_guard = self.acquire_high_volume(Priority::Normal).await?;
                 self.inner
                     .high_volume
                     .compare_and_update(id, None, TieredUpdate::SetExpiry(target), access_time)
                     .await
             }
             TieredMetadata::Tombstone(tombstone) => {
-                drop(hv_guard);
                 let lt_guard = self.acquire_long_term().await?;
                 // Extend LT first. Extending the redirect first could leave it
                 // alive after the blob failed to extend and was reclaimed.
@@ -1061,13 +1078,14 @@ impl Backend for TieredStorage {
             objectstore_metrics::timer!("delete.latency", usecase = id.usecase().to_string());
         self.tag_backend(&mut timer, &BackendChoice::HighVolume);
 
-        let _high = self.acquire_high_volume(Priority::Normal).await?;
-        if let Some(tombstone) = self
+        let hv_guard = self.acquire_high_volume(Priority::Normal).await?;
+        let result = self
             .inner
             .high_volume
             .delete_non_tombstone(id, access_time)
-            .await?
-        {
+            .await?;
+        drop(hv_guard);
+        if let Some(tombstone) = result {
             self.tag_backend(&mut timer, &BackendChoice::LongTerm);
 
             let mut guard = self
@@ -1080,6 +1098,7 @@ impl Backend for TieredStorage {
             guard.advance(ChangePhase::Written);
 
             // Remove the tombstone; the LT blob becomes unreachable at this point.
+            let hv_guard = self.acquire_high_volume(Priority::Normal).await?;
             let deleted = self
                 .inner
                 .high_volume
@@ -1091,6 +1110,7 @@ impl Backend for TieredStorage {
                 )
                 .await?;
 
+            drop(hv_guard);
             // Update guard and let it schedule cleanup in the background.
             guard.advance(ChangePhase::compare_and_write(deleted));
         }
