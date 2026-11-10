@@ -73,7 +73,7 @@ pub async fn from_config(
             let lt = from_leaf_config(*c.long_term, streams).await?;
             let log = Box::new(changelog::NoopChangeLog);
             let mut backend = tiered::TieredStorage::new(hv, lt, log);
-            if let Some(limits) = c.tiered_concurrency {
+            if let Some(limits) = c.concurrency {
                 backend = backend.with_concurrency(limits);
             }
             Box::new(backend)

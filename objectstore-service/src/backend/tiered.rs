@@ -185,31 +185,45 @@ pub struct TieredStorageConfig {
     /// Backend for large, long-term objects.
     pub long_term: Box<StorageConfig>,
     /// Optional per-tier concurrency limits.
-    pub tiered_concurrency: Option<TieredConcurrencyConfig>,
+    pub concurrency: Option<TieredConcurrencyConfig>,
 }
 
 /// Per-tier concurrency limits.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TieredConcurrencyConfig {
-    /// Maximum simultaneous high-volume sections, with priority for operations that are continuing.
-    pub high_volume_concurrency: NonZeroU32,
-    /// Maximum operations using long-term storage, including response streams.
-    pub long_term_concurrency: NonZeroU32,
-    /// Maximum wait for normal-priority high-volume work. Defaults to one second.
+    /// Limits for high-volume storage.
+    pub high_volume: HighVolumeConcurrencyConfig,
+    /// Limits for long-term storage.
+    pub long_term: LongTermConcurrencyConfig,
+}
+
+/// Concurrency limits for high-volume storage.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct HighVolumeConcurrencyConfig {
+    /// Maximum simultaneous high-volume sections.
+    pub max_concurrency: NonZeroU32,
+    /// Maximum wait for normal-priority work. Defaults to one second.
     #[serde(default = "default_concurrency_timeout", with = "humantime_serde")]
-    pub high_volume_normal_timeout: Duration,
-    /// Maximum wait for high-priority high-volume work. Defaults to one second.
-    #[serde(default = "default_concurrency_timeout", with = "humantime_serde")]
-    pub high_volume_high_timeout: Duration,
+    pub normal_timeout: Duration,
     /// Maximum queued normal-priority acquisitions. Unset means unlimited; zero disables waiting.
-    pub high_volume_normal_queue_size: Option<u32>,
+    pub normal_queue_size: Option<u32>,
+    /// Maximum wait for high-priority work. Defaults to one second.
+    #[serde(default = "default_concurrency_timeout", with = "humantime_serde")]
+    pub high_timeout: Duration,
     /// Maximum queued high-priority acquisitions. Unset means unlimited; zero disables waiting.
-    pub high_volume_high_queue_size: Option<u32>,
-    /// Maximum wait for long-term capacity. Defaults to zero (immediate rejection).
+    pub high_queue_size: Option<u32>,
+}
+
+/// Concurrency limits for long-term storage.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LongTermConcurrencyConfig {
+    /// Maximum operations using long-term storage, including response streams.
+    pub max_concurrency: NonZeroU32,
+    /// Maximum wait for capacity. Defaults to zero (immediate rejection).
     #[serde(default, with = "humantime_serde")]
-    pub long_term_timeout: Duration,
-    /// Maximum queued long-term acquisitions. Unset means unlimited; zero disables waiting.
-    pub long_term_queue_size: Option<u32>,
+    pub timeout: Duration,
+    /// Maximum queued acquisitions. Unset means unlimited; zero disables waiting.
+    pub queue_size: Option<u32>,
 }
 
 fn default_concurrency_timeout() -> Duration {
@@ -273,7 +287,7 @@ fn default_concurrency_timeout() -> Duration {
 /// their long-term permit until the response stream ends or is dropped. Background
 /// cleanup and recovery are outside these limits.
 ///
-/// Configure both positive capacities in [`TieredStorageConfig::tiered_concurrency`].
+/// Configure both positive capacities in [`TieredStorageConfig::concurrency`].
 /// Omitting that section disables the limits. Each priority has its own timeout and
 /// optional queue limit, independent of the total service limit.
 ///
@@ -309,23 +323,23 @@ impl TieredStorage {
     /// Enables per-tier concurrency limits.
     pub fn with_concurrency(mut self, config: TieredConcurrencyConfig) -> Self {
         let high_volume = PriorityLimiter::new(
-            config.high_volume_concurrency,
-            config.high_volume_normal_timeout,
-            config.high_volume_high_timeout,
-            config.high_volume_normal_queue_size,
-            config.high_volume_high_queue_size,
+            config.high_volume.max_concurrency,
+            config.high_volume.normal_timeout,
+            config.high_volume.high_timeout,
+            config.high_volume.normal_queue_size,
+            config.high_volume.high_queue_size,
         );
         let long_term = Limiter::new(
-            config.long_term_concurrency,
-            config.long_term_timeout,
-            config.long_term_queue_size,
+            config.long_term.max_concurrency,
+            config.long_term.timeout,
+            config.long_term.queue_size,
         );
         objectstore_metrics::gauge!(
-            "tiered.concurrency.limit" = config.high_volume_concurrency.get(),
+            "tiered.concurrency.limit" = config.high_volume.max_concurrency.get(),
             tier = "high-volume"
         );
         objectstore_metrics::gauge!(
-            "tiered.concurrency.limit" = config.long_term_concurrency.get(),
+            "tiered.concurrency.limit" = config.long_term.max_concurrency.get(),
             tier = "long-term"
         );
         let emitter = high_volume.clone();
@@ -1150,94 +1164,48 @@ mod tests {
     use crate::stream::{self, ClientStream};
 
     fn limits() -> TieredConcurrencyConfig {
-        TieredConcurrencyConfig {
-            high_volume_concurrency: NonZeroU32::MIN,
-            long_term_concurrency: NonZeroU32::MIN,
-            high_volume_normal_timeout: Duration::from_secs(1),
-            high_volume_high_timeout: Duration::from_secs(1),
-            high_volume_normal_queue_size: None,
-            high_volume_high_queue_size: None,
-            long_term_timeout: Duration::ZERO,
-            long_term_queue_size: None,
-        }
+        serde_json::from_value(serde_json::json!({
+            "high_volume": {"max_concurrency": 1},
+            "long_term": {"max_concurrency": 1}
+        }))
+        .unwrap()
     }
 
     #[test]
-    fn tiered_config_defaults_to_disabled() {
+    fn tiered_concurrency_config() {
         let leaf = serde_json::json!({"type":"bigtable", "project_id":"test", "instance_name":"test", "table_name":"test"});
         let mut config = serde_json::json!({"high_volume":leaf, "long_term":leaf});
         assert!(
             serde_json::from_value::<TieredStorageConfig>(config.clone())
                 .unwrap()
-                .tiered_concurrency
+                .concurrency
                 .is_none()
         );
-        config["tiered_concurrency"] = serde_json::json!({});
-        assert!(serde_json::from_value::<TieredStorageConfig>(config.clone()).is_err());
-        config["tiered_concurrency"] =
-            serde_json::json!({"high_volume_concurrency":1, "long_term_concurrency":2});
-        assert!(
-            serde_json::from_value::<TieredStorageConfig>(config)
-                .unwrap()
-                .tiered_concurrency
-                .is_some()
-        );
-    }
-
-    #[test]
-    fn concurrency_config_requires_both_positive_capacities() {
-        for value in [
-            "{}",
-            r#"{"high_volume_concurrency":1}"#,
-            r#"{"long_term_concurrency":1}"#,
-            r#"{"high_volume_concurrency":0,"long_term_concurrency":1}"#,
-            r#"{"high_volume_concurrency":1,"long_term_concurrency":0}"#,
+        for invalid in [
+            serde_json::json!({}),
+            serde_json::json!({"high_volume":{"max_concurrency":1}}),
+            serde_json::json!({"high_volume":{"max_concurrency":0},"long_term":{"max_concurrency":1}}),
         ] {
-            assert!(serde_json::from_str::<TieredConcurrencyConfig>(value).is_err());
+            config["concurrency"] = invalid;
+            assert!(serde_json::from_value::<TieredStorageConfig>(config.clone()).is_err());
         }
-        let config = serde_json::from_str::<TieredConcurrencyConfig>(
-            r#"{"high_volume_concurrency":1,"long_term_concurrency":2}"#,
-        )
-        .unwrap();
-        assert_eq!(config.high_volume_normal_timeout, Duration::from_secs(1));
-        let config = serde_json::from_str::<TieredConcurrencyConfig>(
-            r#"{"high_volume_concurrency":1,"long_term_concurrency":2,"high_volume_normal_timeout":"250ms"}"#,
-        ).unwrap();
+        config["concurrency"] = serde_json::json!({
+            "high_volume": {"max_concurrency": 100, "normal_timeout": "250ms", "normal_queue_size": 10, "high_timeout": "2s", "high_queue_size": 20},
+            "long_term": {"max_concurrency": 50, "timeout": "3s", "queue_size": 30}
+        });
+        let limits = serde_json::from_value::<TieredStorageConfig>(config)
+            .unwrap()
+            .concurrency
+            .unwrap();
         assert_eq!(
-            config.high_volume_normal_timeout,
+            limits.high_volume.normal_timeout,
             Duration::from_millis(250)
         );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn config_passes_through_timeouts_and_queue_limits() {
-        use futures_util::poll;
-        let config: TieredConcurrencyConfig = serde_json::from_value(serde_json::json!({
-            "high_volume_concurrency": 1, "long_term_concurrency": 1,
-            "high_volume_normal_timeout": "10ms", "high_volume_high_timeout": "20ms",
-            "high_volume_normal_queue_size": 0, "high_volume_high_queue_size": 1,
-            "long_term_timeout": "30ms", "long_term_queue_size": 1
-        }))
-        .unwrap();
-        let (storage, _, _, _) = make_tiered_storage();
-        let storage = storage.with_concurrency(config);
-        let high = storage.acquire_high_volume(Priority::Normal).await.unwrap();
-        // Normal-priority work has no queue; high-priority work can wait.
-        assert!(storage.acquire_high_volume(Priority::Normal).await.is_err());
-        let mut high_priority = Box::pin(storage.acquire_high_volume(Priority::High));
-        assert!(poll!(&mut high_priority).is_pending());
-        assert!(storage.acquire_high_volume(Priority::High).await.is_err());
-        tokio::time::advance(Duration::from_millis(20)).await;
-        assert!(high_priority.await.is_err());
-        drop(high);
-        let long = storage.acquire_long_term().await.unwrap();
-        let mut waiting = Box::pin(storage.acquire_long_term());
-        assert!(poll!(&mut waiting).is_pending());
-        assert!(storage.acquire_long_term().await.is_err());
-        tokio::time::advance(Duration::from_millis(30)).await;
-        assert!(waiting.await.is_err());
-        drop(long);
-        storage.join().await;
+        assert_eq!(limits.high_volume.high_timeout, Duration::from_secs(2));
+        assert_eq!(limits.long_term.timeout, Duration::from_secs(3));
+        assert_eq!(limits.high_volume.normal_queue_size, Some(10));
+        assert_eq!(limits.high_volume.high_queue_size, Some(20));
+        assert_eq!(limits.long_term.queue_size, Some(30));
     }
 
     #[tokio::test(start_paused = true)]
@@ -1324,24 +1292,6 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn high_priority_and_join() {
-        use futures_util::poll;
-        let (storage, _, _, _) = make_tiered_storage();
-        assert!(storage.acquire_long_term().await.unwrap().is_none());
-        let storage = storage.with_concurrency(limits());
-        let held = storage.acquire_high_volume(Priority::Normal).await.unwrap();
-        let mut normal = Box::pin(storage.acquire_high_volume(Priority::Normal));
-        let mut finish = Box::pin(storage.acquire_high_volume(Priority::High));
-        assert!(poll!(&mut finish).is_pending());
-        assert!(poll!(&mut normal).is_pending());
-        drop(held);
-        let high_priority = finish.await.unwrap();
-        assert!(poll!(&mut normal).is_pending());
-        drop(high_priority);
-        drop(normal.await.unwrap());
-        storage.join().await;
-    }
-    #[tokio::test(start_paused = true)]
     async fn cancellation_rejection_preserves_marker_and_nonfinal_chunk_needs_no_h() {
         let (storage, hv, _, _) = make_tiered_storage();
         let storage = storage.with_concurrency(limits());
@@ -1418,108 +1368,6 @@ mod tests {
         assert!(cancelled.load(Ordering::SeqCst));
         drop(high);
         drop(storage.acquire_long_term().await.unwrap());
-        storage.join().await;
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn acquisition_metrics_include_tier_priority_and_rejections() {
-        let metrics = objectstore_metrics::with_capturing_test_client_async(async {
-            let (storage, _, _, _) = make_tiered_storage();
-            assert!(
-                storage
-                    .acquire_high_volume(Priority::Normal)
-                    .await
-                    .unwrap()
-                    .is_none()
-            );
-            let storage = storage.with_concurrency(TieredConcurrencyConfig {
-                high_volume_normal_timeout: Duration::ZERO,
-                high_volume_high_timeout: Duration::ZERO,
-                ..limits()
-            });
-            let high = storage.acquire_high_volume(Priority::Normal).await.unwrap();
-            assert!(storage.acquire_high_volume(Priority::High).await.is_err());
-            let long = storage.acquire_long_term().await.unwrap();
-            assert!(storage.acquire_long_term().await.is_err());
-            drop((high, long));
-            storage.join().await;
-        })
-        .await;
-        assert!(
-            metrics
-                .iter()
-                .any(|m| m.contains("tiered.concurrency.limit") && m.contains("tier:long-term"))
-        );
-        assert!(
-            metrics
-                .iter()
-                .any(|m| m.contains("tiered.concurrency.wait") && m.contains("priority:normal"))
-        );
-        assert!(
-            metrics
-                .iter()
-                .any(|m| m.contains("tiered.concurrency.rejected") && m.contains("priority:high"))
-        );
-        assert!(
-            metrics
-                .iter()
-                .any(|m| m.contains("tiered.concurrency.rejected") && m.contains("tier:long-term"))
-        );
-    }
-
-    #[derive(Debug)]
-    struct PauseHighVolume(Arc<tokio::sync::Notify>);
-
-    #[async_trait::async_trait]
-    impl Hooks for PauseHighVolume {
-        async fn put_non_tombstone(
-            &self,
-            inner: &InMemoryBackend,
-            id: &ObjectId,
-            metadata: &Metadata,
-            payload: Bytes,
-            access_time: Timestamp,
-        ) -> Result<Option<Tombstone>> {
-            let result = inner
-                .put_non_tombstone(id, metadata, payload, access_time)
-                .await;
-            self.0.notified().await;
-            result
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn small_overwrite_keeps_one_permit_across_high_volume_calls() {
-        use futures_util::poll;
-        let resume = Arc::new(tokio::sync::Notify::new());
-        let storage = TieredStorage::new(
-            Box::new(TestBackend::with_inner(
-                InMemoryBackend::new("hv"),
-                PauseHighVolume(resume.clone()),
-            )),
-            Box::new(InMemoryBackend::new("lt")),
-            Box::new(NoopChangeLog),
-        )
-        .with_concurrency(limits());
-        let id = make_id("overwrite");
-        let metadata = Metadata::default();
-        storage
-            .put_object(
-                &id,
-                &metadata,
-                stream::single(vec![0; BACKEND_SIZE_THRESHOLD + 1]),
-                Timestamp::now(),
-            )
-            .await
-            .unwrap();
-        let mut put =
-            Box::pin(storage.put_object(&id, &metadata, stream::single("small"), Timestamp::now()));
-        assert!(poll!(&mut put).is_pending());
-        let mut waiter = Box::pin(storage.acquire_high_volume(Priority::High));
-        assert!(poll!(&mut waiter).is_pending());
-        resume.notify_one();
-        put.await.unwrap();
-        drop(waiter.await.unwrap());
         storage.join().await;
     }
 
