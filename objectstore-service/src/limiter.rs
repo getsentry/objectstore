@@ -3,7 +3,7 @@
 use std::future::Future;
 use std::num::NonZeroU32;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::task::Poll;
 use std::time::Duration;
 
@@ -40,15 +40,17 @@ impl Permit {
     }
 }
 
-/// Snapshot of permits in use by a simple limiter.
+/// Snapshot of permits in use and queued acquisitions for a simple limiter.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct LimiterStats {
     /// Permits currently in use.
     pub in_use: u32,
+    /// Acquisitions waiting for a permit.
+    pub queued: u32,
 }
 
 /// Shared interval loop for the metric emitters.
-async fn run_emitter<S, F, Fut>(mut snapshot: impl FnMut() -> S, mut emit: F)
+pub(crate) async fn run_emitter<S, F, Fut>(mut snapshot: impl FnMut() -> S, mut emit: F)
 where
     F: FnMut(S) -> Fut,
     Fut: Future<Output = ()>,
@@ -65,6 +67,7 @@ where
 pub struct Limiter {
     semaphore: Arc<Semaphore>,
     queue: Option<Arc<Semaphore>>,
+    queued: Arc<AtomicU32>,
     capacity: u32,
     timeout: Duration,
 }
@@ -76,9 +79,37 @@ impl Limiter {
         Self {
             semaphore: Arc::new(Semaphore::new(capacity as usize)),
             queue: max_queue_size.map(|size| Arc::new(Semaphore::new(size as usize))),
+            queued: Arc::new(AtomicU32::new(0)),
             capacity,
             timeout,
         }
+    }
+
+    /// Sets the wait timeout for this limiter handle.
+    ///
+    /// Existing clones keep their timeout and share execution capacity with this handle.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// Sets a separate queue limit for this limiter handle, sharing execution capacity.
+    ///
+    /// Existing clones keep their queue. `None` allows an unbounded queue.
+    pub fn with_queue(mut self, max_queue_size: Option<u32>) -> Self {
+        self.queue = max_queue_size.map(|size| Arc::new(Semaphore::new(size as usize)));
+        self.queued = Arc::new(AtomicU32::new(0));
+        self
+    }
+
+    /// Acquires capacity immediately, or returns [`ErrorKind::AtCapacity`].
+    pub fn try_acquire(&self) -> Result<Permit> {
+        let permit = self
+            .semaphore
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| ErrorKind::AtCapacity)?;
+        Ok(Permit { _permit: permit })
     }
 
     /// Acquires capacity within the configured timeout, preserving FIFO order.
@@ -86,8 +117,8 @@ impl Limiter {
     /// Returns [`ErrorKind::AtCapacity`] when the queue is full or the wait times out.
     /// Dropping the future releases its queue slot and any assigned permit.
     pub async fn acquire(&self) -> Result<Permit> {
-        if let Ok(permit) = self.semaphore.clone().try_acquire_owned() {
-            return Ok(Permit { _permit: permit });
+        if let Ok(permit) = self.try_acquire() {
+            return Ok(permit);
         }
         if self.timeout.is_zero() {
             return Err(ErrorKind::AtCapacity.into());
@@ -98,6 +129,8 @@ impl Limiter {
             .map(|queue| queue.try_acquire())
             .transpose()
             .map_err(|_| ErrorKind::AtCapacity)?;
+        self.queued.fetch_add(1, Ordering::Relaxed);
+        let _waiting = QueuedGuard(&self.queued);
         let permit = tokio::time::timeout(self.timeout, self.semaphore.clone().acquire_owned())
             .await
             .map_err(|_| ErrorKind::AtCapacity)?
@@ -105,10 +138,11 @@ impl Limiter {
         Ok(Permit { _permit: permit })
     }
 
-    /// Returns the current number of permits in use.
+    /// Returns the current number of permits in use and acquisitions in this handle's queue.
     pub fn stats(&self) -> LimiterStats {
         LimiterStats {
             in_use: self.capacity - self.semaphore.available_permits() as u32,
+            queued: self.queued.load(Ordering::Relaxed),
         }
     }
 
@@ -119,6 +153,15 @@ impl Limiter {
         Fut: Future<Output = ()>,
     {
         run_emitter(|| self.stats(), emit).await;
+    }
+}
+
+/// Removes an acquisition from the queue count on completion, timeout, or cancellation.
+struct QueuedGuard<'a>(&'a AtomicU32);
+
+impl Drop for QueuedGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -440,6 +483,7 @@ mod tests {
         for max_queue_size in [None, Some(0), Some(1)] {
             let limiter = Limiter::new(NonZeroU32::MIN, TIMEOUT, max_queue_size);
             let held = limiter.acquire().await.unwrap();
+            assert_eq!(limiter.stats().queued, 0);
             let before = tokio::time::Instant::now();
             let mut waiting = Box::pin(limiter.acquire());
             if max_queue_size == Some(0) {
@@ -449,6 +493,7 @@ mod tests {
                 continue;
             }
             assert!(poll!(&mut waiting).is_pending());
+            assert_eq!(limiter.stats().queued, 1);
             if max_queue_size == Some(1) {
                 assert_eq!(
                     limiter.acquire().await.unwrap_err().kind(),
@@ -458,17 +503,61 @@ mod tests {
             }
             // Cancellation must free the queue slot for another waiter.
             drop(waiting);
+            assert_eq!(limiter.stats().queued, 0);
             let mut timed_out = Box::pin(limiter.acquire());
             assert!(poll!(&mut timed_out).is_pending());
             tokio::time::advance(TIMEOUT).await;
             assert_eq!(timed_out.await.unwrap_err().kind(), ErrorKind::AtCapacity);
+            assert_eq!(limiter.stats().queued, 0);
             // A timeout must also free the queue slot.
             let mut next = Box::pin(limiter.acquire());
             assert!(poll!(&mut next).is_pending());
             drop(held);
             drop(next.await.unwrap());
             assert_eq!(limiter.stats().in_use, 0);
+            assert_eq!(limiter.stats().queued, 0);
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn queue_handles_share_capacity_with_separate_limits_and_counts() {
+        let bounded = Limiter::new(NonZeroU32::MIN, TIMEOUT, Some(1));
+        let unbounded = bounded.clone().with_queue(None);
+        let immediate = bounded.clone().with_timeout(Duration::ZERO);
+        let held = bounded.try_acquire().unwrap();
+        let mut bounded_wait = Box::pin(bounded.acquire());
+        let mut unbounded_wait = Box::pin(unbounded.acquire());
+        assert!(poll!(&mut bounded_wait).is_pending());
+        assert!(poll!(&mut unbounded_wait).is_pending());
+        assert_eq!(bounded.stats().queued, 1);
+        assert_eq!(unbounded.stats().queued, 1);
+        assert_eq!(
+            bounded.acquire().await.unwrap_err().kind(),
+            ErrorKind::AtCapacity
+        );
+        assert_eq!(
+            unbounded.try_acquire().unwrap_err().kind(),
+            ErrorKind::AtCapacity
+        );
+        let before = tokio::time::Instant::now();
+        assert_eq!(
+            immediate.acquire().await.unwrap_err().kind(),
+            ErrorKind::AtCapacity
+        );
+        assert_eq!(tokio::time::Instant::now(), before);
+
+        drop(held);
+        // A new immediate acquisition must not bypass either queued handle.
+        assert!(unbounded.try_acquire().is_err());
+        let held = bounded_wait.await.unwrap();
+        assert_eq!(bounded.stats().queued, 0);
+        assert!(poll!(&mut unbounded_wait).is_pending());
+        drop(held);
+        let held = unbounded_wait.await.unwrap();
+        assert_eq!(bounded.stats().in_use, 1);
+        assert_eq!(unbounded.stats().queued, 0);
+        drop(held);
+        assert_eq!(bounded.stats(), LimiterStats::default());
     }
 
     fn priority_limiter(capacity: u32) -> PriorityLimiter {

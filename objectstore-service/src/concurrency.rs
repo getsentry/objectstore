@@ -1,26 +1,25 @@
 //! Concurrency limiter for backend operations.
 //!
 //! [`ConcurrencyLimiter`] caps the number of in-flight backend operations
-//! using a tokio semaphore. Each acquired [`ConcurrencyPermit`] notifies
-//! waiters on drop, allowing [`ConcurrencyLimiter::wait_all`] to resolve once
-//! all permits have been returned.
+//! using the shared FIFO [`Limiter`] primitive. Each acquired [`ConcurrencyPermit`]
+//! notifies waiters on drop, allowing [`ConcurrencyLimiter::wait_all`] to resolve
+//! once all permits have been returned.
 //!
 //! [`run_metered`] runs an isolated task and waits for its result, while
 //! [`spawn_metered`] starts the same task without waiting. Both provide panic
 //! recovery and `service.task.*` metric emission.
 
 use std::future::Future;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::FutureExt;
 use sentry::{Hub, SentryFutureExt, TransactionContext};
-use tokio::sync::{AcquireError, Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::Notify;
 
 use crate::error::{Error, ErrorKind, Panic, Result};
-
-/// Interval for the periodic metrics emitter.
-const EMITTER_INTERVAL: Duration = Duration::from_secs(1);
+use crate::limiter::{Limiter, Permit};
 
 /// Snapshot of concurrency limiter state.
 ///
@@ -43,16 +42,17 @@ pub struct Stats {
 /// [`acquire_bulk`](Self::acquire_bulk) and automatically returned when
 /// the [`ConcurrencyPermit`] is dropped.
 ///
-/// Bulk operations use a separate budget semaphore that limits how many
+/// Bulk operations use a separate budget limiter that limits how many
 /// execution slots they may occupy. This is intended as a safe operating
 /// point — below this level there should be little-to-no performance
 /// degradation, leaving room for more tasks to be admitted via the queue
 /// before rejection is necessary.
 #[derive(Clone, Debug)]
 pub struct ConcurrencyLimiter {
-    tasks: Arc<Semaphore>,
-    queue: Arc<Semaphore>,
-    bulk: Arc<Semaphore>,
+    tasks: Option<Limiter>,
+    // Shares execution capacity with `tasks`, with an unbounded queue for bulk operations.
+    bulk_tasks: Option<Limiter>,
+    bulk: Limiter,
     tasks_total: u32,
     queue_total: u32,
     bulk_total: u32,
@@ -69,14 +69,18 @@ impl ConcurrencyLimiter {
     /// The bulk budget defaults to 100% of `max` (no restriction); use
     /// [`with_bulk`](Self::with_bulk) to set a safe operating point for bulk traffic.
     pub fn new(max: u32) -> Self {
+        let timeout = Duration::from_secs(1);
+        let capacity = NonZeroU32::new(max);
+        let tasks = capacity.map(|capacity| Limiter::new(capacity, timeout, Some(0)));
+        let bulk_tasks = tasks.clone().map(|tasks| tasks.with_queue(None));
         Self {
-            tasks: Arc::new(Semaphore::new(max as usize)),
-            queue: Arc::new(Semaphore::new(0)),
-            bulk: Arc::new(Semaphore::new(max as usize)),
+            tasks,
+            bulk_tasks,
+            bulk: Limiter::new(capacity.unwrap_or(NonZeroU32::MIN), timeout, None),
             tasks_total: max,
             queue_total: 0,
             bulk_total: max,
-            timeout: Duration::from_secs(1),
+            timeout,
             released: Arc::new(Notify::new()),
         }
     }
@@ -87,7 +91,7 @@ impl ConcurrencyLimiter {
     /// waiting for a permit. Callers beyond that are rejected immediately.
     pub fn with_queue(mut self, size: u32) -> Self {
         self.queue_total = size;
-        self.queue = Arc::new(Semaphore::new(size as usize));
+        self.tasks = self.tasks.map(|tasks| tasks.with_queue(Some(size)));
         self
     }
 
@@ -95,9 +99,12 @@ impl ConcurrencyLimiter {
     ///
     /// Applies to both [`acquire`](Self::acquire) (when parked in the
     /// queue) and [`acquire_bulk`](Self::acquire_bulk) (waiting for the
-    /// bulk and execution semaphores). Defaults to 1 second.
+    /// bulk and execution limiters). Defaults to 1 second.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self.tasks = self.tasks.map(|tasks| tasks.with_timeout(timeout));
+        self.bulk_tasks = self.bulk_tasks.map(|tasks| tasks.with_timeout(timeout));
+        self.bulk = self.bulk.with_timeout(timeout);
         self
     }
 
@@ -112,7 +119,11 @@ impl ConcurrencyLimiter {
     pub fn with_bulk(mut self, percent: u32) -> Self {
         let clamped = percent.min(100);
         self.bulk_total = (self.tasks_total * clamped).div_ceil(100).max(1);
-        self.bulk = Arc::new(Semaphore::new(self.bulk_total as usize));
+        self.bulk = Limiter::new(
+            NonZeroU32::new(self.bulk_total).unwrap(),
+            self.timeout,
+            None,
+        );
         self
     }
 
@@ -123,35 +134,9 @@ impl ConcurrencyLimiter {
     /// depth) and waits up to the configured timeout. Returns
     /// [`ErrorKind::AtCapacity`] if the queue is full or on timeout.
     pub async fn acquire(&self) -> Result<ConcurrencyPermit> {
-        if self.tasks_total == 0 {
-            return Err(ErrorKind::AtCapacity.into());
-        }
-
-        // Fast path: Instantly grab a free permit without parking.
-        if let Ok(task_permit) = self.tasks.clone().try_acquire_owned() {
-            return Ok(ConcurrencyPermit {
-                task_permit: Some(task_permit),
-                bulk_permit: None,
-                released: Arc::clone(&self.released),
-            });
-        }
-
-        // Slow path: acquire a temporary queue ticket to bound concurrent
-        // waiters. Released in this scope when the permit is constructed.
-        let _ticket = self
-            .queue
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| ErrorKind::AtCapacity)?;
-
-        let acquire = self.tasks.clone().acquire_owned();
-        let task_permit = tokio::time::timeout(self.timeout, acquire)
-            .await
-            .map_err(|_| ErrorKind::AtCapacity)?
-            .map_err(|_| ErrorKind::AtCapacity)?;
-
+        let tasks = self.tasks.as_ref().ok_or(ErrorKind::AtCapacity)?;
         Ok(ConcurrencyPermit {
-            task_permit: Some(task_permit),
+            task_permit: Some(tasks.acquire().await?),
             bulk_permit: None,
             released: Arc::clone(&self.released),
         })
@@ -161,14 +146,9 @@ impl ConcurrencyLimiter {
     ///
     /// Returns [`ErrorKind::AtCapacity`] when no permits are available.
     pub fn try_acquire(&self) -> Result<ConcurrencyPermit> {
-        let task_permit = self
-            .tasks
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| ErrorKind::AtCapacity)?;
-
+        let tasks = self.tasks.as_ref().ok_or(ErrorKind::AtCapacity)?;
         Ok(ConcurrencyPermit {
-            task_permit: Some(task_permit),
+            task_permit: Some(tasks.try_acquire()?),
             bulk_permit: None,
             released: Arc::clone(&self.released),
         })
@@ -178,29 +158,22 @@ impl ConcurrencyLimiter {
     ///
     /// Bulk operations are bounded by the bulk budget — a safe operating
     /// point below which there is little-to-no performance degradation.
-    /// Both the bulk semaphore and the inner execution semaphore are
+    /// Both the bulk limiter and the shared execution limiter are
     /// acquired under a single timeout deadline configured via
     /// [`with_timeout`](Self::with_timeout).
     ///
     /// Returns [`ErrorKind::AtCapacity`] on timeout or when `max` is zero.
     pub async fn acquire_bulk(&self) -> Result<ConcurrencyPermit> {
-        if self.tasks_total == 0 {
-            return Err(ErrorKind::AtCapacity.into());
-        }
-
-        let bulk_sem = self.bulk.clone();
-        let tasks_sem = self.tasks.clone();
-
-        let acquire = async move {
-            let bulk_permit = bulk_sem.acquire_owned().await?;
-            let task_permit = tasks_sem.acquire_owned().await?;
-            Ok((task_permit, bulk_permit))
+        let tasks = self.bulk_tasks.as_ref().ok_or(ErrorKind::AtCapacity)?;
+        let acquire = async {
+            let bulk_permit = self.bulk.acquire().await?;
+            let task_permit = tasks.acquire().await?;
+            Ok::<_, Error>((task_permit, bulk_permit))
         };
 
         let (task_permit, bulk_permit) = tokio::time::timeout(self.timeout, acquire)
             .await
-            .map_err(|_| ErrorKind::AtCapacity)?
-            .map_err(|_: AcquireError| ErrorKind::AtCapacity)?;
+            .map_err(|_| ErrorKind::AtCapacity)??;
 
         Ok(ConcurrencyPermit {
             task_permit: Some(task_permit),
@@ -211,12 +184,12 @@ impl ConcurrencyLimiter {
 
     /// Returns the number of permits currently available.
     pub fn available_permits(&self) -> u32 {
-        u32::try_from(self.tasks.available_permits()).unwrap_or(self.tasks_total)
+        self.tasks_total - self.used_permits()
     }
 
     /// Returns the number of permits currently held.
     pub fn used_permits(&self) -> u32 {
-        self.tasks_total - self.available_permits()
+        self.tasks.as_ref().map_or(0, |tasks| tasks.stats().in_use)
     }
 
     /// Returns the total number of permits.
@@ -226,8 +199,7 @@ impl ConcurrencyLimiter {
 
     /// Returns the number of callers currently waiting in the queue.
     pub fn queued_permits(&self) -> u32 {
-        let available = u32::try_from(self.queue.available_permits()).unwrap_or(self.queue_total);
-        self.queue_total - available
+        self.tasks.as_ref().map_or(0, |tasks| tasks.stats().queued)
     }
 
     /// Returns the configured queue capacity.
@@ -237,8 +209,7 @@ impl ConcurrencyLimiter {
 
     /// Returns the number of bulk permits currently held.
     pub fn used_bulk_permits(&self) -> u32 {
-        let available = u32::try_from(self.bulk.available_permits()).unwrap_or(self.bulk_total);
-        self.bulk_total - available
+        self.bulk.stats().in_use
     }
 
     /// Returns the bulk concurrency budget.
@@ -271,16 +242,12 @@ impl ConcurrencyLimiter {
     ///
     /// This future runs forever and is intended to be spawned as a background
     /// task alongside the service.
-    pub async fn run_emitter<F, Fut>(&self, mut emit: F)
+    pub async fn run_emitter<F, Fut>(&self, emit: F)
     where
         F: FnMut(Stats) -> Fut,
         Fut: Future<Output = ()>,
     {
-        let mut ticker = tokio::time::interval(EMITTER_INTERVAL);
-        loop {
-            ticker.tick().await;
-            emit(self.stats()).await;
-        }
+        crate::limiter::run_emitter(|| self.stats(), emit).await;
     }
 }
 
@@ -290,10 +257,10 @@ impl ConcurrencyLimiter {
 /// notifies any task waiting in [`ConcurrencyLimiter::wait_all`].
 ///
 /// The execution permit drops before the bulk permit so that a waiter
-/// blocked on the task semaphore sees the freed slot immediately.
+/// blocked on the execution limiter sees the freed slot immediately.
 pub struct ConcurrencyPermit {
-    task_permit: Option<OwnedSemaphorePermit>,
-    bulk_permit: Option<OwnedSemaphorePermit>,
+    task_permit: Option<Permit>,
+    bulk_permit: Option<Permit>,
     released: Arc<Notify>,
 }
 
@@ -493,7 +460,7 @@ mod tests {
 
         tokio::select! {
             _ = emitter => unreachable!("emitter runs forever"),
-            _ = tokio::time::sleep(EMITTER_INTERVAL) => {}
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {}
         }
 
         assert_eq!(emitted_in_use.load(Ordering::Relaxed), 1);
@@ -701,7 +668,7 @@ mod tests {
 
         tokio::select! {
             _ = emitter => unreachable!("emitter runs forever"),
-            _ = tokio::time::sleep(EMITTER_INTERVAL) => {}
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {}
         }
 
         assert_eq!(emitted_in_use.load(Ordering::Relaxed), 1);
@@ -790,18 +757,29 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn bulk_timeout_spans_both_waits() {
-        let limiter = ConcurrencyLimiter::new(1);
+        let timeout = Duration::from_secs(1);
+        let limiter = ConcurrencyLimiter::new(2)
+            .with_bulk(50)
+            .with_timeout(timeout);
+        let bulk = limiter.acquire_bulk().await.unwrap();
+        let _normal = limiter.acquire().await.unwrap();
+        let mut waiting = Box::pin(limiter.acquire_bulk());
+        assert!(futures::poll!(&mut waiting).is_pending());
 
-        let _held = limiter.acquire().await.unwrap();
+        tokio::time::advance(timeout / 2).await;
+        drop(bulk);
+        // Fill the execution slot before the bulk waiter can acquire it.
+        let _replacement = limiter.try_acquire().unwrap();
+        assert!(futures::poll!(&mut waiting).is_pending());
+        assert_eq!(limiter.used_bulk_permits(), 1);
+        // Bulk waits do not consume the normal request queue.
+        assert_eq!(limiter.queued_permits(), 0);
 
-        let limiter2 = limiter.clone();
-        let waiter = tokio::spawn(async move { limiter2.acquire_bulk().await });
-
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
-        let result = waiter.await.unwrap();
+        tokio::time::advance(timeout / 2).await;
+        let result = waiting.await;
         assert!(result.is_err_and(|error| error.kind() == ErrorKind::AtCapacity));
         assert_eq!(limiter.used_bulk_permits(), 0);
+        assert_eq!(limiter.used_permits(), 2);
     }
 
     #[tokio::test(start_paused = true)]
