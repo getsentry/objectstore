@@ -65,13 +65,19 @@ Controls the mix of operations. Interpretation depends on the mode:
 
 ### Weighted (default)
 
+Also accepted as `fixed-concurrency`.
+
 Runs at maximum speed with fixed concurrency. Each operation is randomly
 selected based on the `actions` weights. Good for saturating the server.
 
 ### Throughput
 
-Maintains a fixed operations-per-second rate derived from `actions` values.
-Useful for simulating steady-state production traffic.
+Also accepted as `fixed-rate`.
+
+Targets an operations-per-second rate derived from `actions` values, with a
+maximum of 100 concurrent operations per workload. The `concurrency` setting
+does not apply to this mode. If operations slow down enough to reach the cap,
+the workload can fall below the target rate.
 
 ### Batch
 

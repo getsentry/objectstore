@@ -21,11 +21,13 @@ pub enum WorkloadMode {
     ///
     /// Actions are used to determine the distribution of writes, reads and deletes.
     #[default]
+    #[serde(alias = "fixed-concurrency")]
     Weighted,
 
-    /// The workload runs with fixed ops per second.
+    /// The workload targets fixed ops per second, capped at 100 concurrent operations.
     ///
     /// Actions are used to determine the ops per second for each operation.
+    #[serde(alias = "fixed-rate")]
     Throughput,
 
     /// The workload sends batch requests containing multiple write operations each.
