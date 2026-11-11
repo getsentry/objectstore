@@ -5,10 +5,14 @@ cd "$(dirname "$0")/.."
 
 BINARY=${1:-objectstore}
 DEBUG_IMAGE=${DEBUG_IMAGE:-false}
+BUILD_ENV=(-e "CARGO_PROFILE_RELEASE_DEBUG=${CARGO_PROFILE_RELEASE_DEBUG:-false}")
 case "$BINARY" in
 objectstore)
     PACKAGE="objectstore-server"
     FEATURES="profiling"
+    # A linked worktree's Git metadata may be outside the container mount.
+    REVISION=$(git rev-parse --verify HEAD)
+    BUILD_ENV+=(-e "OBJECTSTORE_BUILD_REVISION=$REVISION")
     ;;
 *)
     PACKAGE="$BINARY"
@@ -30,7 +34,7 @@ docker build \
 
 docker run --rm \
     --platform linux/arm64 \
-    -e CARGO_PROFILE_RELEASE_DEBUG="${CARGO_PROFILE_RELEASE_DEBUG:-false}" \
+    "${BUILD_ENV[@]}" \
     -v "$(pwd)":/workspace \
     -v "$HOME/.cargo/registry":/usr/local/cargo/registry \
     -v "$HOME/.cargo/git":/usr/local/cargo/git \
