@@ -3057,6 +3057,7 @@ dependencies = [
  "papaya",
  "percent-encoding",
  "quick-xml",
+ "rand 0.10.4",
  "regex",
  "reqwest 0.13.5",
  "ring",
