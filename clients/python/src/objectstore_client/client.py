@@ -30,8 +30,10 @@ from objectstore_client.metadata import (
     Compression,
     ExpirationPolicy,
     Metadata,
+    encode_metadata_key,
     format_expiration,
     format_timedelta,
+    normalize_metadata_key,
 )
 from objectstore_client.metrics import (
     MetricsBackend,
@@ -349,7 +351,11 @@ class Session:
         origin: str | None = None,
         filename: str | None = None,
     ) -> dict[str, str]:
-        """Build upload headers with the given compression and usecase expiration."""
+        """Build upload headers with the given compression and usecase expiration.
+
+        Raises `ValueError` if a custom metadata key is invalid (see
+        `normalize_metadata_key`), before anything is sent.
+        """
         headers = self._make_headers()
         if compression and compression != "none":
             headers["Content-Encoding"] = compression
@@ -364,7 +370,8 @@ class Session:
             headers[HEADER_FILENAME] = utils.encode_header_value(filename)
         if metadata:
             for k, v in metadata.items():
-                headers[f"{HEADER_META_PREFIX}{k}"] = utils.encode_header_value(v)
+                name = encode_metadata_key(normalize_metadata_key(k))
+                headers[f"{HEADER_META_PREFIX}{name}"] = utils.encode_header_value(v)
         return headers
 
     def _base_url(self) -> str:
@@ -409,6 +416,10 @@ class Session:
         If `contents` is already compressed, pass the algorithm as `precompressed`
         instead. The payload is then uploaded verbatim and the algorithm is recorded
         in the object's metadata, so downloads decompress it transparently.
+
+        Custom `metadata` keys are lowercased and must consist of `a-z`, `0-9` and
+        `_ - | ~ % $ # + . :`; any other key raises `ValueError` before a request is
+        sent.
 
         You can use the utility function `objectstore_client.utils.guess_mime_type`
         to attempt to guess a `content_type` based on magic bytes.

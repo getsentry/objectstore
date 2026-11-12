@@ -1,14 +1,19 @@
+import re
 from datetime import timedelta
 
 import pytest
 from objectstore_client.metadata import (
+    Metadata,
     TimeToIdle,
     TimeToLive,
+    encode_metadata_key,
     format_expiration,
     format_timedelta,
+    normalize_metadata_key,
     parse_expiration,
     parse_timedelta,
 )
+from objectstore_client.utils import decode_header_value
 
 # Durations and their wire format, used in both directions.
 ROUND_TRIP_CASES = [
@@ -69,3 +74,71 @@ def test_parse_expiration() -> None:
     assert parse_expiration("ttl:400d") == TimeToLive(timedelta(days=400))
     assert parse_expiration("tti:1h") == TimeToIdle(timedelta(hours=1))
     assert parse_expiration("manual") is None
+
+
+ALLOWED_KEY_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789_-|~%$#+.:"
+
+
+@pytest.mark.parametrize("char", ALLOWED_KEY_CHARS)
+def test_normalize_metadata_key_allows_each_character(char: str) -> None:
+    assert normalize_metadata_key(f"a{char}b") == f"a{char}b"
+
+
+def test_normalize_metadata_key_lowercases_ascii_letters() -> None:
+    assert normalize_metadata_key("Source-ID") == "source-id"
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["", "a b", "a/b", "a@b", "a=b", "a,b", "a;b", "a*b", "a\tb", "a\nb", "ä", "kéy"],
+)
+def test_normalize_metadata_key_rejects_invalid_keys(key: str) -> None:
+    with pytest.raises(ValueError, match="metadata key"):
+        normalize_metadata_key(key)
+
+
+def test_normalize_metadata_key_error_names_the_key() -> None:
+    with pytest.raises(ValueError, match=re.escape(repr("bad key"))):
+        normalize_metadata_key("bad key")
+
+
+@pytest.mark.parametrize(
+    ("key", "encoded"),
+    [
+        ("plain", "plain"),
+        ("a%b", "a%25b"),
+        ("a:b", "a%3ab"),
+        ("a%3ab", "a%253ab"),
+        ("%:", "%25%3a"),
+    ],
+)
+def test_metadata_key_header_name_round_trip(key: str, encoded: str) -> None:
+    assert encode_metadata_key(key) == encoded
+    assert decode_header_value(encoded) == key
+
+
+@pytest.mark.parametrize(
+    ("name", "key"),
+    [
+        ("%61", "a"),
+        ("%3a", ":"),
+        ("%3A", ":"),
+        ("%253a", "%3a"),
+        ("%zz", "%zz"),
+        ("a%", "a%"),
+    ],
+)
+def test_key_header_name_decoding_accepts_any_escape(name: str, key: str) -> None:
+    assert decode_header_value(name) == key
+
+
+def test_key_header_name_decoding_rejects_invalid_utf8() -> None:
+    with pytest.raises(UnicodeDecodeError):
+        decode_header_value("%ff")
+
+
+def test_from_headers_decodes_custom_key_names() -> None:
+    metadata = Metadata.from_headers(
+        {"x-snme-a%3ab": "1", "x-snme-c%25d": "2", "x-snme-e%41": "3"}
+    )
+    assert metadata.custom == {"a:b": "1", "c%d": "2", "eA": "3"}

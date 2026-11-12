@@ -166,3 +166,39 @@ def test_put_downloaded_compressed_stream(
 
     retrieved.payload.close()
     close_download.assert_called_once_with()
+
+
+@pytest.mark.parametrize("threshold", [4, "none"])
+def test_put_rejects_invalid_metadata_key_before_request(
+    session: Session, monkeypatch: pytest.MonkeyPatch, threshold: int | str
+) -> None:
+    request = Mock()
+    monkeypatch.setattr(session._pool, "request", request)
+    monkeypatch.setattr(session._pool, "_make_request", request)
+
+    with pytest.raises(ValueError, match="bad key"):
+        session.put(
+            b"payload",
+            metadata={"ok": "1", "bad key": "2"},
+            resumable_threshold_bytes=threshold,  # type: ignore[arg-type]
+        )
+
+    request.assert_not_called()
+
+
+def test_put_sends_normalized_and_encoded_metadata_headers(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = Mock(return_value=Mock(status=200, json=Mock(return_value={"key": "k"})))
+    monkeypatch.setattr(session._pool, "request", request)
+
+    session.put(
+        b"payload",
+        metadata={"Source": "x", "a:b": "y", "c%d": "z"},
+        resumable_threshold_bytes="none",
+    )
+
+    headers = request.call_args.kwargs["headers"]
+    assert headers["x-snme-source"] == "x"
+    assert headers["x-snme-a%3ab"] == "y"
+    assert headers["x-snme-c%25d"] == "z"
