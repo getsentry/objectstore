@@ -24,7 +24,7 @@ pub const HEADER_BATCH_OPERATION_INDEX: &str = "x-sn-batch-operation-index";
 /// survive the transport.
 pub const HEADER_BATCH_OPERATION_KEY: &str = "x-sn-batch-operation-key";
 
-/// Operation kind for this batch part: `"get"`, `"insert"`, or `"delete"`.
+/// Operation kind for this batch part: `"get"`, `"head"`, `"insert"`, or `"delete"`.
 pub const HEADER_BATCH_OPERATION_KIND: &str = "x-sn-batch-operation-kind";
 
 /// Suffix that marks a payload part in the JSON layout.

@@ -1,3 +1,9 @@
+//! The batch endpoint, which executes many object operations in one multipart request.
+//!
+//! The response uses the layout of the request (see [`BatchFormat`]) and streams one result per
+//! operation in completion order. In the JSON layout, each result is a JSON part named by the
+//! operation index, followed by a payload part for a successful get.
+
 use std::sync::Arc;
 
 use axum::Router;
@@ -12,17 +18,20 @@ use http::{HeaderMap, HeaderValue, StatusCode};
 use objectstore_service::id::{ObjectContext, ObjectKey};
 use objectstore_service::streaming::{OpResponse, Operation};
 use objectstore_types::headers;
+use objectstore_types::metadata::{DEFAULT_CONTENT_TYPE, Metadata, ReadMetadata};
+use serde::Serialize;
 
 use crate::auth::AuthAwareService;
 use crate::batch::{
     HEADER_BATCH_OPERATION_INDEX, HEADER_BATCH_OPERATION_KEY, HEADER_BATCH_OPERATION_KIND,
+    payload_part_name,
 };
 use crate::endpoints::common::{ApiError, ApiErrorResponse};
 use crate::extractors::Xt;
-use crate::extractors::batch::{BatchError, BatchOperationStream};
+use crate::extractors::batch::{BatchError, BatchFormat, BatchOperationStream};
 use crate::extractors::request_time::RequestTime;
 use crate::multipart::{IntoMultipartResponse, Part};
-use crate::state::ServiceState;
+use crate::state::{ServiceState, Services};
 
 const MAX_BODY_SIZE: usize = 1024 * 1024 * 1024; // 1 GB
 const HEADER_BATCH_OPERATION_STATUS: &str = "x-sn-batch-operation-status";
@@ -66,9 +75,10 @@ async fn batch(
     requests: BatchOperationStream,
 ) -> Response {
     let batch = state.service.stream();
+    let BatchOperationStream { format, operations } = requests;
 
     // Step 1: parse multipart fields → (idx, Result<Operation, ApiError>)
-    let parsed = requests.operations.map(|r| r.map_err(ApiError::from)).enumerate();
+    let parsed = operations.map(|r| r.map_err(ApiError::from)).enumerate();
 
     // Step 2: rate-limit check
     let rate_limited = validate(parsed, {
@@ -112,28 +122,187 @@ async fn batch(
         }
     });
 
-    // Step 6: execute concurrently, then convert each result to a multipart Part
-    let state_ref = Arc::clone(&state);
-    let context_ref = context.clone();
-    let responses = batch
-        .execute(context, metered, access_time)
-        .then(move |(idx, result)| {
-            let state = Arc::clone(&state_ref);
-            let context = context_ref.clone();
-            async move { convert_to_part(idx, result, &state, &context).await }
-        });
-
-    responses.into_multipart_response(rand::random())
+    // Step 6: execute concurrently, then convert each result to multipart parts
+    let results = batch.execute(context.clone(), metered, access_time);
+    match format {
+        BatchFormat::Headers => results
+            .then(move |(idx, result)| {
+                let state = Arc::clone(&state);
+                let context = context.clone();
+                async move { convert_to_part(idx, result, &state, &context).await }
+            })
+            .into_multipart_response(rand::random()),
+        BatchFormat::Json => results
+            .then(move |(idx, result)| {
+                let state = Arc::clone(&state);
+                let context = context.clone();
+                async move { convert_to_json_parts(idx, result, &state, &context).await }
+            })
+            .flat_map(futures::stream::iter)
+            .into_multipart_response(rand::random()),
+    }
 }
 
-/// Converts a single operation result to a multipart [`Part`].
+/// The JSON body of a result part in the JSON layout.
+#[derive(Debug, Default, Serialize)]
+struct OperationResult {
+    /// The HTTP status code of the operation.
+    status: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kind: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key: Option<ObjectKey>,
+    /// The object's metadata, for a successful get or head.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: Option<ReadMetadata>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<ApiErrorResponse>,
+}
+
+impl OperationResult {
+    fn failure(error: &ApiError) -> Self {
+        // Capture the error explicitly, as it is not converted via `IntoResponse` here.
+        error.capture();
+        Self {
+            status: error.status().as_u16(),
+            error: Some(ApiErrorResponse::from_error(error)),
+            ..Default::default()
+        }
+    }
+}
+
+/// Returns the status of a successful operation.
+fn response_status(response: &OpResponse) -> StatusCode {
+    match response {
+        OpResponse::Got { response: None, .. } | OpResponse::Head { metadata: None, .. } => {
+            StatusCode::NOT_FOUND
+        }
+        OpResponse::Got { .. } | OpResponse::Head { .. } => StatusCode::OK,
+        // XXX: this could actually be either StatusCode::OK or StatusCode::CREATED, the service
+        // layer doesn't allow us to distinguish between them currently
+        OpResponse::Inserted { .. } => StatusCode::CREATED,
+        OpResponse::Deleted { .. } => StatusCode::NO_CONTENT,
+    }
+}
+
+/// Converts a single operation result to the parts of the JSON layout.
+///
+/// Every result becomes a JSON part named `"<idx>"`. A successful get also gets a payload part
+/// named `"<idx>.payload"` with filename `"<idx>"`. For gets, this collects the payload stream
+/// and applies bandwidth metering.
+async fn convert_to_json_parts(
+    idx: usize,
+    result: Result<OpResponse, ApiError>,
+    state: &Services,
+    context: &ObjectContext,
+) -> impl Iterator<Item = Part> + use<> {
+    let response = match result {
+        Ok(response) => response,
+        Err(error) => return json_parts(idx, OperationResult::failure(&error), None),
+    };
+
+    let mut result = OperationResult {
+        status: response_status(&response).as_u16(),
+        kind: Some(response.kind()),
+        key: Some(response.key().clone()),
+        ..Default::default()
+    };
+
+    let mut payload = None;
+    match response {
+        OpResponse::Got {
+            response: Some((metadata, _, stream)),
+            ..
+        } => match collect_payload(stream, state, context).await {
+            Ok(bytes) => {
+                payload = Some((bytes, payload_content_type(&metadata)));
+                result.metadata = Some(metadata.into());
+            }
+            Err(error) => return json_parts(idx, OperationResult::failure(&error), None),
+        },
+        OpResponse::Head {
+            metadata: Some(metadata),
+            ..
+        } => result.metadata = Some(metadata.into()),
+        _ => {}
+    }
+
+    json_parts(idx, result, payload)
+}
+
+/// Builds the result part of `idx` and, for a get, its payload part.
+fn json_parts(
+    idx: usize,
+    result: OperationResult,
+    payload: Option<(Bytes, HeaderValue)>,
+) -> impl Iterator<Item = Part> {
+    let (body, payload) = match serde_json::to_vec(&result) {
+        Ok(body) => (body, payload),
+        Err(error) => {
+            objectstore_log::error!(!!&error, "failed to serialize batch result");
+            (br#"{"status":500}"#.to_vec(), None)
+        }
+    };
+
+    // INVARIANT: decimal indices and `<idx>.payload` are valid part names and filenames.
+    let name = idx.to_string();
+    let json = HeaderValue::from_static("application/json");
+    let result_part =
+        Part::named(&name, body.into(), None, Some(json)).expect("decimal part name is valid");
+
+    let payload_part = payload.map(|(bytes, content_type)| {
+        Part::named(
+            &payload_part_name(idx),
+            bytes,
+            Some(&name),
+            Some(content_type),
+        )
+        .expect("payload part name and filename are valid")
+    });
+
+    std::iter::once(result_part).chain(payload_part)
+}
+
+/// Returns the `Content-Type` of a get payload part.
+///
+/// Encoded objects use `application/octet-stream`, so that no client mistakes the encoded bytes
+/// for the object's type. The real type is always in the result's `metadata`.
+fn payload_content_type(metadata: &Metadata) -> HeaderValue {
+    let content_type = match metadata.compression {
+        Some(_) => DEFAULT_CONTENT_TYPE,
+        None => &metadata.content_type,
+    };
+
+    // Stored content types are validated media types, so this falls back only defensively.
+    HeaderValue::from_str(content_type)
+        .unwrap_or_else(|_| HeaderValue::from_static(DEFAULT_CONTENT_TYPE))
+}
+
+/// Collects a get payload into memory and records its bandwidth.
+async fn collect_payload(
+    stream: objectstore_service::PayloadStream,
+    state: &Services,
+    context: &ObjectContext,
+) -> Result<Bytes, ApiError> {
+    state
+        .meter_stream(stream, context)
+        .try_collect::<BytesMut>()
+        .await
+        .map(BytesMut::freeze)
+        .map_err(|e| {
+            objectstore_log::error!(!!&e, "failed to collect payload stream");
+            ApiError::Service(e.into())
+        })
+}
+
+/// Converts a single operation result to a multipart [`Part`] of the header layout.
 ///
 /// For get operations this collects the payload stream and applies bandwidth metering.
 /// The `x-sn-batch-operation-index` header is set on every part.
 async fn convert_to_part(
     idx: usize,
     result: Result<OpResponse, ApiError>,
-    state: &crate::state::Services,
+    state: &Services,
     context: &ObjectContext,
 ) -> Part {
     match result {
@@ -217,20 +386,12 @@ async fn convert_to_part(
 async fn got_to_part(
     idx: usize,
     key: ObjectKey,
-    metadata: objectstore_types::metadata::Metadata,
+    metadata: Metadata,
     stream: objectstore_service::PayloadStream,
-    state: &crate::state::Services,
+    state: &Services,
     context: &ObjectContext,
 ) -> Result<Part, ApiError> {
-    let bytes = state
-        .meter_stream(stream, context)
-        .try_collect::<BytesMut>()
-        .await
-        .map_err(|e| {
-            objectstore_log::error!(!!&e, "failed to collect payload stream");
-            ApiError::Service(e.into())
-        })?
-        .freeze();
+    let bytes = collect_payload(stream, state, context).await?;
 
     let mut metadata_headers = metadata.to_headers("").map_err(|err| {
         ApiError::from(BatchError::ResponseSerialization {
