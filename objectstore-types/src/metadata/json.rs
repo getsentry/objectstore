@@ -13,7 +13,8 @@ use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::{
-    Compression, DEFAULT_CONTENT_TYPE, Error, ExpirationPolicy, Metadata, validate_content_type,
+    Compression, DEFAULT_CONTENT_TYPE, Error, ExpirationPolicy, Metadata, normalize_custom_key,
+    validate_content_type,
 };
 use crate::time::{Rfc3339Timestamp, Timestamp};
 
@@ -95,7 +96,14 @@ pub struct InsertMetadata {
     pub filename: Option<String>,
 
     /// Arbitrary user-provided key-value metadata.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    ///
+    /// Keys are validated and lowercased with [`normalize_custom_key`] during deserialization. If
+    /// two keys are equal after lowercasing, the last one wins.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "deserialize_custom"
+    )]
     pub custom: BTreeMap<String, String>,
 }
 
@@ -244,6 +252,9 @@ pub struct ObjectMetadata {
     pub filename: Option<String>,
 
     /// Arbitrary user-provided key-value metadata.
+    ///
+    /// Keys are not validated during deserialization: objects stored before the [key
+    /// rules](super::normalize_custom_key) were explicit may carry other keys.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub custom: BTreeMap<String, String>,
 
@@ -420,6 +431,36 @@ where
     let content_type = String::deserialize(deserializer)?;
     validate_content_type(&content_type).map_err(serde::de::Error::custom)?;
     Ok(Some(content_type))
+}
+
+/// Deserializes custom metadata, normalizing every key with [`normalize_custom_key`].
+///
+/// Entries are inserted in input order, so the last of several keys that are equal after
+/// lowercasing wins.
+fn deserialize_custom<'de, D>(deserializer: D) -> Result<BTreeMap<String, String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct CustomVisitor;
+
+    impl<'de> Visitor<'de> for CustomVisitor {
+        type Value = BTreeMap<String, String>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("an object of string values")
+        }
+
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+            let mut custom = BTreeMap::new();
+            while let Some((key, value)) = map.next_entry::<String, String>()? {
+                let key = normalize_custom_key(&key).map_err(serde::de::Error::custom)?;
+                custom.insert(key, value);
+            }
+            Ok(custom)
+        }
+    }
+
+    deserializer.deserialize_map(CustomVisitor)
 }
 
 /// Serde helpers for values whose JSON form is their [`Display`](fmt::Display) and
@@ -602,6 +643,70 @@ mod tests {
             metadata.custom,
             BTreeMap::from([("k".into(), "last".into())])
         );
+    }
+
+    #[test]
+    fn insert_lowercases_custom_keys() {
+        let metadata = parse_insert(r#"{"custom":{"Build-ID":"123"}}"#).unwrap();
+        assert_eq!(
+            metadata.custom,
+            BTreeMap::from([("build-id".into(), "123".into())])
+        );
+    }
+
+    #[test]
+    fn insert_accepts_custom_key_symbols() {
+        for symbol in [':', '%', '$', '#', '+', '|', '~', '.', '_', '-'] {
+            let key = format!("k{symbol}k");
+            let json = serde_json::json!({ "custom": { &key: "v" } }).to_string();
+            let metadata = parse_insert(&json).unwrap();
+            assert_eq!(metadata.custom.keys().collect::<Vec<_>>(), [&key], "{json}");
+        }
+    }
+
+    #[test]
+    fn insert_keeps_last_custom_key_after_lowercasing() {
+        let cases = [
+            r#"{"custom":{"Build":"first","build":"last"}}"#,
+            r#"{"custom":{"build":"first","Build":"last"}}"#,
+            r#"{"custom":{"Build":"first","BUILD":"last"}}"#,
+        ];
+        for json in cases {
+            let metadata = parse_insert(json).unwrap();
+            assert_eq!(
+                metadata.custom,
+                BTreeMap::from([("build".into(), "last".into())]),
+                "{json}"
+            );
+        }
+    }
+
+    #[test]
+    fn insert_rejects_invalid_custom_keys() {
+        let keys = [
+            "", "a b", "ü", "a/b", "(a)", "a!b", "a'b", "a*b", "a^b", "a`b", "a&b", "a\"b", "a\tb",
+        ];
+        for key in keys {
+            let json = serde_json::json!({ "custom": { key: "v" } }).to_string();
+            assert!(parse_insert(&json).is_err(), "unexpectedly accepted {json}");
+        }
+    }
+
+    #[test]
+    fn insert_custom_keys_survive_headers() {
+        let json = r#"{"custom":{"Build:ID":"1","100%":"2","a$#+|~.b":"3","ok":"ü 100%"}}"#;
+        let metadata = parse_insert(json)
+            .unwrap()
+            .into_metadata(Timestamp::UNIX_EPOCH)
+            .unwrap();
+        assert_eq!(
+            metadata.custom.keys().collect::<Vec<_>>(),
+            ["100%", "a$#+|~.b", "build:id", "ok"]
+        );
+
+        let headers = metadata.to_headers("").unwrap();
+        let roundtripped = Metadata::from_headers(&headers, "").unwrap();
+        assert_eq!(roundtripped.custom, metadata.custom);
     }
 
     #[test]
