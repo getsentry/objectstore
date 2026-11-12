@@ -53,8 +53,7 @@
 //!
 //! The key rule applies to *writes* only: [`Metadata::from_insert_headers`] and the JSON request
 //! paths reject invalid keys, while [`Metadata::from_headers`] and backend reads accept whatever
-//! is stored, so objects written before the rule was explicit stay readable. Backends that
-//! persist metadata as header-like strings, like GCS, use the same key encoding.
+//! is stored, so objects written before the rule was explicit stay readable.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -416,7 +415,6 @@ pub struct Metadata {
     /// in [the module docs](self#custom-metadata-keys).
     ///
     /// Keys must satisfy [`normalize_custom_key`] when written; reading never rejects a key.
-    /// Values are logical strings and are escaped only on the wire.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub custom: BTreeMap<String, String>,
 }
@@ -668,9 +666,8 @@ pub fn normalize_custom_key(key: &str) -> Result<String, Error> {
 
 /// Encodes a custom metadata key for use in a header name after `x-snme-`.
 ///
-/// `%` becomes `%25` and `:` becomes `%3a`; nothing else changes. The hex digits are lowercase
-/// because header names are lowercased in transit. The result contains only RFC 9110 token
-/// characters when `key` satisfies [`normalize_custom_key`].
+/// `%` becomes `%25` and `:` becomes `%3a`; nothing else changes. The result contains only
+/// RFC 9110 token characters when `key` satisfies [`normalize_custom_key`].
 ///
 /// The inverse is [`decode_custom_key`].
 ///
