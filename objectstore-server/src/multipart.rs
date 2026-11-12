@@ -14,6 +14,17 @@ use http::HeaderMap;
 use http::HeaderValue;
 use http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
 
+/// Error returned when a part name or filename cannot be serialized into a `Content-Disposition`.
+///
+/// Names and filenames are emitted verbatim inside double quotes, so they must be ASCII and must
+/// not contain `"`, `\`, CR, LF or other control characters.
+#[derive(Debug, thiserror::Error)]
+#[error("invalid multipart {field} {value:?}: must match `[ !#-\\[\\]-~]+`")]
+pub struct InvalidPartName {
+    field: &'static str,
+    value: String,
+}
+
 /// A part in a Multipart response.
 #[derive(Debug)]
 pub struct Part {
@@ -22,18 +33,77 @@ pub struct Part {
 }
 
 impl Part {
-    /// Creates a new Multipart part with the given content type, body, and headers.
-    /// The name is hardcoded to "part".
-    pub fn new(body: Bytes, mut headers: HeaderMap, content_type: Option<HeaderValue>) -> Self {
-        headers.insert(
+    /// Creates a part named `part` with the given body, extra headers and content type.
+    ///
+    /// It serializes as `Content-Disposition: form-data; name="part"`. See [`Part::named`] for
+    /// custom names.
+    pub fn new(body: Bytes, headers: HeaderMap, content_type: Option<HeaderValue>) -> Self {
+        // Insert after extending so callers cannot override the disposition or content type.
+        let mut part = Self { headers, body };
+        part.headers.insert(
             CONTENT_DISPOSITION,
-            HeaderValue::from_static("form-data; name=part"),
+            HeaderValue::from_static("form-data; name=\"part\""),
         );
+        if let Some(content_type) = content_type {
+            part.headers.insert(CONTENT_TYPE, content_type);
+        }
+        part
+    }
+
+    /// Creates a part carrying only `Content-Disposition` and an optional `Content-Type`.
+    ///
+    /// The disposition serializes exactly as `form-data; name="<name>"`, or
+    /// `form-data; name="<name>"; filename="<filename>"` when a filename is given.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidPartName`] if `name` or `filename` is empty or contains characters that
+    /// cannot be written verbatim into a quoted header value.
+    pub fn named(
+        name: &str,
+        body: Bytes,
+        filename: Option<&str>,
+        content_type: Option<HeaderValue>,
+    ) -> Result<Self, InvalidPartName> {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_DISPOSITION, content_disposition(name, filename)?);
         if let Some(content_type) = content_type {
             headers.insert(CONTENT_TYPE, content_type);
         }
-        Self { headers, body }
+        Ok(Self { headers, body })
     }
+}
+
+fn validate(field: &'static str, value: &str) -> Result<(), InvalidPartName> {
+    if !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| (b.is_ascii_graphic() || b == b' ') && b != b'"' && b != b'\\')
+    {
+        Ok(())
+    } else {
+        Err(InvalidPartName {
+            field,
+            value: value.to_owned(),
+        })
+    }
+}
+
+/// Validates the inputs and builds `form-data; name="<name>"[; filename="<filename>"]`.
+fn content_disposition(name: &str, filename: Option<&str>) -> Result<HeaderValue, InvalidPartName> {
+    validate("name", name)?;
+    if let Some(filename) = filename {
+        validate("filename", filename)?;
+    }
+    let value = match filename {
+        Some(filename) => format!("form-data; name=\"{name}\"; filename=\"{filename}\""),
+        None => format!("form-data; name=\"{name}\""),
+    };
+    // Unreachable after validation, as printable ASCII is a valid header value.
+    HeaderValue::from_str(&value).map_err(|_| InvalidPartName {
+        field: "content-disposition",
+        value,
+    })
 }
 
 /// Converts a stream of [`Part`]s into a streaming `multipart/form-data` HTTP response.
@@ -120,6 +190,50 @@ mod tests {
     use axum::extract::{FromRequest, Multipart};
     use axum::http::Request;
 
+    #[test]
+    fn test_named_content_disposition() {
+        let json = || Some(HeaderValue::from_static("application/json"));
+        let cases = [
+            ("0", None, None, r#"form-data; name="0""#),
+            ("1", None, json(), r#"form-data; name="1""#),
+            (
+                "1.payload",
+                Some("a b.bin"),
+                None,
+                r#"form-data; name="1.payload"; filename="a b.bin""#,
+            ),
+        ];
+        for (name, filename, content_type, expected) in cases {
+            let has_type = content_type.is_some();
+            let part = Part::named(name, Bytes::new(), filename, content_type).unwrap();
+            assert_eq!(part.headers[CONTENT_DISPOSITION], expected);
+            assert_eq!(part.headers.len(), 1 + usize::from(has_type));
+        }
+    }
+
+    #[test]
+    fn test_legacy_part_name_is_quoted() {
+        let part = Part::new(Bytes::new(), HeaderMap::new(), None);
+        assert_eq!(
+            part.headers[CONTENT_DISPOSITION],
+            r#"form-data; name="part""#
+        );
+    }
+
+    #[test]
+    fn test_named_rejects_unsafe_values() {
+        for bad in ["", "a\"b", "a\\b", "a\r\nb", "a\nb", "ä", "a\0b", "a\tb"] {
+            assert!(
+                Part::named(bad, Bytes::new(), None, None).is_err(),
+                "{bad:?}"
+            );
+            assert!(
+                Part::named("ok", Bytes::new(), Some(bad), None).is_err(),
+                "{bad:?}"
+            );
+        }
+    }
+
     /// Validates that our `Multipart` streaming response produces a valid `multipart/form-data` response
     /// that's parsed as expected by `axum::extract::Multipart`.
     #[tokio::test]
@@ -138,6 +252,7 @@ mod tests {
                 extra_headers,
                 Some(HeaderValue::from_static("application/octet-stream")),
             ),
+            Part::named("1.payload", Bytes::from("x"), Some("f.bin"), None).unwrap(),
         ];
         let boundary: u128 = 0xdeadbeef;
         let response = futures::stream::iter(parts).into_multipart_response(boundary);
@@ -184,6 +299,11 @@ mod tests {
             field.bytes().await.unwrap(),
             vec![0x00, 0x01, 0x02, 0xff, 0xfe]
         );
+
+        let field = multipart.next_field().await.unwrap().unwrap();
+        assert_eq!(field.name(), Some("1.payload"));
+        assert_eq!(field.file_name(), Some("f.bin"));
+        assert_eq!(field.bytes().await.unwrap(), "x");
 
         assert!(multipart.next_field().await.unwrap().is_none());
     }
