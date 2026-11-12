@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::marker::PhantomData;
 use std::str::FromStr;
 
 use serde::de::value::MapAccessDeserializer;
@@ -43,8 +44,7 @@ use crate::time::{Rfc3339Timestamp, Timestamp};
 /// assert!(serde_json::from_str::<InsertMetadata>(r#"{"size":12}"#).is_err());
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
-// `remote = "Self"` turns the derives into inherent functions, which the trait impls below wrap
-// to accept only JSON objects. The derived visitor would also accept arrays as positional fields.
+// `remote = "Self"` turns the derives into inherent functions; see `ObjectOnly`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(remote = "Self", deny_unknown_fields)]
 pub struct InsertMetadata {
@@ -154,29 +154,29 @@ impl Serialize for InsertMetadata {
 
 impl<'de> Deserialize<'de> for InsertMetadata {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct ObjectVisitor;
+        deserialize_object(deserializer)
+    }
+}
 
-        impl<'de> Visitor<'de> for ObjectVisitor {
-            type Value = InsertMetadata;
+impl ObjectOnly for InsertMetadata {
+    const EXPECTING: &'static str = "an object of insert metadata";
 
-            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("an object of insert metadata")
-            }
-
-            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
-                InsertMetadata::deserialize(MapAccessDeserializer::new(map))
-            }
-        }
-
-        deserializer.deserialize_map(ObjectVisitor)
+    fn deserialize_fields<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::deserialize(deserializer)
     }
 }
 
 impl From<&Metadata> for InsertMetadata {
     /// Copies the writable fields of `metadata`, dropping the read-only ones.
+    ///
+    /// Leaves [`content_type`](Self::content_type) unset if it is [`DEFAULT_CONTENT_TYPE`], so
+    /// that the server can fall back to the content type of the payload.
     fn from(metadata: &Metadata) -> Self {
+        let content_type = (metadata.content_type != DEFAULT_CONTENT_TYPE)
+            .then(|| metadata.content_type.clone().into_owned());
+
         Self {
-            content_type: Some(metadata.content_type.clone().into_owned()),
+            content_type,
             content_encoding: metadata.compression,
             expiration: metadata.expiration_policy,
             origin: metadata.origin.clone(),
@@ -193,7 +193,8 @@ impl From<&Metadata> for InsertMetadata {
 /// present. Unknown fields are ignored when deserializing. See the [field
 /// table](super#json-in-the-public-api).
 ///
-/// Converts losslessly to and from [`Metadata`].
+/// Converts losslessly to and from [`Metadata`]. Prefer converting from an owned [`Metadata`],
+/// which moves its strings instead of cloning them.
 ///
 /// ```
 /// use objectstore_types::metadata::{Metadata, ObjectMetadata};
@@ -206,7 +207,9 @@ impl From<&Metadata> for InsertMetadata {
 /// assert_eq!(Metadata::from(object), Metadata::default());
 /// # Ok::<(), serde_json::Error>(())
 /// ```
+// `remote = "Self"` turns the derives into inherent functions; see `ObjectOnly`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(remote = "Self")]
 pub struct ObjectMetadata {
     /// IANA media type of the object.
     ///
@@ -265,19 +268,57 @@ pub struct ObjectMetadata {
     pub size: Option<usize>,
 }
 
+impl Serialize for ObjectMetadata {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        Self::serialize(self, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ObjectMetadata {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserialize_object(deserializer)
+    }
+}
+
+impl ObjectOnly for ObjectMetadata {
+    const EXPECTING: &'static str = "an object of object metadata";
+
+    fn deserialize_fields<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::deserialize(deserializer)
+    }
+}
+
+impl From<Metadata> for ObjectMetadata {
+    fn from(metadata: Metadata) -> Self {
+        let Metadata {
+            expiration_policy,
+            time_created,
+            time_expires,
+            content_type,
+            compression,
+            origin,
+            filename,
+            size,
+            custom,
+        } = metadata;
+
+        Self {
+            content_type: content_type.into_owned(),
+            content_encoding: compression,
+            expiration: expiration_policy,
+            origin,
+            filename,
+            custom,
+            time_created,
+            time_expires,
+            size,
+        }
+    }
+}
+
 impl From<&Metadata> for ObjectMetadata {
     fn from(metadata: &Metadata) -> Self {
-        Self {
-            content_type: metadata.content_type.clone().into_owned(),
-            content_encoding: metadata.compression,
-            expiration: metadata.expiration_policy,
-            origin: metadata.origin.clone(),
-            filename: metadata.filename.clone(),
-            custom: metadata.custom.clone(),
-            time_created: metadata.time_created,
-            time_expires: metadata.time_expires,
-            size: metadata.size,
-        }
+        Self::from(metadata.clone())
     }
 }
 
@@ -307,6 +348,43 @@ impl From<ObjectMetadata> for Metadata {
             custom,
         }
     }
+}
+
+/// A metadata type that deserializes only from a map, such as a JSON object.
+///
+/// Serde's derived visitor for a struct also accepts a sequence of positional fields, so `[]`
+/// would deserialize into a value with all fields defaulted. Types derive with
+/// `#[serde(remote = "Self")]`, which turns the derives into inherent functions, and forward their
+/// `Deserialize` impl to [`deserialize_object`].
+trait ObjectOnly: Sized {
+    /// Describes the expected input in error messages.
+    const EXPECTING: &'static str;
+
+    /// Deserializes the fields with the derived implementation.
+    fn deserialize_fields<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error>;
+}
+
+/// Deserializes `T` from a map only, rejecting sequences and other values.
+fn deserialize_object<'de, T, D>(deserializer: D) -> Result<T, D::Error>
+where
+    T: ObjectOnly,
+    D: Deserializer<'de>,
+{
+    struct ObjectVisitor<T>(PhantomData<T>);
+
+    impl<'de, T: ObjectOnly> Visitor<'de> for ObjectVisitor<T> {
+        type Value = T;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str(T::EXPECTING)
+        }
+
+        fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+            T::deserialize_fields(MapAccessDeserializer::new(map))
+        }
+    }
+
+    deserializer.deserialize_map(ObjectVisitor(PhantomData))
 }
 
 fn default_content_type() -> String {
@@ -739,6 +817,20 @@ mod tests {
     }
 
     #[test]
+    fn insert_from_metadata_omits_default_content_type() {
+        let insert = InsertMetadata::from(&Metadata::default());
+        assert_eq!(insert.content_type, None);
+        assert_eq!(serde_json::to_string(&insert).unwrap(), "{}");
+
+        let metadata = Metadata {
+            content_type: "text/plain".into(),
+            ..Default::default()
+        };
+        let insert = InsertMetadata::from(&metadata);
+        assert_eq!(insert.content_type.as_deref(), Some("text/plain"));
+    }
+
+    #[test]
     fn insert_roundtrips_through_metadata() {
         let original = full_metadata();
         let access_time = original.time_created.unwrap();
@@ -779,6 +871,18 @@ mod tests {
           "size": 1024
         }
         "#);
+    }
+
+    #[test]
+    fn object_from_owned_metadata_matches_borrowed() {
+        assert_eq!(
+            ObjectMetadata::from(full_metadata()),
+            ObjectMetadata::from(&full_metadata())
+        );
+        assert_eq!(
+            ObjectMetadata::from(Metadata::default()),
+            ObjectMetadata::from(&Metadata::default())
+        );
     }
 
     #[test]
@@ -835,6 +939,11 @@ mod tests {
             r#"{"time_expires":1700000000}"#,
             r#"{"size":-1}"#,
             r#"{"size":"12"}"#,
+            // not an object, including positional fields
+            r#"[]"#,
+            r#"["text/plain"]"#,
+            r#"null"#,
+            r#""content_type""#,
         ];
 
         for json in cases {
