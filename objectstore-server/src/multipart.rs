@@ -20,9 +20,11 @@ const LEGACY_PART_NAME: &str = "part";
 /// Error returned when a part name or filename cannot be serialized into a `Content-Disposition`.
 ///
 /// Names and filenames are emitted verbatim inside double quotes, so they must be ASCII and must
-/// not contain `"`, CR, LF or other control characters.
+/// not contain `"`, `\`, CR, LF or other control characters.
 #[derive(Debug, thiserror::Error)]
-#[error("invalid multipart {field} {value:?}: must be printable ASCII without double quotes")]
+#[error(
+    "invalid multipart {field} {value:?}: must be printable ASCII without quotes or backslashes"
+)]
 pub struct InvalidPartName {
     field: &'static str,
     value: String,
@@ -41,12 +43,15 @@ impl Part {
     /// This is the layout of the current batch response format. It serializes as
     /// `Content-Disposition: form-data; name="part"`. See [`Part::named`] for custom names.
     pub fn new(body: Bytes, headers: HeaderMap, content_type: Option<HeaderValue>) -> Self {
-        let mut part = Self::from_disposition(
+        // Insert after extending so callers cannot override the disposition or content type.
+        let mut part = Self { headers, body };
+        part.headers.insert(
+            CONTENT_DISPOSITION,
             content_disposition(LEGACY_PART_NAME, None),
-            body,
-            content_type,
         );
-        part.headers.extend(headers);
+        if let Some(content_type) = content_type {
+            part.headers.insert(CONTENT_TYPE, content_type);
+        }
         part
     }
 
@@ -57,7 +62,8 @@ impl Part {
     ///
     /// # Errors
     ///
-    /// Returns [`InvalidPartName`] if `name` or `filename` contains `"`, CR, LF, other control characters, or non-ASCII bytes.
+    /// Returns [`InvalidPartName`] if `name` or `filename` contains `"`, `\`, CR, LF, other
+    /// control characters, or non-ASCII bytes.
     pub fn named(
         name: &str,
         filename: Option<&str>,
@@ -89,7 +95,7 @@ impl Part {
 fn validate(field: &'static str, value: &str) -> Result<(), InvalidPartName> {
     if value
         .bytes()
-        .all(|b| b.is_ascii_graphic() && b != b'"' || b == b' ')
+        .all(|b| (b.is_ascii_graphic() || b == b' ') && b != b'"' && b != b'\\')
     {
         Ok(())
     } else {
@@ -278,7 +284,7 @@ mod tests {
 
     #[test]
     fn test_named_rejects_unsafe_values() {
-        for bad in ["a\"b", "a\r\nb", "a\nb", "ä", "a\0b", "a\tb"] {
+        for bad in ["a\"b", "a\\b", "a\r\nb", "a\nb", "ä", "a\0b", "a\tb"] {
             assert!(
                 Part::named(bad, None, Bytes::new(), None).is_err(),
                 "{bad:?}"
