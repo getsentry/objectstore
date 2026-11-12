@@ -289,6 +289,75 @@ async fn roundtrips_unicode_metadata() {
 }
 
 #[tokio::test]
+async fn roundtrips_custom_metadata_keys() {
+    let server = test_server().await;
+
+    let client = Client::builder(server.url("/"))
+        .token(test_token_generator())
+        .build()
+        .unwrap();
+    let usecase = Usecase::from_static("usecase");
+    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+
+    let stored_id = session
+        .put("oh hai!")
+        .append_metadata("Build_ID", "1")
+        .append_metadata("ns:key", "2")
+        .append_metadata("100%", "3")
+        .send()
+        .await
+        .unwrap()
+        .key;
+
+    let metadata = session.head(&stored_id).send().await.unwrap().unwrap();
+    let expected: BTreeMap<String, String> = [("build_id", "1"), ("ns:key", "2"), ("100%", "3")]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect();
+    assert_eq!(metadata.custom, expected);
+
+    // An invalid key fails on the client, before the request, for single and batch puts.
+    let error = session
+        .put("oh hai!")
+        .key("invalid-key")
+        .append_metadata("not valid", "x")
+        .send()
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::Metadata(_)), "{error:?}");
+    assert!(error.to_string().contains("not valid"), "{error}");
+
+    let results: Vec<_> = session
+        .many()
+        .push(
+            session
+                .put("a")
+                .key("batch-bad")
+                .append_metadata("no way", "x"),
+        )
+        .push(
+            session
+                .put("b")
+                .key("batch-good")
+                .append_metadata("Fine", "y"),
+        )
+        .send()
+        .await
+        .collect()
+        .await;
+    for result in results {
+        match result {
+            OperationResult::Put(key, Err(error)) => {
+                assert_eq!(key, "batch-bad");
+                assert!(matches!(error, Error::Metadata(_)), "{error:?}");
+            }
+            OperationResult::Put(key, Ok(_)) => assert_eq!(key, "batch-good"),
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
 async fn stores_structured_keys() {
     let server = test_server().await;
 
