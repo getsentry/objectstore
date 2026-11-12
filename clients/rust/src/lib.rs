@@ -12,6 +12,7 @@ mod head;
 mod instrument;
 mod key;
 mod many;
+mod metadata;
 mod put;
 mod response;
 mod resumable;

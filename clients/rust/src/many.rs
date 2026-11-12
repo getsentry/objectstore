@@ -14,6 +14,7 @@ use reqwest::multipart::Part;
 
 use crate::error::Error;
 use crate::instrument::OperationSpan;
+use crate::metadata;
 use crate::put::{CompressionMode, PutBody};
 use crate::response::ResponseExt as _;
 use crate::{
@@ -579,7 +580,7 @@ async fn classify(op: BatchOperation) -> Classified {
             body,
         } => {
             // Fail only this operation, before it can reach a batch request.
-            if let Err(err) = put::normalize_custom_keys(&mut metadata) {
+            if let Err(err) = metadata::normalize_keys(&mut metadata) {
                 return classify_fail(key, err);
             }
 
