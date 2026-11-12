@@ -2,6 +2,7 @@
 
 use std::future::Future;
 use std::io;
+use std::mem::DropGuard;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -192,8 +193,14 @@ impl PriorityLimiter {
             Priority::Normal => (Some(self.normal_timeout), &state.normal_queue),
             Priority::High => (self.high_timeout, &state.high_queue),
         };
-        state.waiting(priority).fetch_add(1, Ordering::AcqRel);
-        let _waiting = WaitingGuard { state, priority };
+        let waiting = state.waiting(priority);
+        waiting.fetch_add(1, Ordering::AcqRel);
+        let _waiting = DropGuard::new(waiting, move |waiting| {
+            let previous = waiting.fetch_sub(1, Ordering::AcqRel);
+            if priority == Priority::High && previous == 1 {
+                state.high_drained.notify_waiters();
+            }
+        });
 
         // Try immediate acquisition without consuming queue capacity.
         let mut normal_lane = None;
@@ -295,24 +302,6 @@ impl PriorityState {
                 return;
             }
             drained.await;
-        }
-    }
-}
-
-/// Tracks an acquisition until completion, timeout, or cancellation.
-struct WaitingGuard<'a> {
-    state: &'a PriorityState,
-    priority: Priority,
-}
-
-impl Drop for WaitingGuard<'_> {
-    fn drop(&mut self) {
-        let previous = self
-            .state
-            .waiting(self.priority)
-            .fetch_sub(1, Ordering::AcqRel);
-        if self.priority == Priority::High && previous == 1 {
-            self.state.high_drained.notify_waiters();
         }
     }
 }
