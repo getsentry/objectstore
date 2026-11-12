@@ -419,7 +419,7 @@ class Session:
 
         Custom `metadata` keys are lowercased and must consist of `a-z`, `0-9` and
         `_ - | ~ % $ # + . :`; any other key raises `ValueError` before a request is
-        sent. See `objectstore_client.metadata.normalize_metadata_key`.
+        sent.
 
         You can use the utility function `objectstore_client.utils.guess_mime_type`
         to attempt to guess a `content_type` based on magic bytes.

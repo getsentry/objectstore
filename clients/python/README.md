@@ -125,12 +125,6 @@ non-empty and consist only of `a-z`, `0-9` and the characters `_ - | ~ % $ # + .
 Anything else (spaces, other punctuation, non-ASCII characters) raises a `ValueError`
 naming the key as soon as the metadata is passed to `put`, before any request is sent.
 
-Over HTTP each entry travels as an `x-snme-<key>` header. In the header name, `%` is
-sent as `%25` and `:` as `%3a`; no other character is escaped. The client applies this
-automatically, and decodes `%25` and `%3a` when reading responses. Other `%` sequences
-in a returned key are left as-is. Values may be any string; they are percent-encoded
-separately.
-
 ### Authentication
 
 If your Objectstore instance enforces authorization, you must configure authentication

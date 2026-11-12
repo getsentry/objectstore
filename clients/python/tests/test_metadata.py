@@ -6,7 +6,6 @@ from objectstore_client.metadata import (
     Metadata,
     TimeToIdle,
     TimeToLive,
-    decode_metadata_key,
     encode_metadata_key,
     format_expiration,
     format_timedelta,
@@ -14,6 +13,7 @@ from objectstore_client.metadata import (
     parse_expiration,
     parse_timedelta,
 )
+from objectstore_client.utils import decode_header_value
 
 # Durations and their wire format, used in both directions.
 ROUND_TRIP_CASES = [
@@ -114,22 +114,31 @@ def test_normalize_metadata_key_error_names_the_key() -> None:
 )
 def test_metadata_key_header_name_round_trip(key: str, encoded: str) -> None:
     assert encode_metadata_key(key) == encoded
-    assert decode_metadata_key(encoded) == key
+    assert decode_header_value(encoded) == key
 
 
-def test_decode_metadata_key_distinguishes_escaped_colon_from_literal() -> None:
-    assert decode_metadata_key("a%3ab") == "a:b"
-    assert decode_metadata_key("a%3Ab") == "a:b"
-    assert decode_metadata_key("a%253ab") == "a%3ab"
+@pytest.mark.parametrize(
+    ("name", "key"),
+    [
+        ("%61", "a"),
+        ("%3a", ":"),
+        ("%3A", ":"),
+        ("%253a", "%3a"),
+        ("%zz", "%zz"),
+        ("a%", "a%"),
+    ],
+)
+def test_key_header_name_decoding_accepts_any_escape(name: str, key: str) -> None:
+    assert decode_header_value(name) == key
 
 
-@pytest.mark.parametrize("key", ["a%zz", "a%41b", "a%", "a%2", "a%2fb"])
-def test_decode_metadata_key_keeps_other_percent_sequences_literal(key: str) -> None:
-    assert decode_metadata_key(key) == key
+def test_key_header_name_decoding_rejects_invalid_utf8() -> None:
+    with pytest.raises(UnicodeDecodeError):
+        decode_header_value("%ff")
 
 
 def test_from_headers_decodes_custom_key_names() -> None:
     metadata = Metadata.from_headers(
         {"x-snme-a%3ab": "1", "x-snme-c%25d": "2", "x-snme-e%41": "3"}
     )
-    assert metadata.custom == {"a:b": "1", "c%d": "2", "e%41": "3"}
+    assert metadata.custom == {"a:b": "1", "c%d": "2", "eA": "3"}

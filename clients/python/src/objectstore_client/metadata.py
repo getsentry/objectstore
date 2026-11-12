@@ -20,11 +20,7 @@ HEADER_SIZE = "x-sn-size"
 HEADER_META_PREFIX = "x-snme-"
 
 _METADATA_KEY_PATTERN = re.compile(r"[a-z0-9_\-|~%$#+.:]+")
-_ASCII_LOWERCASE = str.maketrans(
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"
-)
 _KEY_HEADER_ENCODING = {"%": "%25", ":": "%3a"}
-_KEY_HEADER_ESCAPE = re.compile(r"%(?:25|3[aA])")
 
 
 @dataclass
@@ -93,8 +89,7 @@ class Metadata:
 
     custom: dict[str, str]
     """
-    User-defined key-value pairs. Keys are lowercase and follow the rules of
-    `normalize_metadata_key`; values are arbitrary strings.
+    User-defined key-value pairs. Keys are lowercase; values are arbitrary strings.
     """
 
     @classmethod
@@ -128,7 +123,7 @@ class Metadata:
                 size = int(v)
             elif k.startswith(HEADER_META_PREFIX):
                 name = k[len(HEADER_META_PREFIX) :]
-                custom_metadata[decode_metadata_key(name)] = decode_header_value(v)
+                custom_metadata[decode_header_value(name)] = decode_header_value(v)
 
         return Metadata(
             content_type=content_type,
@@ -151,8 +146,10 @@ def normalize_metadata_key(key: str) -> str:
     of `a-z`, `0-9` and `_ - | ~ % $ # + . :`; anything else, including whitespace and
     non-ASCII characters, raises a `ValueError` naming the key.
     """
-    normalized = key.translate(_ASCII_LOWERCASE)
-    if not _METADATA_KEY_PATTERN.fullmatch(normalized):
+    # str.lower() alone would map some non-ASCII characters (e.g. the Kelvin sign) to
+    # ASCII letters, so reject non-ASCII input first.
+    normalized = key.lower()
+    if not key.isascii() or not _METADATA_KEY_PATTERN.fullmatch(normalized):
         raise ValueError(
             f"invalid metadata key {key!r}: keys must be non-empty and contain only "
             "ASCII letters, digits and the characters _ - | ~ % $ # + . :"
@@ -164,22 +161,10 @@ def encode_metadata_key(key: str) -> str:
     """
     Encodes a normalized metadata key for use in an `x-snme-<key>` header name.
 
-    Only `%` (as `%25`) and `:` (as `%3a`) are escaped; this is not general
-    percent-encoding. Use `decode_metadata_key` to reverse it.
+    Only `%` (as `%25`) and `:` (as `%3a`) are escaped; nothing else is.
+    Readers decode with full percent-decoding, so any escape spelling is accepted.
     """
     return "".join(_KEY_HEADER_ENCODING.get(char, char) for char in key)
-
-
-def decode_metadata_key(name: str) -> str:
-    """
-    Decodes the key part of an `x-snme-<key>` header name.
-
-    Reverses `encode_metadata_key`: `%25` becomes `%` and `%3a` (or `%3A`) becomes `:`.
-    Any other `%` sequence is kept literally, as legacy keys may contain one.
-    """
-    return _KEY_HEADER_ESCAPE.sub(
-        lambda match: "%" if match.group()[1:] == "25" else ":", name
-    )
 
 
 def format_expiration(expiration_policy: ExpirationPolicy) -> str:
