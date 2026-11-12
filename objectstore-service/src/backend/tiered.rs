@@ -560,7 +560,7 @@ impl TieredStorage {
         drop(lt_guard);
         guard.advance(ChangePhase::Written);
 
-        let _high = self.acquire_high_volume(Priority::High).await?;
+        let _hv_guard = self.acquire_high_volume(Priority::High).await?;
         // 3. CAS commit: write tombstone only if HV state matches what we saw.
         let tombstone = Tombstone {
             target: new.clone(),
@@ -779,7 +779,7 @@ impl Backend for TieredStorage {
 
         // Delete the marker to claim this upload.
         {
-            let _high = self.acquire_high_volume(Priority::Normal).await?;
+            let _hv_guard = self.acquire_high_volume(Priority::Normal).await?;
             self.delete_upload_marker(revision).await?;
         }
 
@@ -804,7 +804,7 @@ impl Backend for TieredStorage {
         }
         guard.advance(ChangePhase::Written);
 
-        let _high = self.acquire_high_volume(Priority::High).await?;
+        let _hv_guard = self.acquire_high_volume(Priority::High).await?;
         let written = self
             .inner
             .high_volume
@@ -837,7 +837,7 @@ impl Backend for TieredStorage {
         let tiered = TieredResumableToken::decode(&session.backend_token)?;
         let inner_session = tiered.into_inner_session(session);
         {
-            let _high = self.acquire_high_volume(Priority::Normal).await?;
+            let _hv_guard = self.acquire_high_volume(Priority::Normal).await?;
             self.check_upload_marker(&inner_session.object_id).await?;
         }
         let lt_guard = self.acquire_long_term().await?;
@@ -940,14 +940,14 @@ impl Backend for TieredStorage {
             ),
             TieredGet::Tombstone(tombstone) => {
                 self.tag_backend(&mut timer, &BackendChoice::LongTerm);
-                let long = self.acquire_long_term().await?;
+                let lt_guard = self.acquire_long_term().await?;
                 let result = self
                     .inner
                     .long_term
                     .get_object(&tombstone.target, access_time, range)
                     .await?
                     .map(|(meta, range, stream)| {
-                        let stream = match long {
+                        let stream = match lt_guard {
                             Some(permit) => permit.guard_stream(stream).boxed(),
                             None => stream,
                         };
@@ -1053,7 +1053,7 @@ impl Backend for TieredStorage {
                     }
                 };
 
-                let _high = self.acquire_high_volume(Priority::High).await?;
+                let _hv_guard = self.acquire_high_volume(Priority::High).await?;
                 // Limits have already been validated at the authoritative LT object.
                 let update = TieredUpdate::SetExpiry(ExpiryTarget::At(deadline).into());
 
