@@ -77,10 +77,13 @@
 //! | `expiration`       | `"ttl:30d"`, `"tti:1h"`  | `x-sn-expiration`   | optional | if not `manual` |
 //! | `origin`           | string                   | `x-sn-origin`       | optional | if set          |
 //! | `filename`         | string                   | `x-sn-filename`     | optional | if set          |
-//! | `custom`           | object of strings        | `x-snme-*`          | optional | if non-empty    |
+//! | `custom`           | object of strings [^key] | `x-snme-*`          | optional | if non-empty    |
 //! | `time_created`     | RFC 3339 timestamp       | `x-sn-time-created` | rejected | if known        |
 //! | `time_expires`     | RFC 3339 timestamp       | `x-sn-time-expires` | rejected | if set          |
 //! | `size`             | integer, in bytes        | `x-sn-size`         | rejected | if known        |
+//!
+//! [^key]: Keys follow the [custom metadata key rules](#custom-metadata-keys) and are lowercased
+//!     on insert. JSON carries keys unescaped.
 //!
 //! Values keep their header syntax, for example [`ExpirationPolicy`]'s `ttl:30d`, but strings are
 //! plain JSON strings and are never percent-encoded.
