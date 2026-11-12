@@ -68,7 +68,7 @@ async fn batch(
     let batch = state.service.stream();
 
     // Step 1: parse multipart fields → (idx, Result<Operation, ApiError>)
-    let parsed = requests.0.map(|r| r.map_err(ApiError::from)).enumerate();
+    let parsed = requests.operations.map(|r| r.map_err(ApiError::from)).enumerate();
 
     // Step 2: rate-limit check
     let rate_limited = validate(parsed, {
