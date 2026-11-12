@@ -151,6 +151,16 @@ session.put("payload")
     .send().await?;
 ```
 
+Metadata keys are case-insensitive: ASCII letters are lowercased before sending. A key must be
+non-empty and consist only of `a-z`, `0-9`, and the symbols `_ - | ~ % $ # + . :`; anything else,
+such as whitespace or non-ASCII characters, is rejected. The rule is defined by
+`objectstore_types::metadata::normalize_custom_key`.
+
+Keys are checked when the request is sent, not in `append_metadata` or `set_metadata`, so builder
+chaining never fails. An invalid key makes `send()` return `Error::Metadata` naming the key, and no
+request goes out. In a `many()` batch, only the operation with the invalid key fails; the others
+are still sent.
+
 ### Resumable Uploads
 
 The Objectstore server supports an additional API to perform PUT operations in a way

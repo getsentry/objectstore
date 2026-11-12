@@ -289,6 +289,43 @@ async fn roundtrips_unicode_metadata() {
 }
 
 #[tokio::test]
+async fn roundtrips_custom_metadata_keys() {
+    let server = test_server().await;
+
+    let client = Client::builder(server.url("/"))
+        .token(test_token_generator())
+        .build()
+        .unwrap();
+    let usecase = Usecase::from_static("usecase");
+    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+
+    let stored_id = session
+        .put("oh hai!")
+        .append_metadata("Build_ID", "1")
+        .append_metadata("ns:key", "2")
+        .append_metadata("100%", "3")
+        .send()
+        .await
+        .unwrap()
+        .key;
+
+    let metadata = session.head(&stored_id).send().await.unwrap().unwrap();
+    let expected: BTreeMap<String, String> = [("build_id", "1"), ("ns:key", "2"), ("100%", "3")]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect();
+    assert_eq!(metadata.custom, expected);
+
+    let error = session
+        .put("oh hai!")
+        .append_metadata("not valid", "x")
+        .send()
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("not valid"), "{error}");
+}
+
+#[tokio::test]
 async fn stores_structured_keys() {
     let server = test_server().await;
 
