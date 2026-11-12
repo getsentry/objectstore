@@ -149,6 +149,24 @@ pub fn decode_header_str(value: &str) -> Result<String, Utf8Error> {
     Ok(percent_decode_str(value).decode_utf8()?.into_owned())
 }
 
+/// Decodes percent-escapes in a string without ever failing.
+///
+/// A `%` not followed by two hex digits stays literal, and escaped bytes that are not valid UTF-8
+/// become `U+FFFD`. Use [`decode_header_str`] where invalid input should be an error.
+///
+/// # Examples
+///
+/// ```
+/// use objectstore_types::headers::decode_header_str_lossy;
+///
+/// assert_eq!(decode_header_str_lossy("a%3Ab"), "a:b");
+/// assert_eq!(decode_header_str_lossy("100%"), "100%");
+/// assert_eq!(decode_header_str_lossy("a%FFb"), "a\u{FFFD}b");
+/// ```
+pub fn decode_header_str_lossy(value: &str) -> Cow<'_, str> {
+    percent_decode_str(value).decode_utf8_lossy()
+}
+
 /// A logical string wrapped for use as an [RFC 8187] `ext-value`, in header parameters like
 /// `Content-Disposition`'s `filename*`.
 ///
