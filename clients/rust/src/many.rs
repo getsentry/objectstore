@@ -574,10 +574,15 @@ async fn classify(op: BatchOperation) -> Classified {
     match op {
         BatchOperation::Insert {
             key,
-            metadata,
+            mut metadata,
             compression,
             body,
         } => {
+            // Fail only this operation, before it can reach a batch request.
+            if let Err(err) = put::normalize_custom_keys(&mut metadata) {
+                return classify_fail(key, err);
+            }
+
             let size = match &body {
                 PutBody::Buffer(bytes) => Some(bytes.len() as u64),
                 PutBody::File(file) => match file.metadata().await {

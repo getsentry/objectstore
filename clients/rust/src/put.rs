@@ -6,7 +6,7 @@ use std::{borrow::Cow, collections::BTreeMap};
 use async_compression::tokio::bufread::{GzipEncoder, ZstdEncoder};
 use bytes::Bytes;
 use futures_util::StreamExt;
-use objectstore_types::metadata::Metadata;
+use objectstore_types::metadata::{Metadata, normalize_custom_key};
 use reqwest::Body;
 use reqwest::header::CONTENT_LENGTH;
 use serde::Deserialize;
@@ -298,12 +298,22 @@ impl PutBuilder {
     /// This sets the custom metadata to the provided map.
     ///
     /// It will clear any previously set metadata.
+    ///
+    /// Keys must satisfy [`normalize_custom_key`]: ASCII letters are lowercased, and the key must
+    /// be non-empty and consist only of `a-z`, `0-9`, and `_ - | ~ % $ # + . :`. Keys are checked
+    /// when the request is sent, not here; an invalid key makes [`send`](PutBuilder::send) fail
+    /// with [`Error::Metadata`](crate::Error::Metadata) before any request goes out.
     pub fn set_metadata(mut self, metadata: impl Into<BTreeMap<String, String>>) -> Self {
         self.metadata.custom = metadata.into();
         self
     }
 
-    /// Appends they `key`/`value` to the custom metadata of this object.
+    /// Appends the `key`/`value` to the custom metadata of this object.
+    ///
+    /// Keys must satisfy [`normalize_custom_key`]: ASCII letters are lowercased, and the key must
+    /// be non-empty and consist only of `a-z`, `0-9`, and `_ - | ~ % $ # + . :`. The key is checked
+    /// when the request is sent, not here; an invalid key makes [`send`](PutBuilder::send) fail
+    /// with [`Error::Metadata`](crate::Error::Metadata) before any request goes out.
     pub fn append_metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.metadata.custom.insert(key.into(), value.into());
         self
@@ -382,6 +392,18 @@ async fn encode_file(mut file: File) -> io::Result<EncodedBody> {
     }
 }
 
+/// Normalizes the keys of `metadata.custom` in place, failing on the first invalid key.
+///
+/// This applies [`normalize_custom_key`], so ASCII letters are lowercased. If two keys differ
+/// only in case, the one that sorts last wins.
+pub(crate) fn normalize_custom_keys(metadata: &mut Metadata) -> crate::Result<()> {
+    let custom = std::mem::take(&mut metadata.custom);
+    for (key, value) in custom {
+        metadata.custom.insert(normalize_custom_key(&key)?, value);
+    }
+    Ok(())
+}
+
 fn compress(reader: impl AsyncBufRead + Send + 'static, compression: Compression) -> Body {
     match compression {
         Compression::Zstd => Body::wrap_stream(ReaderStream::new(ZstdEncoder::new(reader))),
@@ -397,6 +419,8 @@ impl PutBuilder {
     }
 
     async fn execute(mut self) -> crate::Result<PutResponse> {
+        normalize_custom_keys(&mut self.metadata)?;
+
         let method = match self.key {
             Some(_) => reqwest::Method::PUT,
             None => reqwest::Method::POST,
