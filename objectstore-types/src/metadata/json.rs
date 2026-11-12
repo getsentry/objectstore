@@ -706,7 +706,10 @@ mod tests {
         for expiration in ["manual", "ttl:30d", "tti:1h"] {
             let mut headers = http::HeaderMap::new();
             headers.insert("content-type", "text/plain".parse().unwrap());
-            headers.insert(super::super::HEADER_EXPIRATION, expiration.parse().unwrap());
+            headers.insert(
+                crate::metadata::HEADER_EXPIRATION,
+                expiration.parse().unwrap(),
+            );
             let from_headers = Metadata::from_insert_headers(&headers, "", access_time).unwrap();
 
             let json = format!(r#"{{"content_type":"text/plain","expiration":"{expiration}"}}"#);
