@@ -23,11 +23,7 @@ fn emit_release_var() -> Result<(), io::Error> {
     println!("cargo:rerun-if-env-changed={REVISION_ENV}");
     let revision = match std::env::var(REVISION_ENV) {
         Ok(revision) => revision,
-        Err(std::env::VarError::NotPresent) => {
-            // Keep checking the package files when getting the revision from Git.
-            println!("cargo:rerun-if-changed=.");
-            git_revision()?
-        }
+        Err(std::env::VarError::NotPresent) => git_revision()?,
         Err(error) => return Err(io::Error::new(io::ErrorKind::InvalidInput, error)),
     };
     let version = std::env::var("CARGO_PKG_VERSION").unwrap();
