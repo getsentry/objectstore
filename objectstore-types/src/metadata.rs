@@ -672,8 +672,7 @@ pub fn normalize_custom_key(key: &str) -> Result<String, Error> {
 /// because header names are lowercased in transit. The result contains only RFC 9110 token
 /// characters when `key` satisfies [`normalize_custom_key`].
 ///
-/// This is a fixed two-entry mapping, not general percent-encoding. The inverse is
-/// [`decode_custom_key`].
+/// The inverse is [`decode_custom_key`].
 ///
 /// # Examples
 ///
