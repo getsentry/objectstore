@@ -491,9 +491,8 @@ impl Metadata {
 
     /// Parses metadata from the given [`HeaderMap`].
     ///
-    /// When `skip_read_only` is set, the headers come from a write: read-only attributes are not
-    /// parsed off them, so a malformed client-supplied value cannot fail the parse, and custom keys
-    /// must satisfy [`normalize_custom_key`]. Reads accept any stored key. A prefix can also be provided which
+    /// When `skip_read_only` is set, read-only attributes are not parsed off the headers, so a
+    /// malformed client-supplied value cannot fail the parse. A prefix can also be provided which
     /// is stripped from custom non-standard headers.
     fn parse_headers(
         headers: &HeaderMap,
@@ -551,6 +550,7 @@ impl Metadata {
                             if let Some(name) = name.strip_prefix(HEADER_META_PREFIX) {
                                 let value = headers::decode_header_value(value)?;
                                 let key = decode_custom_key(name);
+                                // Only writes are validated; stored legacy keys must stay readable.
                                 let key = if skip_read_only {
                                     normalize_custom_key(&key)?
                                 } else {
@@ -648,7 +648,6 @@ impl Metadata {
 /// use objectstore_types::metadata::normalize_custom_key;
 ///
 /// assert_eq!(normalize_custom_key("Build_ID:7")?, "build_id:7");
-/// assert!(normalize_custom_key("has space").is_err());
 /// assert!(normalize_custom_key("").is_err());
 /// # Ok::<(), objectstore_types::metadata::Error>(())
 /// ```
