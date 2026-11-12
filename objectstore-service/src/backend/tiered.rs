@@ -396,13 +396,12 @@ impl TieredStorage {
         let Some((_, limiter)) = &self.concurrency else {
             return Ok(None);
         };
-        limiter
-            .acquire()
-            .await
-            .inspect_err(|_| {
-                objectstore_metrics::count!("tiered.concurrency.rejected", tier = "long-term");
-            })
-            .map(Some)
+        let timer = objectstore_metrics::timer!("tiered.concurrency.wait", tier = "long-term");
+        let permit = limiter.acquire().await.inspect_err(|_| {
+            objectstore_metrics::count!("tiered.concurrency.rejected", tier = "long-term");
+        })?;
+        timer.record();
+        Ok(Some(permit))
     }
 
     /// Records the change to the log and returns a guard that cleans up on drop.
