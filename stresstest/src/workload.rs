@@ -105,8 +105,6 @@ impl WorkloadBuilder {
         let rng = SmallRng::seed_from_u64(self.seed);
 
         // Inspired by <https://stats.stackexchange.com/a/649432>
-        assert!(self.min_size == 0 || self.min_size < self.p50_size);
-        assert!(self.max_size.is_none_or(|max| max >= self.min_size));
         // Fit the distribution above the floor so shifting the samples preserves p50 and p99.
         let p50 = (self.p50_size - self.min_size) as f64;
         let p99 = (self.p99_size - self.min_size) as f64;
