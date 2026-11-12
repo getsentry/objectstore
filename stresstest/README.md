@@ -32,7 +32,7 @@ Each entry in `workloads` configures an independent, concurrent workload:
 | `name`          | yes      | —          | Identifier for this workload (used as the Objectstore usecase)     |
 | `concurrency`   | no       | CPU count  | Maximum number of concurrent operations                            |
 | `organizations` | no       | `1`        | Number of organizations to distribute load across                  |
-| `mode`          | no       | `weighted` | Scheduling mode: `weighted`, `throughput`, or `batch`              |
+| `mode`          | no       | `fixed-concurrency` | Scheduling mode: `fixed-concurrency`, `fixed-rate`, or `batch` |
 | `file_sizes`    | yes      | —          | File size distribution (see below)                                 |
 | `actions`       | no       | 97/2/1     | Operation distribution (see below)                                 |
 
@@ -56,23 +56,19 @@ Controls the mix of operations. Interpretation depends on the mode:
 | `reads`   | `2`     | Weight (or ops/s) for read operations   |
 | `deletes` | `1`     | Weight (or ops/s) for delete operations |
 
-- In **weighted** mode: values are relative weights for random selection.
-- In **throughput** mode: values are target operations per second.
+- In **fixed-concurrency** mode: values are relative weights for random selection.
+- In **fixed-rate** mode: values are target operations per second.
 - In **batch** mode: `writes` is the number of puts per batch request; `reads`
   and `deletes` must be `0`.
 
 ## Modes
 
-### Weighted (default)
-
-Also accepted as `fixed-concurrency`.
+### Fixed concurrency (default)
 
 Runs at maximum speed with fixed concurrency. Each operation is randomly
 selected based on the `actions` weights. Good for saturating the server.
 
-### Throughput
-
-Also accepted as `fixed-rate`.
+### Fixed rate
 
 Targets an operations-per-second rate derived from `actions` values, with a
 maximum of 100 concurrent operations per workload. The `concurrency` setting

@@ -15,20 +15,18 @@ use tokio::io::{AsyncRead, ReadBuf};
 
 /// Defines how the workload schedules its operations.
 #[derive(Debug, Default, Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "kebab-case")]
 pub enum WorkloadMode {
     /// The workload runs with fixed concurrency as fast as possible.
     ///
     /// Actions are used to determine the distribution of writes, reads and deletes.
     #[default]
-    #[serde(alias = "fixed-concurrency")]
-    Weighted,
+    FixedConcurrency,
 
     /// The workload targets fixed ops per second, capped at 100 concurrent operations.
     ///
     /// Actions are used to determine the ops per second for each operation.
-    #[serde(alias = "fixed-rate")]
-    Throughput,
+    FixedRate,
 
     /// The workload sends batch requests containing multiple write operations each.
     ///
@@ -68,7 +66,7 @@ impl WorkloadBuilder {
         self
     }
 
-    /// The mode of the workload, either `weighted` or `throughput`.
+    /// How the workload schedules its operations.
     pub fn mode(mut self, mode: WorkloadMode) -> Self {
         self.mode = mode;
         self
@@ -144,7 +142,7 @@ pub struct Workload {
     pub(crate) concurrency: usize,
     /// The number of organizations to distribute the workload across.
     pub(crate) organizations: u64,
-    /// The target throughput for the workload, in bytes per second. Overrides concurrency.
+    /// How the workload schedules its operations.
     pub(crate) mode: WorkloadMode,
 
     /// The RNG driving all our distributions.
@@ -205,21 +203,21 @@ impl Workload {
         Some(self.existing_files.remove(idx))
     }
 
-    fn next_action_throughput(&mut self) -> Option<Action> {
-        let write_throughput = self.action_distribution.weight(0).unwrap();
-        let read_throughput = self.action_distribution.weight(1).unwrap();
-        let delete_throughput = self.action_distribution.weight(2).unwrap();
+    fn next_action_fixed_rate(&mut self) -> Option<Action> {
+        let write_rate = self.action_distribution.weight(0).unwrap();
+        let read_rate = self.action_distribution.weight(1).unwrap();
+        let delete_rate = self.action_distribution.weight(2).unwrap();
 
         let elapsed = self.start_time.get_or_insert_with(Instant::now).elapsed();
 
         // Prioritize writes to create readback.
-        if (self.totals.writes as f64) < (elapsed.as_secs_f64() * write_throughput as f64) {
+        if (self.totals.writes as f64) < (elapsed.as_secs_f64() * write_rate as f64) {
             self.totals.writes += 1;
             let seed = self.rng.next_u64();
             return Some(Action::Write(InternalId(seed), self.get_payload(seed)));
         }
 
-        if (self.totals.reads as f64) < elapsed.as_secs_f64() * read_throughput as f64
+        if (self.totals.reads as f64) < elapsed.as_secs_f64() * read_rate as f64
             && let Some((internal, external)) = self.sample_readback()
         {
             self.totals.reads += 1;
@@ -230,7 +228,7 @@ impl Workload {
             ));
         }
 
-        if (self.totals.deletes as f64) < elapsed.as_secs_f64() * delete_throughput as f64
+        if (self.totals.deletes as f64) < elapsed.as_secs_f64() * delete_rate as f64
             && let Some((_internal, external)) = self.sample_readback()
         {
             self.totals.deletes += 1;
@@ -240,7 +238,7 @@ impl Workload {
         None
     }
 
-    fn next_action_weighted(&mut self) -> Action {
+    fn next_action_by_weight(&mut self) -> Action {
         loop {
             match self.action_distribution.sample(&mut self.rng) {
                 0 => {
@@ -263,8 +261,10 @@ impl Workload {
 
     pub(crate) fn next_action(&mut self) -> Option<Action> {
         match self.mode {
-            WorkloadMode::Weighted | WorkloadMode::Batch => Some(self.next_action_weighted()),
-            WorkloadMode::Throughput => self.next_action_throughput(),
+            WorkloadMode::FixedConcurrency | WorkloadMode::Batch => {
+                Some(self.next_action_by_weight())
+            }
+            WorkloadMode::FixedRate => self.next_action_fixed_rate(),
         }
     }
 
