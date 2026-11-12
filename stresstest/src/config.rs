@@ -92,6 +92,20 @@ pub struct Workload {
 
 impl Workload {
     pub fn validate(&self) -> anyhow::Result<()> {
+        if let Some(min) = self.file_sizes.min {
+            if min >= self.file_sizes.p50 || self.file_sizes.p99 < self.file_sizes.p50 {
+                bail!(
+                    "workload '{}': file sizes must satisfy min < p50 <= p99",
+                    self.name
+                );
+            }
+            if self.file_sizes.max.is_some_and(|max| max < min) {
+                bail!(
+                    "workload '{}': maximum file size is below the minimum",
+                    self.name
+                );
+            }
+        }
         if matches!(self.mode, WorkloadMode::Batch) {
             if self.actions.reads > 0 || self.actions.deletes > 0 {
                 bail!(
@@ -123,6 +137,7 @@ fn default_organizations() -> u64 {
 
 #[derive(Debug, Deserialize)]
 pub struct FileSizes {
+    pub min: Option<ByteSize>,
     pub p50: ByteSize,
     pub p99: ByteSize,
     pub max: Option<ByteSize>,

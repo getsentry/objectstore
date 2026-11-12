@@ -46,6 +46,7 @@ pub struct WorkloadBuilder {
 
     p50_size: u64,
     p99_size: u64,
+    min_size: u64,
     max_size: Option<u64>,
 
     write_weight: usize,
@@ -79,6 +80,12 @@ impl WorkloadBuilder {
         self
     }
 
+    /// Sets the minimum payload size. This must be less than the median and at most the maximum.
+    pub fn min_size(mut self, min_size: u64) -> Self {
+        self.min_size = min_size;
+        self
+    }
+
     /// Sets an optional maximum payload size. Sampled sizes will be clamped to this value.
     pub fn max_size(mut self, max_size: Option<u64>) -> Self {
         self.max_size = max_size;
@@ -98,8 +105,11 @@ impl WorkloadBuilder {
         let rng = SmallRng::seed_from_u64(self.seed);
 
         // Inspired by <https://stats.stackexchange.com/a/649432>
-        let p50 = self.p50_size as f64;
-        let p99 = self.p99_size as f64;
+        assert!(self.min_size == 0 || self.min_size < self.p50_size);
+        assert!(self.max_size.is_none_or(|max| max >= self.min_size));
+        // Fit the distribution above the floor so shifting the samples preserves p50 and p99.
+        let p50 = (self.p50_size - self.min_size) as f64;
+        let p99 = (self.p99_size - self.min_size) as f64;
         let mu = p50.ln();
         let sigma = (p99.ln() - mu) / 2.3263;
 
@@ -115,6 +125,7 @@ impl WorkloadBuilder {
 
             rng,
             size_distribution,
+            min_size: self.min_size,
             max_size: self.max_size,
             action_distribution,
 
@@ -149,6 +160,8 @@ pub struct Workload {
     rng: SmallRng,
     /// A distribution that generates payload sizes for the `write` action.
     size_distribution: LogNormal<f64>,
+    /// Minimum payload size in bytes, added to each sampled size.
+    min_size: u64,
     /// Optional maximum payload size in bytes.
     max_size: Option<u64>,
     /// A distribution that generates actions, such as write/read/delete.
@@ -173,6 +186,7 @@ impl Workload {
 
             p50_size: 16 * 1024,
             p99_size: 1024 * 1024,
+            min_size: 0,
             max_size: None,
 
             write_weight: 33,
@@ -183,7 +197,8 @@ impl Workload {
 
     fn get_payload(&self, seed: u64) -> Payload {
         let mut rng = SmallRng::seed_from_u64(seed);
-        let mut len = self.size_distribution.sample(&mut rng) as u64;
+        let mut len =
+            (self.size_distribution.sample(&mut rng) as u64).saturating_add(self.min_size);
 
         if let Some(max) = self.max_size {
             len = len.min(max);
@@ -362,6 +377,20 @@ impl AsyncRead for Payload {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn payloads_respect_size_bounds() {
+        const MIN: u64 = 1024 * 1024 + 1;
+        const MAX: u64 = 128 * 1024 * 1024;
+        let workload = Workload::builder("test")
+            .size_distribution(2 * 1024 * 1024, 50 * 1024 * 1024)
+            .min_size(MIN)
+            .max_size(Some(MAX))
+            .build();
+        for seed in 0..1000 {
+            assert!((MIN..=MAX).contains(&workload.get_payload(seed).len));
+        }
+    }
 
     #[test]
     fn lognormal_percentiles_work() {
