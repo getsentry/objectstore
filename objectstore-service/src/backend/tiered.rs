@@ -750,7 +750,7 @@ impl Backend for TieredStorage {
             _ => None,
         };
 
-        // Reserve LT capacity before deleting the marker to claim this upload.
+        // Try to reserve LT capacity before deleting the marker, so that if this fails, the user can still retry.
         let lt_guard = self.acquire_long_term().await?;
         let hv_guard = self.acquire_high_volume(Priority::High).await?;
         self.delete_upload_marker(revision).await?;
