@@ -284,9 +284,8 @@ impl CreateResumableUploadBuilder {
 
     /// Replaces all custom metadata for the object.
     ///
-    /// Keys are checked in [`send`](Self::send) and must satisfy
-    /// [`normalize_custom_key`](objectstore_types::metadata::normalize_custom_key); see
-    /// [`PutBuilder::append_metadata`](crate::PutBuilder::append_metadata).
+    /// Keys are validated like in [`PutBuilder::set_metadata`](crate::PutBuilder::set_metadata),
+    /// but in [`send`](Self::send).
     pub fn set_metadata(mut self, metadata: impl Into<BTreeMap<String, String>>) -> Self {
         self.metadata.custom = metadata.into();
         self
@@ -294,9 +293,9 @@ impl CreateResumableUploadBuilder {
 
     /// Adds or replaces one custom metadata entry.
     ///
-    /// The key is checked in [`send`](Self::send) and must satisfy
-    /// [`normalize_custom_key`](objectstore_types::metadata::normalize_custom_key); see
-    /// [`PutBuilder::append_metadata`](crate::PutBuilder::append_metadata).
+    /// The key is validated like in
+    /// [`PutBuilder::append_metadata`](crate::PutBuilder::append_metadata), but in
+    /// [`send`](Self::send).
     pub fn append_metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.metadata.custom.insert(key.into(), value.into());
         self
@@ -316,7 +315,7 @@ impl CreateResumableUploadBuilder {
     }
 
     async fn execute(mut self) -> crate::Result<Option<ResumableUpload>> {
-        crate::put::normalize_custom_keys(&mut self.metadata)?;
+        crate::metadata::normalize_keys(&mut self.metadata)?;
         let method = if self.key.is_some() {
             Method::PUT
         } else {

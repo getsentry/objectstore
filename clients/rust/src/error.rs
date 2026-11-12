@@ -13,8 +13,7 @@ pub enum Error {
     /// Errors related to UTF-8 dcoding
     #[error(transparent)]
     Utf8(#[from] std::string::FromUtf8Error),
-    /// Errors handling metadata, such as serializing it to/from HTTP headers or an invalid custom
-    /// metadata key, which is rejected before any request is sent.
+    /// Errors handling metadata, such as serializing it to/from HTTP headers.
     #[error(transparent)]
     Metadata(#[from] objectstore_types::metadata::Error),
     /// Error when scope validation fails.

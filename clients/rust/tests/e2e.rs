@@ -316,13 +316,45 @@ async fn roundtrips_custom_metadata_keys() {
         .collect();
     assert_eq!(metadata.custom, expected);
 
+    // An invalid key fails on the client, before the request, for single and batch puts.
     let error = session
         .put("oh hai!")
+        .key("invalid-key")
         .append_metadata("not valid", "x")
         .send()
         .await
         .unwrap_err();
+    assert!(matches!(error, Error::Metadata(_)), "{error:?}");
     assert!(error.to_string().contains("not valid"), "{error}");
+
+    let results: Vec<_> = session
+        .many()
+        .push(
+            session
+                .put("a")
+                .key("batch-bad")
+                .append_metadata("no way", "x"),
+        )
+        .push(
+            session
+                .put("b")
+                .key("batch-good")
+                .append_metadata("Fine", "y"),
+        )
+        .send()
+        .await
+        .collect()
+        .await;
+    for result in results {
+        match result {
+            OperationResult::Put(key, Err(error)) => {
+                assert_eq!(key, "batch-bad");
+                assert!(matches!(error, Error::Metadata(_)), "{error:?}");
+            }
+            OperationResult::Put(key, Ok(_)) => assert_eq!(key, "batch-good"),
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
 }
 
 #[tokio::test]
