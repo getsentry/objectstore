@@ -44,6 +44,7 @@ Controls the LogNormal distribution used to generate object sizes:
 |-------|----------|------------------------------------------|
 | `p50` | yes      | Median file size (e.g. `50 KiB`)         |
 | `p99` | yes      | 99th percentile file size (e.g. `200 KiB`) |
+| `min` | no       | Minimum file size, below p50. The distribution is fitted above this floor. |
 | `max` | no       | Hard cap on generated file sizes         |
 
 ### Actions

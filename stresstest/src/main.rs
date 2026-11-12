@@ -84,6 +84,7 @@ async fn main() -> anyhow::Result<()> {
             .organizations(w.organizations)
             .mode(w.mode)
             .size_distribution(w.file_sizes.p50.0, w.file_sizes.p99.0)
+            .min_size(w.file_sizes.min.map_or(0, |b| b.0))
             .max_size(w.file_sizes.max.map(|b| b.0))
             .action_weights(w.actions.writes, w.actions.reads, w.actions.deletes)
             .build();
