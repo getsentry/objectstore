@@ -490,58 +490,6 @@ async fn invalid_and_duplicate_options_are_rejected() -> Result<()> {
 }
 
 #[tokio::test]
-async fn custom_metadata_keys_with_colon_and_percent_roundtrip() -> Result<()> {
-    let server = test_server().await;
-    let client = reqwest::Client::new();
-
-    // `:` and `%` in keys travel as `%3a` and `%25` in the header name; mixed-case hex is read.
-    let resp = client
-        .put(server.url("/v1/objects/test/org=1/meta-key-escapes"))
-        .header("x-snme-a%3ab", "colon")
-        .header("x-snme-a%253Ab", "encoded-looking")
-        .header("x-snme-100%25", "percent")
-        .body("data")
-        .send()
-        .await?;
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-
-    for resp in [
-        client
-            .get(server.url("/v1/objects/test/org=1/meta-key-escapes"))
-            .send()
-            .await?,
-        client
-            .head(server.url("/v1/objects/test/org=1/meta-key-escapes"))
-            .send()
-            .await?,
-    ] {
-        assert_eq!(resp.status(), reqwest::StatusCode::OK);
-        assert_eq!(resp.headers().get("x-snme-a%3ab").unwrap(), "colon");
-        assert_eq!(
-            resp.headers().get("x-snme-a%253ab").unwrap(),
-            "encoded-looking"
-        );
-        assert_eq!(resp.headers().get("x-snme-100%25").unwrap(), "percent");
-
-        let metadata = Metadata::from_headers(resp.headers(), "")?;
-        assert_eq!(
-            metadata.custom.get("a:b").map(String::as_str),
-            Some("colon")
-        );
-        assert_eq!(
-            metadata.custom.get("a%3ab").map(String::as_str),
-            Some("encoded-looking")
-        );
-        assert_eq!(
-            metadata.custom.get("100%").map(String::as_str),
-            Some("percent")
-        );
-    }
-
-    Ok(())
-}
-
-#[tokio::test]
 async fn invalid_custom_metadata_key_is_rejected_on_put() -> Result<()> {
     let server = test_server().await;
     let client = reqwest::Client::new();

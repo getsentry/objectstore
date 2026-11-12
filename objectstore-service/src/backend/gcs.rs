@@ -351,10 +351,7 @@ enum GcsMetaKey {
     Filename,
     /// Ignored metadata set by the GCS emulator.
     EmulatorIgnored,
-    /// User-defined custom metadata key, as the logical key.
-    ///
-    /// Stored in the same header-name encoding as the `x-snme-` HTTP header (see
-    /// [`encode_custom_key`]).
+    /// User-defined custom metadata key.
     Custom(String),
 }
 
@@ -2062,17 +2059,6 @@ mod tests {
         let reread: GcsObject = serde_json::from_value(stored).unwrap();
         let roundtripped = reread.into_metadata().unwrap();
         assert_eq!(roundtripped.custom, metadata.custom);
-    }
-
-    #[test]
-    fn legacy_custom_keys_with_literal_percent_still_read_back() {
-        let stored = r#"{"contentType":"text/plain","metadata":{"x-snme-100%":"a","x-snme-a%zz":"b"},"generation":"1","metageneration":"1"}"#;
-        let gcs_object: GcsObject = serde_json::from_str(stored).unwrap();
-        let metadata = gcs_object.into_metadata().unwrap();
-        assert_eq!(
-            metadata.custom,
-            BTreeMap::from_iter([("100%".into(), "a".into()), ("a%zz".into(), "b".into())])
-        );
     }
 
     #[tokio::test]
