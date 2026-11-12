@@ -1,11 +1,16 @@
+import re
 from datetime import timedelta
 
 import pytest
 from objectstore_client.metadata import (
+    Metadata,
     TimeToIdle,
     TimeToLive,
+    decode_metadata_key,
+    encode_metadata_key,
     format_expiration,
     format_timedelta,
+    normalize_metadata_key,
     parse_expiration,
     parse_timedelta,
 )
@@ -69,3 +74,62 @@ def test_parse_expiration() -> None:
     assert parse_expiration("ttl:400d") == TimeToLive(timedelta(days=400))
     assert parse_expiration("tti:1h") == TimeToIdle(timedelta(hours=1))
     assert parse_expiration("manual") is None
+
+
+ALLOWED_KEY_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789_-|~%$#+.:"
+
+
+@pytest.mark.parametrize("char", ALLOWED_KEY_CHARS)
+def test_normalize_metadata_key_allows_each_character(char: str) -> None:
+    assert normalize_metadata_key(f"a{char}b") == f"a{char}b"
+
+
+def test_normalize_metadata_key_lowercases_ascii_letters() -> None:
+    assert normalize_metadata_key("Source-ID") == "source-id"
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["", "a b", "a/b", "a@b", "a=b", "a,b", "a;b", "a*b", "a\tb", "a\nb", "ä", "kéy"],
+)
+def test_normalize_metadata_key_rejects_invalid_keys(key: str) -> None:
+    with pytest.raises(ValueError, match="metadata key"):
+        normalize_metadata_key(key)
+
+
+def test_normalize_metadata_key_error_names_the_key() -> None:
+    with pytest.raises(ValueError, match=re.escape(repr("bad key"))):
+        normalize_metadata_key("bad key")
+
+
+@pytest.mark.parametrize(
+    ("key", "encoded"),
+    [
+        ("plain", "plain"),
+        ("a%b", "a%25b"),
+        ("a:b", "a%3ab"),
+        ("a%3ab", "a%253ab"),
+        ("%:", "%25%3a"),
+    ],
+)
+def test_metadata_key_header_name_round_trip(key: str, encoded: str) -> None:
+    assert encode_metadata_key(key) == encoded
+    assert decode_metadata_key(encoded) == key
+
+
+def test_decode_metadata_key_distinguishes_escaped_colon_from_literal() -> None:
+    assert decode_metadata_key("a%3ab") == "a:b"
+    assert decode_metadata_key("a%3Ab") == "a:b"
+    assert decode_metadata_key("a%253ab") == "a%3ab"
+
+
+@pytest.mark.parametrize("key", ["a%zz", "a%41b", "a%", "a%2", "a%2fb"])
+def test_decode_metadata_key_keeps_other_percent_sequences_literal(key: str) -> None:
+    assert decode_metadata_key(key) == key
+
+
+def test_from_headers_decodes_custom_key_names() -> None:
+    metadata = Metadata.from_headers(
+        {"x-snme-a%3ab": "1", "x-snme-c%25d": "2", "x-snme-e%41": "3"}
+    )
+    assert metadata.custom == {"a:b": "1", "c%d": "2", "e%41": "3"}
