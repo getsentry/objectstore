@@ -19,9 +19,7 @@ use http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
 /// Names and filenames are emitted verbatim inside double quotes, so they must be ASCII and must
 /// not contain `"`, `\`, CR, LF or other control characters.
 #[derive(Debug, thiserror::Error)]
-#[error(
-    "invalid multipart {field} {value:?}: must be non-empty printable ASCII without quotes or backslashes"
-)]
+#[error("invalid multipart {field} {value:?}: must match `[ !#-\\[\\]-~]+`")]
 pub struct InvalidPartName {
     field: &'static str,
     value: String,
@@ -37,8 +35,8 @@ pub struct Part {
 impl Part {
     /// Creates a part named `part` with the given body, extra headers and content type.
     ///
-    /// This is the layout of the current batch response format. It serializes as
-    /// `Content-Disposition: form-data; name="part"`. See [`Part::named`] for custom names.
+    /// It serializes as `Content-Disposition: form-data; name="part"`. See [`Part::named`] for
+    /// custom names.
     pub fn new(body: Bytes, headers: HeaderMap, content_type: Option<HeaderValue>) -> Self {
         // Insert after extending so callers cannot override the disposition or content type.
         let mut part = Self { headers, body };
@@ -59,8 +57,8 @@ impl Part {
     ///
     /// # Errors
     ///
-    /// Returns [`InvalidPartName`] if `name` or `filename` contains `"`, `\`, CR, LF, other
-    /// control characters, or non-ASCII bytes.
+    /// Returns [`InvalidPartName`] if `name` or `filename` is empty or contains characters that
+    /// cannot be written verbatim into a quoted header value.
     pub fn named(
         name: &str,
         body: Bytes,
@@ -101,8 +99,7 @@ fn content_disposition(name: &str, filename: Option<&str>) -> Result<HeaderValue
         Some(filename) => format!("form-data; name=\"{name}\"; filename=\"{filename}\""),
         None => format!("form-data; name=\"{name}\""),
     };
-    // Unreachable after validation (printable ASCII is a valid header value), but kept fallible
-    // rather than panicking.
+    // Unreachable after validation, as printable ASCII is a valid header value.
     HeaderValue::from_str(&value).map_err(|_| InvalidPartName {
         field: "content-disposition",
         value,
