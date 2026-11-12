@@ -548,7 +548,6 @@ impl Metadata {
                         _ => {
                             // customer-provided metadata
                             if let Some(name) = name.strip_prefix(HEADER_META_PREFIX) {
-                                let value = headers::decode_header_value(value)?;
                                 let key = decode_custom_key(name);
                                 // Only writes are validated; stored legacy keys must stay readable.
                                 let key = if skip_read_only {
@@ -556,6 +555,7 @@ impl Metadata {
                                 } else {
                                     key.into_owned()
                                 };
+                                let value = headers::decode_header_value(value)?;
                                 metadata.custom.insert(key, value);
                             }
                         }
