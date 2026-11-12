@@ -26,6 +26,10 @@
 //! - `x-sn-*` for objectstore-specific fields (e.g. `x-sn-expiration`)
 //! - `x-snme-` for custom user metadata (e.g. `x-snme-build_id`)
 //!
+//! The name of a custom metadata header is `x-snme-` followed by the entry's key, subject to the
+//! key rules and header-name encoding described under [Custom metadata
+//! keys](#custom-metadata-keys).
+//!
 //! Backends that store metadata as object metadata (like GCS) layer their own
 //! prefix on top, so `x-sn-expiration` becomes `x-goog-meta-x-sn-expiration`.
 //! The [`Metadata::from_headers`] and [`Metadata::to_headers`] methods accept
@@ -45,6 +49,32 @@
 //! [`headers::encode_header_value`] and [`headers::decode_header_value`].
 //! Encoding is a property of the *transport*, never of the stored value:
 //! anything reading [`Metadata`] sees the logical string.
+//!
+//! # Custom metadata keys
+//!
+//! Custom metadata keys are not free-form. [`normalize_custom_key`] defines the rule: after
+//! lowercasing ASCII letters, a key is non-empty and consists only of `a-z`, `0-9`, and
+//! `_ - | ~ % $ # + . :`. Anything else, including whitespace and non-ASCII characters, is
+//! rejected with [`Error::CustomKey`].
+//!
+//! The rule applies to *writes* only: [`Metadata::from_insert_headers`] and the JSON request
+//! paths reject invalid keys, while [`Metadata::from_headers`] and backend reads accept whatever
+//! is stored, so objects written before the rule was explicit stay readable.
+//!
+//! A key is part of an HTTP header name, which allows fewer characters than a key. Two of the
+//! allowed characters are therefore escaped in `x-snme-<key>`, with [`encode_custom_key`] and
+//! [`decode_custom_key`]:
+//!
+//! | Key character | Header name |
+//! |---------------|-------------|
+//! | `%`           | `%25`       |
+//! | `:`           | `%3a`       |
+//!
+//! The hex digits are lowercase because header names are lowercased in transit. This is a fixed
+//! two-entry mapping, not general percent-encoding. When decoding, `%25`, `%3a`, and `%3A` are
+//! replaced and every other `%` is kept literally, so a key such as `100%` stored before this
+//! encoding existed still reads back, and decoding never fails. Backends that persist metadata
+//! as header-like strings, like GCS, use the same encoding for the key.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -165,6 +195,11 @@ pub enum Error {
     /// A free-form header value did not decode into a logical string.
     #[error("invalid metadata header value")]
     Encoding(#[from] crate::headers::DecodeError),
+    /// A custom metadata key is empty or contains a disallowed character.
+    ///
+    /// See [`normalize_custom_key`] for the accepted key format.
+    #[error("invalid custom metadata key {0:?}")]
+    CustomKey(String),
     /// An internal consistency invariant on the metadata was violated.
     #[error("invariant violation: {0}")]
     Invariant(&'static str),
@@ -397,7 +432,11 @@ pub struct Metadata {
 
     /// Arbitrary user-provided key-value metadata (header prefix: `x-snme-`).
     ///
-    /// Each entry is transmitted as `x-snme-{key}: {value}`.
+    /// Each entry is transmitted as `x-snme-{key}: {value}`, where `{key}` is escaped as described
+    /// in [the module docs](self#custom-metadata-keys).
+    ///
+    /// Keys must satisfy [`normalize_custom_key`] when written; reading never rejects a key.
+    /// Values are logical strings and are escaped only on the wire.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub custom: BTreeMap<String, String>,
 }
@@ -419,6 +458,13 @@ impl Metadata {
         access_time: Timestamp,
     ) -> Result<Self, Error> {
         let mut metadata = Self::parse_headers(headers, prefix, true)?;
+
+        // Keys that were readable before the rules were explicit may still be stored, so only
+        // writes are held to them.
+        metadata.custom = std::mem::take(&mut metadata.custom)
+            .into_iter()
+            .map(|(key, value)| Ok((normalize_custom_key(&key)?, value)))
+            .collect::<Result<_, Error>>()?;
 
         metadata.time_created = Some(access_time);
         metadata.time_expires = metadata
@@ -530,7 +576,9 @@ impl Metadata {
                             // customer-provided metadata
                             if let Some(name) = name.strip_prefix(HEADER_META_PREFIX) {
                                 let value = headers::decode_header_value(value)?;
-                                metadata.custom.insert(name.into(), value);
+                                metadata
+                                    .custom
+                                    .insert(decode_custom_key(name).into_owned(), value);
                             }
                         }
                     }
@@ -596,12 +644,125 @@ impl Metadata {
 
         // customer-provided metadata
         for (key, value) in custom {
+            let key = encode_custom_key(key);
             let name = HeaderName::try_from(format!("{prefix}{HEADER_META_PREFIX}{key}"))?;
             headers.append(name, headers::encode_header_value(value));
         }
 
         Ok(headers)
     }
+}
+
+/// Validates and normalizes a custom metadata key.
+///
+/// ASCII letters are lowercased. The result must be non-empty and consist only of
+/// `a-z`, `0-9`, and the symbols `_ - | ~ % $ # + . :`. Anything else, including whitespace,
+/// other punctuation, and non-ASCII characters, is rejected with [`Error::CustomKey`].
+///
+/// Every writer of custom metadata (HTTP headers, JSON bodies, clients) must apply this rule.
+/// Readers must not: objects stored before the rule was explicit may carry other keys.
+///
+/// To use a key as part of a header name, see [`encode_custom_key`].
+///
+/// # Examples
+///
+/// ```
+/// use objectstore_types::metadata::normalize_custom_key;
+///
+/// assert_eq!(normalize_custom_key("Build_ID:7")?, "build_id:7");
+/// assert!(normalize_custom_key("has space").is_err());
+/// assert!(normalize_custom_key("").is_err());
+/// # Ok::<(), objectstore_types::metadata::Error>(())
+/// ```
+pub fn normalize_custom_key(key: &str) -> Result<String, Error> {
+    let is_allowed = |ch: char| {
+        ch.is_ascii_alphanumeric()
+            || matches!(
+                ch,
+                '_' | '-' | '|' | '~' | '%' | '$' | '#' | '+' | '.' | ':'
+            )
+    };
+
+    if key.is_empty() || !key.chars().all(is_allowed) {
+        return Err(Error::CustomKey(key.to_owned()));
+    }
+    Ok(key.to_ascii_lowercase())
+}
+
+/// Encodes a custom metadata key for use in a header name after `x-snme-`.
+///
+/// `%` becomes `%25` and `:` becomes `%3a`; nothing else changes. The hex digits are lowercase
+/// because header names are lowercased in transit. The result contains only RFC 9110 token
+/// characters when `key` satisfies [`normalize_custom_key`].
+///
+/// This is a fixed two-entry mapping, not general percent-encoding. The inverse is
+/// [`decode_custom_key`].
+///
+/// # Examples
+///
+/// ```
+/// use objectstore_types::metadata::encode_custom_key;
+///
+/// assert_eq!(encode_custom_key("build:id"), "build%3aid");
+/// assert_eq!(encode_custom_key("100%"), "100%25");
+/// assert_eq!(encode_custom_key("plain"), "plain");
+/// ```
+pub fn encode_custom_key(key: &str) -> Cow<'_, str> {
+    if !key.contains(['%', ':']) {
+        return Cow::Borrowed(key);
+    }
+
+    let mut encoded = String::with_capacity(key.len() + 4);
+    for ch in key.chars() {
+        match ch {
+            '%' => encoded.push_str("%25"),
+            ':' => encoded.push_str("%3a"),
+            other => encoded.push(other),
+        }
+    }
+    Cow::Owned(encoded)
+}
+
+/// Decodes a custom metadata key from a header name after `x-snme-`.
+///
+/// `%25` becomes `%` and `%3a` or `%3A` becomes `:`. Any other `%` stays literal, so keys stored
+/// before the encoding existed (which may contain a raw `%`) still read back. Decoding is a single
+/// pass and never fails.
+///
+/// This is the inverse of [`encode_custom_key`].
+///
+/// # Examples
+///
+/// ```
+/// use objectstore_types::metadata::decode_custom_key;
+///
+/// assert_eq!(decode_custom_key("build%3aid"), "build:id");
+/// assert_eq!(decode_custom_key("100%25"), "100%");
+/// assert_eq!(decode_custom_key("100%"), "100%");
+/// ```
+pub fn decode_custom_key(name: &str) -> Cow<'_, str> {
+    if !name.contains('%') {
+        return Cow::Borrowed(name);
+    }
+
+    let mut decoded = String::with_capacity(name.len());
+    let mut rest = name;
+    while let Some(index) = rest.find('%') {
+        decoded.push_str(&rest[..index]);
+        let escape = &rest[index + 1..];
+        if escape.starts_with("25") {
+            decoded.push('%');
+            rest = &escape[2..];
+        } else if escape.starts_with("3a") || escape.starts_with("3A") {
+            decoded.push(':');
+            rest = &escape[2..];
+        } else {
+            decoded.push('%');
+            rest = escape;
+        }
+    }
+    decoded.push_str(rest);
+    Cow::Owned(decoded)
 }
 
 /// Validates that `content_type` is a valid [IANA Media
@@ -998,6 +1159,182 @@ mod tests {
             ExpirationPolicy::TimeToIdle(Duration::from_hours(1))
         );
         assert_eq!(metadata.custom.get("my-key").unwrap(), "my-value");
+    }
+
+    #[test]
+    fn normalize_custom_key_accepts_every_allowed_character() {
+        let allowed = "abcdefghijklmnopqrstuvwxyz0123456789_-|~%$#+.:";
+        for ch in allowed.chars() {
+            let key = format!("k{ch}k");
+            assert_eq!(normalize_custom_key(&key).unwrap(), key, "rejected {ch:?}");
+        }
+        assert_eq!(normalize_custom_key(allowed).unwrap(), allowed);
+        assert_eq!(normalize_custom_key("a").unwrap(), "a");
+    }
+
+    #[test]
+    fn normalize_custom_key_lowercases_ascii() {
+        assert_eq!(normalize_custom_key("Build_ID:X").unwrap(), "build_id:x");
+        assert_eq!(normalize_custom_key("ABC").unwrap(), "abc");
+    }
+
+    #[test]
+    fn normalize_custom_key_rejects_empty() {
+        std::assert_matches!(normalize_custom_key(""), Err(Error::CustomKey(_)));
+    }
+
+    #[test]
+    fn normalize_custom_key_rejects_other_characters() {
+        let rejected = [
+            "a b", "a\tb", "a!b", "a\"b", "a&b", "a'b", "a(b", "a)b", "a*b", "a,b", "a/b", "a;b",
+            "a<b", "a=b", "a>b", "a?b", "a@b", "a[b", "a\\b", "a]b", "a^b", "a`b", "a{b", "a}b",
+            "a\nb", "a\x7fb", "kéy", "键", "k🚀",
+        ];
+        for key in rejected {
+            std::assert_matches!(
+                normalize_custom_key(key),
+                Err(Error::CustomKey(_)),
+                "accepted {key:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn custom_key_header_name_encoding() {
+        assert_eq!(encode_custom_key("plain-key_1"), "plain-key_1");
+        assert_eq!(encode_custom_key("a:b"), "a%3ab");
+        assert_eq!(encode_custom_key("a%b"), "a%25b");
+        assert_eq!(encode_custom_key("a%3ab"), "a%253ab");
+        assert_eq!(encode_custom_key("%:"), "%25%3a");
+        std::assert_matches!(encode_custom_key("plain"), Cow::Borrowed(_));
+    }
+
+    #[test]
+    fn custom_key_header_name_decoding() {
+        assert_eq!(decode_custom_key("a%3ab"), "a:b");
+        assert_eq!(decode_custom_key("a%3Ab"), "a:b");
+        assert_eq!(decode_custom_key("a%25b"), "a%b");
+        assert_eq!(decode_custom_key("a%253ab"), "a%3ab");
+        std::assert_matches!(decode_custom_key("plain"), Cow::Borrowed(_));
+    }
+
+    #[test]
+    fn custom_key_header_name_decoding_leaves_legacy_sequences_literal() {
+        for legacy in ["100%", "a%", "a%3", "a%zz", "a%41b", "a%%b", "%2", "50%off"] {
+            assert_eq!(decode_custom_key(legacy), legacy);
+        }
+        // A literal `%` directly before an escape is decoded exactly once.
+        assert_eq!(decode_custom_key("%%25"), "%%");
+    }
+
+    #[test]
+    fn custom_key_header_name_roundtrips() {
+        for key in [
+            "a:b", "a%b", "a%3ab", "a%253ab", "%", ":", "::", "%:%", "a%25", "x:y%z",
+        ] {
+            assert_eq!(decode_custom_key(&encode_custom_key(key)), key);
+        }
+    }
+
+    #[test]
+    fn custom_keys_with_colon_and_percent_roundtrip_through_headers() {
+        let metadata = Metadata {
+            custom: BTreeMap::from([
+                ("a:b".to_owned(), "colon".to_owned()),
+                ("a%3ab".to_owned(), "encoded-looking".to_owned()),
+                ("100%".to_owned(), "percent".to_owned()),
+                ("a%25".to_owned(), "escaped-looking".to_owned()),
+            ]),
+            ..Default::default()
+        };
+
+        for prefix in ["", "x-goog-meta-"] {
+            let headers = metadata.to_headers(prefix).unwrap();
+            assert_eq!(
+                headers.get(format!("{prefix}x-snme-a%3ab")).unwrap(),
+                "colon"
+            );
+            assert_eq!(
+                headers.get(format!("{prefix}x-snme-a%253ab")).unwrap(),
+                "encoded-looking"
+            );
+            assert_eq!(
+                headers.get(format!("{prefix}x-snme-100%25")).unwrap(),
+                "percent"
+            );
+
+            let roundtripped = Metadata::from_headers(&headers, prefix).unwrap();
+            assert_eq!(roundtripped.custom, metadata.custom);
+
+            let roundtripped = Metadata::from_insert_headers(
+                &headers,
+                prefix,
+                Timestamp::from_unix_secs(1_700_000_000).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(roundtripped.custom, metadata.custom);
+        }
+    }
+
+    #[test]
+    fn from_headers_decodes_mixed_case_escapes() {
+        let mut headers = HeaderMap::new();
+        // Header names are lowercased by `http`, so this arrives as `%3a`.
+        headers.insert("x-snme-a%3Ab", "v".parse().unwrap());
+        let metadata = Metadata::from_headers(&headers, "").unwrap();
+        assert_eq!(metadata.custom.get("a:b").unwrap(), "v");
+    }
+
+    #[test]
+    fn from_headers_reads_legacy_keys_with_literal_percent() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-snme-100%", "v".parse().unwrap());
+        headers.insert("x-snme-a%zz", "w".parse().unwrap());
+        let metadata = Metadata::from_headers(&headers, "").unwrap();
+        assert_eq!(metadata.custom.get("100%").unwrap(), "v");
+        assert_eq!(metadata.custom.get("a%zz").unwrap(), "w");
+    }
+
+    #[test]
+    fn from_headers_does_not_validate_custom_keys() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-snme-a*b", "v".parse().unwrap());
+        headers.insert("x-snme-", "empty".parse().unwrap());
+        let metadata = Metadata::from_headers(&headers, "").unwrap();
+        assert_eq!(metadata.custom.get("a*b").unwrap(), "v");
+        assert_eq!(metadata.custom.get("").unwrap(), "empty");
+    }
+
+    #[test]
+    fn from_insert_headers_rejects_invalid_custom_keys() {
+        let access_time = Timestamp::from_unix_secs(1_700_000_000).unwrap();
+        for name in ["x-snme-a*b", "x-snme-a!b", "x-snme-a'b", "x-snme-"] {
+            let mut headers = HeaderMap::new();
+            headers.insert(name, "v".parse().unwrap());
+            std::assert_matches!(
+                Metadata::from_insert_headers(&headers, "", access_time),
+                Err(Error::CustomKey(_)),
+                "accepted {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_insert_headers_accepts_valid_custom_keys() {
+        let access_time = Timestamp::from_unix_secs(1_700_000_000).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-snme-Build_ID", "1".parse().unwrap());
+        headers.insert("x-snme-a%3ab", "2".parse().unwrap());
+        headers.insert("x-snme-100%", "3".parse().unwrap());
+        let metadata = Metadata::from_insert_headers(&headers, "", access_time).unwrap();
+        assert_eq!(
+            metadata.custom,
+            BTreeMap::from([
+                ("build_id".to_owned(), "1".to_owned()),
+                ("a:b".to_owned(), "2".to_owned()),
+                ("100%".to_owned(), "3".to_owned()),
+            ])
+        );
     }
 
     #[test]

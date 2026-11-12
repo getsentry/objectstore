@@ -724,6 +724,29 @@ mod tests {
     }
 
     #[test]
+    fn metadata_to_gcs_headers_encodes_custom_key_colon_and_percent() {
+        let metadata = Metadata {
+            custom: BTreeMap::from_iter([
+                ("a:b".into(), "colon".into()),
+                ("a%3ab".into(), "encoded-looking".into()),
+                ("100%".into(), "percent".into()),
+            ]),
+            ..Default::default()
+        };
+
+        let headers = metadata_to_gcs_headers(&metadata, GCS_CUSTOM_PREFIX).unwrap();
+        assert_eq!(headers.get("x-goog-meta-x-snme-a%3ab").unwrap(), "colon");
+        assert_eq!(
+            headers.get("x-goog-meta-x-snme-a%253ab").unwrap(),
+            "encoded-looking"
+        );
+        assert_eq!(headers.get("x-goog-meta-x-snme-100%25").unwrap(), "percent");
+
+        let roundtripped = Metadata::from_headers(&headers, GCS_CUSTOM_PREFIX).unwrap();
+        assert_eq!(roundtripped.custom, metadata.custom);
+    }
+
+    #[test]
     fn metadata_to_gcs_headers_escapes_unicode() {
         let metadata = Metadata {
             filename: Some("réport-📄.pdf".into()),
