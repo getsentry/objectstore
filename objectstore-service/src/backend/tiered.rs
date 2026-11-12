@@ -201,13 +201,11 @@ pub struct TieredConcurrencyConfig {
 pub struct HighVolumeConcurrencyConfig {
     /// Maximum simultaneous high-volume sections.
     pub max_concurrency: NonZeroU32,
-    /// Maximum wait for capacity at either priority. Defaults to one second.
+    /// Maximum wait for normal-priority capacity. Defaults to one second.
     #[serde(default = "default_concurrency_timeout", with = "humantime_serde")]
     pub timeout: Duration,
-    /// Total queue capacity, split between normal and high priority.
-    ///
-    /// High priority receives the extra slot for odd sizes. Unset means unlimited;
-    /// zero disables waiting.
+    /// Maximum queued normal-priority acquisitions. Unset means unlimited.
+    /// Zero disables waiting. High-priority work queues without a limit or timeout.
     pub queue_size: Option<u32>,
 }
 
@@ -317,9 +315,9 @@ impl TieredStorage {
         let high_volume = PriorityLimiter::new(
             config.high_volume.max_concurrency,
             config.high_volume.timeout,
-            config.high_volume.timeout,
-            config.high_volume.queue_size.map(|size| size / 2),
-            config.high_volume.queue_size.map(|size| size - size / 2),
+            None,
+            config.high_volume.queue_size,
+            None,
         );
         let long_term = Limiter::new(
             config.long_term.max_concurrency,
