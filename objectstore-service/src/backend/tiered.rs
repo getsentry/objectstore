@@ -105,8 +105,8 @@
 //!
 //! Each upload has a separate HV marker with a fixed five-day lifetime that serves
 //! as the source of truth for whether the upload logically exists.
-//! Cancellation consumes the marker. To claim an upload for finalization, the final chunk handler
-//! reserves LT capacity and then consumes the marker.
+//! This marker is consumed upon cancellation or the first submission of a final chunk, making
+//! finalization one-shot.
 
 use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::Arc;
