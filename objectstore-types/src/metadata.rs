@@ -49,7 +49,8 @@
 //! # Custom metadata keys
 //!
 //! Custom metadata keys are restricted by [`normalize_custom_key`] and escaped in header names by
-//! [`encode_custom_key`] and [`decode_custom_key`]; see those functions for the exact rules.
+//! [`encode_custom_key`] and [`headers::decode_header_str_lossy`]; see those functions for the exact
+//! rules.
 //!
 //! The key rule applies to *writes* only: [`Metadata::from_insert_headers`] and the JSON request
 //! paths reject invalid keys, while [`Metadata::from_headers`] and backend reads accept whatever
@@ -546,8 +547,8 @@ impl Metadata {
                         _ => {
                             // customer-provided metadata
                             if let Some(name) = name.strip_prefix(HEADER_META_PREFIX) {
-                                let key = decode_custom_key(name);
-                                // Only writes are validated; stored legacy keys must stay readable.
+                                let key = headers::decode_header_str_lossy(name);
+                                // Only writes are validated; stored keys must stay readable.
                                 let key = if skip_read_only {
                                     normalize_custom_key(&key)?
                                 } else {
@@ -669,7 +670,7 @@ pub fn normalize_custom_key(key: &str) -> Result<String, Error> {
 /// `%` becomes `%25` and `:` becomes `%3a`; nothing else changes. The result contains only
 /// RFC 9110 token characters when `key` satisfies [`normalize_custom_key`].
 ///
-/// The inverse is [`decode_custom_key`].
+/// The inverse is [`headers::decode_header_str_lossy`], which also decodes any other escape.
 ///
 /// # Examples
 ///
@@ -694,51 +695,6 @@ pub fn encode_custom_key(key: &str) -> Cow<'_, str> {
         }
     }
     Cow::Owned(encoded)
-}
-
-/// Decodes a custom metadata key from a header name after `x-snme-`.
-///
-/// `%25` becomes `%` and `%3a` or `%3A` becomes `:`. Any other `%` stays literal, so keys stored
-/// before the encoding existed (which may contain a raw `%`) still read back. Decoding is a single
-/// pass and never fails.
-///
-/// This is the inverse of [`encode_custom_key`].
-///
-/// # Examples
-///
-/// ```
-/// use objectstore_types::metadata::decode_custom_key;
-///
-/// assert_eq!(decode_custom_key("build%3aid"), "build:id");
-/// assert_eq!(decode_custom_key("100%25"), "100%");
-/// assert_eq!(decode_custom_key("100%"), "100%");
-/// ```
-pub fn decode_custom_key(name: &str) -> Cow<'_, str> {
-    if !name.contains('%') {
-        return Cow::Borrowed(name);
-    }
-
-    let mut decoded = String::with_capacity(name.len());
-    let mut rest = name;
-    while let Some(index) = rest.find('%') {
-        decoded.push_str(&rest[..index]);
-        let escape = &rest[index + 1..];
-        if let Some(after) = escape.strip_prefix("25") {
-            decoded.push('%');
-            rest = after;
-        } else if let Some(after) = escape
-            .strip_prefix("3a")
-            .or_else(|| escape.strip_prefix("3A"))
-        {
-            decoded.push(':');
-            rest = after;
-        } else {
-            decoded.push('%');
-            rest = escape;
-        }
-    }
-    decoded.push_str(rest);
-    Cow::Owned(decoded)
 }
 
 /// Validates that `content_type` is a valid [IANA Media
@@ -1172,23 +1128,28 @@ mod tests {
         assert_eq!(encode_custom_key("a%3ab"), "a%253ab");
         std::assert_matches!(encode_custom_key("plain"), Cow::Borrowed(_));
 
-        assert_eq!(decode_custom_key("a%3ab"), "a:b");
-        assert_eq!(decode_custom_key("a%3Ab"), "a:b");
-        assert_eq!(decode_custom_key("a%253ab"), "a%3ab");
-        std::assert_matches!(decode_custom_key("plain"), Cow::Borrowed(_));
+        assert_eq!(headers::decode_header_str_lossy("a%3ab"), "a:b");
+        assert_eq!(headers::decode_header_str_lossy("a%3Ab"), "a:b");
+        assert_eq!(headers::decode_header_str_lossy("a%61"), "aa");
+        assert_eq!(headers::decode_header_str_lossy("a%253ab"), "a%3ab");
+        std::assert_matches!(headers::decode_header_str_lossy("plain"), Cow::Borrowed(_));
 
         for key in ["a:b", "a%b", "a%3ab", "a%253ab", "%:%", "a%25", "x:y%z"] {
-            assert_eq!(decode_custom_key(&encode_custom_key(key)), key);
+            assert_eq!(
+                headers::decode_header_str_lossy(&encode_custom_key(key)),
+                key
+            );
         }
     }
 
     #[test]
-    fn custom_key_header_name_decoding_leaves_legacy_sequences_literal() {
-        for legacy in ["100%", "a%", "a%3", "a%zz", "a%41b", "a%%b", "%2", "50%off"] {
-            assert_eq!(decode_custom_key(legacy), legacy);
+    fn custom_key_header_name_decoding_is_lenient() {
+        // Malformed escapes stay literal.
+        for literal in ["100%", "a%", "a%3", "a%zz", "a%%b", "%2", "50%off"] {
+            assert_eq!(headers::decode_header_str_lossy(literal), literal);
         }
-        // A literal `%` directly before an escape is decoded exactly once.
-        assert_eq!(decode_custom_key("%%25"), "%%");
+        // Invalid UTF-8 never fails to decode.
+        assert_eq!(headers::decode_header_str_lossy("a%ffb"), "a\u{FFFD}b");
     }
 
     #[test]
@@ -1237,7 +1198,13 @@ mod tests {
     #[test]
     fn from_insert_headers_rejects_invalid_custom_keys() {
         let access_time = Timestamp::from_unix_secs(1_700_000_000).unwrap();
-        for name in ["x-snme-a*b", "x-snme-a!b", "x-snme-"] {
+        for name in [
+            "x-snme-a*b",
+            "x-snme-a!b",
+            "x-snme-a%ffb",
+            "x-snme-a%20b",
+            "x-snme-",
+        ] {
             let mut headers = HeaderMap::new();
             headers.insert(name, "v".parse().unwrap());
             std::assert_matches!(
