@@ -10,13 +10,15 @@
 //!
 //! # Serialization
 //!
-//! Metadata has two serialization formats:
+//! Metadata has three serialization formats:
 //!
-//! - **HTTP headers** — used by the public API. [`Metadata::from_headers`] and
+//! - **HTTP headers** — used by the single-object public API. [`Metadata::from_headers`] and
 //!   [`Metadata::to_headers`] handle this conversion for public fields only.
-//! - **JSON** — used internally by backends for storage. JSON serialization
-//!   includes additional internal fields that are skipped in the header
-//!   representation.
+//! - **JSON in the public API** — used by the batch API. [`InsertMetadata`] and
+//!   [`ObjectMetadata`] define this format; see [below](#json-in-the-public-api).
+//! - **JSON storage** — used internally by backends, through the serde implementation of
+//!   [`Metadata`]. It includes additional internal fields that are skipped in the header
+//!   representation, and is unrelated to the public JSON format.
 //!
 //! # HTTP header prefixes
 //!
@@ -55,6 +57,33 @@
 //! The key rule applies to *writes* only: [`Metadata::from_insert_headers`] and the JSON request
 //! paths reject invalid keys, while [`Metadata::from_headers`] and backend reads accept whatever
 //! is stored, so objects written before the rule was explicit stay readable.
+//!
+//! # JSON in the public API
+//!
+//! The batch API carries metadata as a typed JSON object with fixed fields, in two shapes:
+//!
+//! - [`InsertMetadata`] is what a client sends when writing an object. It has only the writable
+//!   fields and is strict: unknown, read-only, and duplicate fields, as well as invalid values,
+//!   fail deserialization, because a silently dropped field would lose data such as a misspelled
+//!   expiration. Duplicate keys inside `custom` are allowed; the last value wins.
+//! - [`ObjectMetadata`] is what the server returns for an existing object. It has all fields,
+//!   omits unset ones, and ignores unknown fields, so the server can add fields without breaking
+//!   clients.
+//!
+//! | Field              | JSON type                | Header              | Insert   | Object          |
+//! |--------------------|--------------------------|---------------------|----------|-----------------|
+//! | `content_type`     | media type string        | `Content-Type`      | optional | always          |
+//! | `content_encoding` | `"zstd"` or `"gzip"`     | `Content-Encoding`  | optional | if encoded      |
+//! | `expiration`       | `"ttl:30d"`, `"tti:1h"`  | `x-sn-expiration`   | optional | if not `manual` |
+//! | `origin`           | string                   | `x-sn-origin`       | optional | if set          |
+//! | `filename`         | string                   | `x-sn-filename`     | optional | if set          |
+//! | `custom`           | object of strings        | `x-snme-*`          | optional | if non-empty    |
+//! | `time_created`     | RFC 3339 timestamp       | `x-sn-time-created` | rejected | if known        |
+//! | `time_expires`     | RFC 3339 timestamp       | `x-sn-time-expires` | rejected | if set          |
+//! | `size`             | integer, in bytes        | `x-sn-size`         | rejected | if known        |
+//!
+//! Values keep their header syntax, for example [`ExpirationPolicy`]'s `ttl:30d`, but strings are
+//! plain JSON strings and are never percent-encoded.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -69,6 +98,10 @@ use serde::{Deserialize, Serialize};
 use crate::duration::{ParseDurationError, format_duration, parse_duration};
 use crate::headers;
 use crate::time::{InvalidTimestamp, Rfc3339Timestamp, Timestamp};
+
+mod json;
+
+pub use json::{InsertMetadata, ObjectMetadata};
 
 /// The custom HTTP header that contains the serialized [`ExpirationPolicy`].
 pub const HEADER_EXPIRATION: &str = "x-sn-expiration";
@@ -437,15 +470,26 @@ impl Metadata {
         access_time: Timestamp,
     ) -> Result<Self, Error> {
         let mut metadata = Self::parse_headers(headers, prefix, true)?;
+        metadata.materialize_write_times(access_time)?;
+        Ok(metadata)
+    }
 
-        metadata.time_created = Some(access_time);
-        metadata.time_expires = metadata
+    /// Sets the server-assigned times of an object written at `access_time`.
+    ///
+    /// Sets [`time_created`](Self::time_created) to `access_time` and resolves
+    /// [`time_expires`](Self::time_expires) from the [`expiration_policy`](Self::expiration_policy):
+    /// `access_time` plus the policy's duration, or `None` for a manual policy. Shared by every
+    /// write path, so the header and JSON APIs resolve expiration identically.
+    ///
+    /// Returns [`Error::ExpirationTime`] if the deadline is outside the supported range.
+    fn materialize_write_times(&mut self, access_time: Timestamp) -> Result<(), Error> {
+        self.time_created = Some(access_time);
+        self.time_expires = self
             .expiration_policy
             .expires_in()
             .map(|ttl| access_time.checked_add(ttl).ok_or(InvalidTimestamp))
             .transpose()?;
-
-        Ok(metadata)
+        Ok(())
     }
 
     /// Validates internal consistency of the metadata.
