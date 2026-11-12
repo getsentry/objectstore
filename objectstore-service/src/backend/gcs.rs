@@ -11,9 +11,7 @@ use std::{fmt, io};
 use futures_util::{StreamExt, TryStreamExt};
 use gcp_auth::TokenProvider;
 use objectstore_types::headers;
-use objectstore_types::metadata::{
-    ExpirationPolicy, Metadata, decode_custom_key, encode_custom_key,
-};
+use objectstore_types::metadata::{ExpirationPolicy, Metadata, encode_custom_key};
 use objectstore_types::range::{ByteRange, ContentRange};
 use objectstore_types::time::{Rfc3339Timestamp, Timestamp};
 use reqwest::header::HeaderMap;
@@ -369,7 +367,7 @@ impl std::str::FromStr for GcsMetaKey {
             Some("filename") => GcsMetaKey::Filename,
             Some(unknown) => anyhow::bail!("unknown builtin metadata key: {unknown}"),
             None => match s.strip_prefix(CUSTOM_META_PREFIX) {
-                Some(key) => GcsMetaKey::Custom(decode_custom_key(key).into_owned()),
+                Some(key) => GcsMetaKey::Custom(headers::decode_header_str_lossy(key).into_owned()),
                 None => anyhow::bail!("invalid GCS metadata key format: {s}"),
             },
         })
