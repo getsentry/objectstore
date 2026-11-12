@@ -723,7 +723,7 @@ impl Backend for TieredStorage {
                 result
             },
             async {
-                let hv_guard = self.acquire_high_volume(Priority::Normal).await?;
+                let hv_guard = self.acquire_high_volume(Priority::High).await?;
                 let result = self
                     .inner
                     .high_volume
@@ -751,7 +751,7 @@ impl Backend for TieredStorage {
         };
 
         // Delete the marker to claim this upload.
-        let hv_guard = self.acquire_high_volume(Priority::Normal).await?;
+        let hv_guard = self.acquire_high_volume(Priority::High).await?;
         self.delete_upload_marker(revision).await?;
         drop(hv_guard);
 
