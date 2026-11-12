@@ -750,12 +750,15 @@ pub fn decode_custom_key(name: &str) -> Cow<'_, str> {
     while let Some(index) = rest.find('%') {
         decoded.push_str(&rest[..index]);
         let escape = &rest[index + 1..];
-        if escape.starts_with("25") {
+        if let Some(after) = escape.strip_prefix("25") {
             decoded.push('%');
-            rest = &escape[2..];
-        } else if escape.starts_with("3a") || escape.starts_with("3A") {
+            rest = after;
+        } else if let Some(after) = escape
+            .strip_prefix("3a")
+            .or_else(|| escape.strip_prefix("3A"))
+        {
             decoded.push(':');
-            rest = &escape[2..];
+            rest = after;
         } else {
             decoded.push('%');
             rest = escape;
