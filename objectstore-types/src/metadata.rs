@@ -14,11 +14,11 @@
 //!
 //! - **HTTP headers** — used by the single-object public API. [`Metadata::from_headers`] and
 //!   [`Metadata::to_headers`] handle this conversion for public fields only.
-//! - **JSON in the public API** — used by the batch API. [`InsertMetadata`] and
-//!   [`ObjectMetadata`] define this format; see [below](#json-in-the-public-api).
+//! - **JSON over the wire** — an alternate representation in API request and response bodies:
+//!   [`InsertMetadata`] for writes and [`ObjectMetadata`] for reads.
 //! - **JSON storage** — used internally by backends, through the serde implementation of
 //!   [`Metadata`]. It includes additional internal fields that are skipped in the header
-//!   representation, and is unrelated to the public JSON format.
+//!   representation, and differs from the wire format.
 //!
 //! # HTTP header prefixes
 //!
@@ -57,36 +57,6 @@
 //! The key rule applies to *writes* only: [`Metadata::from_insert_headers`] and the JSON request
 //! paths reject invalid keys, while [`Metadata::from_headers`] and backend reads accept whatever
 //! is stored, so objects written before the rule was explicit stay readable.
-//!
-//! # JSON in the public API
-//!
-//! The batch API carries metadata as a typed JSON object with fixed fields, in two shapes:
-//!
-//! - [`InsertMetadata`] is what a client sends when writing an object. It has only the writable
-//!   fields and is strict: unknown, read-only, and duplicate fields, as well as invalid values,
-//!   fail deserialization, because a silently dropped field would lose data such as a misspelled
-//!   expiration. Duplicate keys inside `custom` are allowed; the last value wins.
-//! - [`ObjectMetadata`] is what the server returns for an existing object. It has all fields,
-//!   omits unset ones, and ignores unknown fields, so the server can add fields without breaking
-//!   clients.
-//!
-//! | Field              | JSON type                | Header              | Insert   | Object          |
-//! |--------------------|--------------------------|---------------------|----------|-----------------|
-//! | `content_type`     | media type string        | `Content-Type`      | optional | always          |
-//! | `content_encoding` | `"zstd"` or `"gzip"`     | `Content-Encoding`  | optional | if encoded      |
-//! | `expiration`       | `"ttl:30d"`, `"tti:1h"`  | `x-sn-expiration`   | optional | if not `manual` |
-//! | `origin`           | string                   | `x-sn-origin`       | optional | if set          |
-//! | `filename`         | string                   | `x-sn-filename`     | optional | if set          |
-//! | `custom`           | object of strings [^key] | `x-snme-*`          | optional | if non-empty    |
-//! | `time_created`     | RFC 3339 timestamp       | `x-sn-time-created` | rejected | if known        |
-//! | `time_expires`     | RFC 3339 timestamp       | `x-sn-time-expires` | rejected | if set          |
-//! | `size`             | integer, in bytes        | `x-sn-size`         | rejected | if known        |
-//!
-//! [^key]: Keys follow the [custom metadata key rules](#custom-metadata-keys) and are lowercased
-//!     on insert. JSON carries keys unescaped.
-//!
-//! Values keep their header syntax, for example [`ExpirationPolicy`]'s `ttl:30d`, but strings are
-//! plain JSON strings and are never percent-encoded.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -101,10 +71,6 @@ use serde::{Deserialize, Serialize};
 use crate::duration::{ParseDurationError, format_duration, parse_duration};
 use crate::headers;
 use crate::time::{InvalidTimestamp, Rfc3339Timestamp, Timestamp};
-
-mod json;
-
-pub use json::{InsertMetadata, ObjectMetadata};
 
 /// The custom HTTP header that contains the serialized [`ExpirationPolicy`].
 pub const HEADER_EXPIRATION: &str = "x-sn-expiration";
@@ -477,14 +443,7 @@ impl Metadata {
         Ok(metadata)
     }
 
-    /// Sets the server-assigned times of an object written at `access_time`.
-    ///
-    /// Sets [`time_created`](Self::time_created) to `access_time` and resolves
-    /// [`time_expires`](Self::time_expires) from the [`expiration_policy`](Self::expiration_policy):
-    /// `access_time` plus the policy's duration, or `None` for a manual policy. Shared by every
-    /// write path, so the header and JSON APIs resolve expiration identically.
-    ///
-    /// Returns [`Error::ExpirationTime`] if the deadline is outside the supported range.
+    /// Sets `time_created` and resolves `time_expires` for an object written at `access_time`.
     fn materialize_write_times(&mut self, access_time: Timestamp) -> Result<(), Error> {
         self.time_created = Some(access_time);
         self.time_expires = self
@@ -764,6 +723,167 @@ impl Default for Metadata {
             size: None,
             custom: BTreeMap::new(),
         }
+    }
+}
+
+/// The writable subset of [`Metadata`], as sent in JSON when inserting an object.
+///
+/// Values use their header syntax, for example `"zstd"` or `"ttl:30d"`, and are validated by
+/// [`into_metadata`](Self::into_metadata). Unknown fields are ignored.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InsertMetadata {
+    /// See [`Metadata::content_type`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    /// See [`Metadata::compression`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_encoding: Option<String>,
+    /// See [`Metadata::expiration_policy`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expiration: Option<String>,
+    /// See [`Metadata::origin`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    /// See [`Metadata::filename`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    /// See [`Metadata::custom`].
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub custom: BTreeMap<String, String>,
+}
+
+impl InsertMetadata {
+    /// Validates the fields and converts them into [`Metadata`] for an object written at
+    /// `access_time`.
+    ///
+    /// Sets the creation and expiration times like [`Metadata::from_insert_headers`]. Custom keys
+    /// are normalized with [`normalize_custom_key`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a value is invalid.
+    pub fn into_metadata(self, access_time: Timestamp) -> Result<Metadata, Error> {
+        if let Some(content_type) = &self.content_type {
+            validate_content_type(content_type)?;
+        }
+
+        let custom = self
+            .custom
+            .into_iter()
+            .map(|(key, value)| Ok((normalize_custom_key(&key)?, value)))
+            .collect::<Result<_, Error>>()?;
+
+        let expiration_policy = self.expiration.as_deref().map(str::parse).transpose()?;
+        let mut metadata = Metadata {
+            expiration_policy: expiration_policy.unwrap_or_default(),
+            content_type: self
+                .content_type
+                .map_or(DEFAULT_CONTENT_TYPE.into(), Into::into),
+            compression: self
+                .content_encoding
+                .as_deref()
+                .map(str::parse)
+                .transpose()?,
+            origin: self.origin,
+            filename: self.filename,
+            custom,
+            ..Default::default()
+        };
+        metadata.materialize_write_times(access_time)?;
+        Ok(metadata)
+    }
+}
+
+impl From<&Metadata> for InsertMetadata {
+    /// Copies the writable fields, leaving the default content type and expiration unset.
+    fn from(metadata: &Metadata) -> Self {
+        Self {
+            content_type: (metadata.content_type != DEFAULT_CONTENT_TYPE)
+                .then(|| metadata.content_type.to_string()),
+            content_encoding: metadata.compression.map(|c| c.to_string()),
+            expiration: (!metadata.expiration_policy.is_manual())
+                .then(|| metadata.expiration_policy.to_string()),
+            origin: metadata.origin.clone(),
+            filename: metadata.filename.clone(),
+            custom: metadata.custom.clone(),
+        }
+    }
+}
+
+/// [`Metadata`] of an existing object, as returned in JSON.
+///
+/// Values use their header syntax, for example `"zstd"` or `"ttl:30d"`, and timestamps are RFC
+/// 3339. Unset fields are omitted. Unknown fields are ignored.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectMetadata {
+    /// See [`Metadata::content_type`].
+    pub content_type: String,
+    /// See [`Metadata::compression`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_encoding: Option<String>,
+    /// See [`Metadata::expiration_policy`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expiration: Option<String>,
+    /// See [`Metadata::origin`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    /// See [`Metadata::filename`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    /// See [`Metadata::custom`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub custom: BTreeMap<String, String>,
+    /// See [`Metadata::time_created`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_created: Option<Rfc3339Timestamp>,
+    /// See [`Metadata::time_expires`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_expires: Option<Rfc3339Timestamp>,
+    /// See [`Metadata::size`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<usize>,
+}
+
+impl From<Metadata> for ObjectMetadata {
+    fn from(metadata: Metadata) -> Self {
+        Self {
+            content_type: metadata.content_type.into_owned(),
+            content_encoding: metadata.compression.map(|c| c.to_string()),
+            expiration: (!metadata.expiration_policy.is_manual())
+                .then(|| metadata.expiration_policy.to_string()),
+            origin: metadata.origin,
+            filename: metadata.filename,
+            custom: metadata.custom,
+            time_created: metadata.time_created.map(Timestamp::as_rfc3339),
+            time_expires: metadata.time_expires.map(Timestamp::as_rfc3339),
+            size: metadata.size,
+        }
+    }
+}
+
+impl TryFrom<ObjectMetadata> for Metadata {
+    type Error = Error;
+
+    /// Parses the values back without validating the content type or custom keys, so that any
+    /// stored object can be read.
+    fn try_from(object: ObjectMetadata) -> Result<Self, Error> {
+        let expiration_policy = object.expiration.as_deref().map(str::parse).transpose()?;
+        Ok(Self {
+            expiration_policy: expiration_policy.unwrap_or_default(),
+            time_created: object.time_created.map(Rfc3339Timestamp::into_inner),
+            time_expires: object.time_expires.map(Rfc3339Timestamp::into_inner),
+            content_type: object.content_type.into(),
+            compression: object
+                .content_encoding
+                .as_deref()
+                .map(str::parse)
+                .transpose()?,
+            origin: object.origin,
+            filename: object.filename,
+            size: object.size,
+            custom: object.custom,
+        })
     }
 }
 
@@ -1617,5 +1737,144 @@ mod tests {
             ..Default::default()
         };
         assert!(metadata.check_tti_bump(Timestamp::now()).is_none());
+    }
+
+    // JSON wire representation
+
+    fn insert_json(json: &str) -> Result<Metadata, Error> {
+        let insert: InsertMetadata = serde_json::from_str(json).unwrap();
+        insert.into_metadata(Timestamp::from_unix_secs(1_700_000_000).unwrap())
+    }
+
+    fn full_metadata() -> Metadata {
+        Metadata {
+            expiration_policy: ExpirationPolicy::TimeToLive(Duration::from_hours(30 * 24)),
+            time_created: Some(Timestamp::from_unix_secs(1_700_000_000).unwrap()),
+            time_expires: Some(Timestamp::from_unix_secs(1_702_592_000).unwrap()),
+            content_type: "image/png".into(),
+            compression: Some(Compression::Zstd),
+            origin: Some("203.0.113.42".into()),
+            filename: Some("résumé.png".into()),
+            size: Some(1024),
+            custom: BTreeMap::from([("build".into(), "123".into())]),
+        }
+    }
+
+    #[test]
+    fn insert_metadata_minimal() {
+        let metadata = insert_json("{}").unwrap();
+        assert_eq!(
+            metadata,
+            Metadata {
+                time_created: Some(Timestamp::from_unix_secs(1_700_000_000).unwrap()),
+                ..Default::default()
+            }
+        );
+
+        let json = serde_json::to_string(&InsertMetadata::from(&Metadata::default())).unwrap();
+        assert_eq!(json, "{}");
+    }
+
+    #[test]
+    fn insert_metadata_full() {
+        let expected = Metadata {
+            size: None,
+            ..full_metadata()
+        };
+
+        let json = serde_json::to_string(&InsertMetadata::from(&full_metadata())).unwrap();
+        assert_eq!(
+            json,
+            r#"{"content_type":"image/png","content_encoding":"zstd","expiration":"ttl:30d","origin":"203.0.113.42","filename":"résumé.png","custom":{"build":"123"}}"#
+        );
+        assert_eq!(insert_json(&json).unwrap(), expected);
+    }
+
+    #[test]
+    fn insert_metadata_odd_cases() {
+        // Unknown and read-only fields are ignored, custom keys are normalized, and strings are
+        // never percent-decoded.
+        let json = r#"{
+            "future": 1,
+            "size": 9,
+            "time_created": "2020-01-01T00:00:00Z",
+            "filename": "50%41.txt",
+            "custom": {"Build": "100%25"}
+        }"#;
+        let metadata = insert_json(json).unwrap();
+        assert_eq!(
+            metadata.time_created,
+            Some(Timestamp::from_unix_secs(1_700_000_000).unwrap())
+        );
+        assert_eq!(metadata.size, None);
+        assert_eq!(metadata.filename.as_deref(), Some("50%41.txt"));
+        assert_eq!(metadata.custom["build"], "100%25");
+
+        for json in [
+            r#"{"content_type":"not a media type!"}"#,
+            r#"{"content_encoding":"brotli"}"#,
+            r#"{"expiration":"garbage"}"#,
+            r#"{"custom":{"a b":"v"}}"#,
+        ] {
+            assert!(insert_json(json).is_err(), "unexpectedly accepted {json}");
+        }
+    }
+
+    #[test]
+    fn insert_metadata_matches_insert_headers() {
+        let access_time = Timestamp::from_unix_secs(1_700_000_000).unwrap();
+        for expiration in ["manual", "ttl:30d", "tti:1h"] {
+            let mut headers = HeaderMap::new();
+            headers.insert("content-type", "text/plain".parse().unwrap());
+            headers.insert(HEADER_EXPIRATION, expiration.parse().unwrap());
+            let from_headers = Metadata::from_insert_headers(&headers, "", access_time).unwrap();
+
+            let json = format!(r#"{{"content_type":"text/plain","expiration":"{expiration}"}}"#);
+            assert_eq!(insert_json(&json).unwrap(), from_headers, "{expiration}");
+        }
+    }
+
+    #[test]
+    fn object_metadata_minimal() {
+        let json = serde_json::to_string(&ObjectMetadata::from(Metadata::default())).unwrap();
+        assert_eq!(json, r#"{"content_type":"application/octet-stream"}"#);
+
+        let object: ObjectMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(Metadata::try_from(object).unwrap(), Metadata::default());
+    }
+
+    #[test]
+    fn object_metadata_full() {
+        let json = serde_json::to_string_pretty(&ObjectMetadata::from(full_metadata())).unwrap();
+        insta::assert_snapshot!(json, @r#"
+        {
+          "content_type": "image/png",
+          "content_encoding": "zstd",
+          "expiration": "ttl:30d",
+          "origin": "203.0.113.42",
+          "filename": "résumé.png",
+          "custom": {
+            "build": "123"
+          },
+          "time_created": "2023-11-14T22:13:20Z",
+          "time_expires": "2023-12-14T22:13:20Z",
+          "size": 1024
+        }
+        "#);
+
+        let object: ObjectMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(Metadata::try_from(object).unwrap(), full_metadata());
+    }
+
+    #[test]
+    fn object_metadata_odd_cases() {
+        // Unknown fields are ignored and any stored custom key is accepted.
+        let json = r#"{"content_type":"text/plain","future":1,"custom":{"a*b":"v"}}"#;
+        let object: ObjectMetadata = serde_json::from_str(json).unwrap();
+        assert_eq!(Metadata::try_from(object).unwrap().custom["a*b"], "v");
+
+        let json = r#"{"content_type":"text/plain","expiration":"garbage"}"#;
+        let object: ObjectMetadata = serde_json::from_str(json).unwrap();
+        assert!(Metadata::try_from(object).is_err());
     }
 }
