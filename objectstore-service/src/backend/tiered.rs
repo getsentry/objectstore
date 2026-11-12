@@ -105,8 +105,8 @@
 //!
 //! Each upload has a separate HV marker with a fixed five-day lifetime that serves
 //! as the source of truth for whether the upload logically exists.
-//! This marker is consumed upon cancellation or the first submission of a final chunk, making
-//! finalization one-shot.
+//! Cancellation consumes the marker. To claim an upload for finalization, the final chunk handler
+//! reserves LT capacity and then consumes the marker.
 
 use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::Arc;
@@ -750,7 +750,8 @@ impl Backend for TieredStorage {
             _ => None,
         };
 
-        // Delete the marker to claim this upload.
+        // Reserve LT capacity before deleting the marker to claim this upload.
+        let lt_guard = self.acquire_long_term().await?;
         let hv_guard = self.acquire_high_volume(Priority::High).await?;
         self.delete_upload_marker(revision).await?;
         drop(hv_guard);
@@ -764,7 +765,6 @@ impl Backend for TieredStorage {
             })
             .await?;
 
-        let lt_guard = self.acquire_long_term().await?;
         let progress = self
             .inner
             .long_term
