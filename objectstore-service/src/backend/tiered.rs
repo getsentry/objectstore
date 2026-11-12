@@ -644,34 +644,13 @@ impl Backend for TieredStorage {
             return Ok(None);
         };
 
-        let hv_guard = self.acquire_high_volume(Priority::Normal).await;
-        let result = match hv_guard {
-            Ok(hv_guard) => {
-                let result = self
-                    .inner
-                    .high_volume
-                    .create_upload_marker(&revision, Timestamp::now() + RESUMABLE_UPLOAD_TTL)
-                    .await;
-                drop(hv_guard);
-                result
-            }
-            Err(error) => Err(error),
-        };
-        if let Err(error) = result {
-            // Best-effort clean-up.
-            let session = Session {
-                object_id: revision,
-                upload_length,
-                backend_token: inner,
-            };
-            if let Err(cleanup_error) = self.cancel_long_term_upload(&session).await {
-                objectstore_log::warn!(
-                    !!&cleanup_error,
-                    "Failed to cancel upload after marker creation failed"
-                );
-            }
-            return Err(error);
-        }
+        let hv_guard = self.acquire_high_volume(Priority::High).await?;
+        self.inner
+            .high_volume
+            .create_upload_marker(&revision, Timestamp::now() + RESUMABLE_UPLOAD_TTL)
+            .await?;
+        drop(hv_guard);
+
         if metadata.origin.is_none() {
             objectstore_metrics::count!("put.origin_missing", usecase = id.usecase().to_string());
         }
