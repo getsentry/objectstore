@@ -717,20 +717,15 @@ impl Backend for TieredStorage {
         // Read the publication precondition while verifying the LT offset.
         let (progress, current) = tokio::join!(
             async {
-                let lt_guard = self.acquire_long_term().await?;
-                let result = self.inner.long_term.upload_offset(&inner_session).await;
-                drop(lt_guard);
-                result
+                let _lt_guard = self.acquire_long_term().await?;
+                self.inner.long_term.upload_offset(&inner_session).await
             },
             async {
-                let hv_guard = self.acquire_high_volume(Priority::High).await?;
-                let result = self
-                    .inner
+                let _hv_guard = self.acquire_high_volume(Priority::High).await?;
+                self.inner
                     .high_volume
                     .get_tiered_metadata(id, Timestamp::now())
-                    .await;
-                drop(hv_guard);
-                result
+                    .await
             },
         );
         match progress? {
@@ -829,10 +824,8 @@ impl Backend for TieredStorage {
         self.delete_upload_marker(&inner_session.object_id).await?;
         drop(hv_guard);
         let result = async {
-            let lt_guard = self.acquire_long_term().await?;
-            let result = self.inner.long_term.cancel_upload(&inner_session).await;
-            drop(lt_guard);
-            result
+            let _lt_guard = self.acquire_long_term().await?;
+            self.inner.long_term.cancel_upload(&inner_session).await
         }
         .await;
         if let Err(error) = result {

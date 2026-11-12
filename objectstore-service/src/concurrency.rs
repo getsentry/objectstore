@@ -14,6 +14,7 @@
 //! recovery and `service.task.*` metric emission.
 
 use std::future::Future;
+use std::mem::DropGuard;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -137,11 +138,7 @@ impl ConcurrencyLimiter {
 
         // Fast path: Instantly grab a free permit without parking.
         if let Ok(task_permit) = self.tasks.clone().try_acquire_owned() {
-            return Ok(ConcurrencyPermit {
-                task_permit: Some(task_permit),
-                bulk_permit: None,
-                released: Arc::clone(&self.released),
-            });
+            return Ok(ConcurrencyPermit::new(task_permit, None, &self.released));
         }
 
         // Slow path: acquire a temporary queue ticket to bound concurrent
@@ -158,11 +155,7 @@ impl ConcurrencyLimiter {
             .map_err(|_| ErrorKind::AtCapacity)?
             .map_err(|_| ErrorKind::AtCapacity)?;
 
-        Ok(ConcurrencyPermit {
-            task_permit: Some(task_permit),
-            bulk_permit: None,
-            released: Arc::clone(&self.released),
-        })
+        Ok(ConcurrencyPermit::new(task_permit, None, &self.released))
     }
 
     /// Tries to acquire a single permit without waiting.
@@ -175,11 +168,7 @@ impl ConcurrencyLimiter {
             .try_acquire_owned()
             .map_err(|_| ErrorKind::AtCapacity)?;
 
-        Ok(ConcurrencyPermit {
-            task_permit: Some(task_permit),
-            bulk_permit: None,
-            released: Arc::clone(&self.released),
-        })
+        Ok(ConcurrencyPermit::new(task_permit, None, &self.released))
     }
 
     /// Acquires a single permit for a bulk operation, waiting if necessary.
@@ -210,11 +199,11 @@ impl ConcurrencyLimiter {
             .map_err(|_| ErrorKind::AtCapacity)?
             .map_err(|_: AcquireError| ErrorKind::AtCapacity)?;
 
-        Ok(ConcurrencyPermit {
-            task_permit: Some(task_permit),
-            bulk_permit: Some(bulk_permit),
-            released: Arc::clone(&self.released),
-        })
+        Ok(ConcurrencyPermit::new(
+            task_permit,
+            Some(bulk_permit),
+            &self.released,
+        ))
     }
 
     /// Returns the number of permits currently available.
@@ -300,22 +289,31 @@ impl ConcurrencyLimiter {
 /// The execution permit drops before the bulk permit so that a waiter
 /// blocked on the task semaphore sees the freed slot immediately.
 pub struct ConcurrencyPermit {
-    task_permit: Option<OwnedSemaphorePermit>,
-    bulk_permit: Option<OwnedSemaphorePermit>,
-    released: Arc<Notify>,
+    // Fields drop in declaration order. Notify waiters after returning both permits.
+    _task_permit: OwnedSemaphorePermit,
+    _bulk_permit: Option<OwnedSemaphorePermit>,
+    _notify_on_release: DropGuard<Arc<Notify>, fn(Arc<Notify>)>,
+}
+
+impl ConcurrencyPermit {
+    fn new(
+        task_permit: OwnedSemaphorePermit,
+        bulk_permit: Option<OwnedSemaphorePermit>,
+        released: &Arc<Notify>,
+    ) -> Self {
+        Self {
+            _task_permit: task_permit,
+            _bulk_permit: bulk_permit,
+            _notify_on_release: DropGuard::new(Arc::clone(released), |released| {
+                released.notify_waiters();
+            }),
+        }
+    }
 }
 
 impl std::fmt::Debug for ConcurrencyPermit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ConcurrencyPermit").finish_non_exhaustive()
-    }
-}
-
-impl Drop for ConcurrencyPermit {
-    fn drop(&mut self) {
-        drop(self.task_permit.take());
-        drop(self.bulk_permit.take());
-        self.released.notify_waiters();
     }
 }
 
