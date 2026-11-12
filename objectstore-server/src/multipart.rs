@@ -23,7 +23,7 @@ const LEGACY_PART_NAME: &str = "part";
 /// not contain `"`, `\`, CR, LF or other control characters.
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "invalid multipart {field} {value:?}: must be printable ASCII without quotes or backslashes"
+    "invalid multipart {field} {value:?}: must be non-empty printable ASCII without quotes or backslashes"
 )]
 pub struct InvalidPartName {
     field: &'static str,
@@ -93,9 +93,10 @@ impl Part {
 }
 
 fn validate(field: &'static str, value: &str) -> Result<(), InvalidPartName> {
-    if value
-        .bytes()
-        .all(|b| (b.is_ascii_graphic() || b == b' ') && b != b'"' && b != b'\\')
+    if !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| (b.is_ascii_graphic() || b == b' ') && b != b'"' && b != b'\\')
     {
         Ok(())
     } else {
@@ -284,7 +285,7 @@ mod tests {
 
     #[test]
     fn test_named_rejects_unsafe_values() {
-        for bad in ["a\"b", "a\\b", "a\r\nb", "a\nb", "ä", "a\0b", "a\tb"] {
+        for bad in ["", "a\"b", "a\\b", "a\r\nb", "a\nb", "ä", "a\0b", "a\tb"] {
             assert!(
                 Part::named(bad, None, Bytes::new(), None).is_err(),
                 "{bad:?}"
