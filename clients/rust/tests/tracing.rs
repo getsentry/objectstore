@@ -172,8 +172,11 @@ fn automatic_resumable_upload_nests_spans() {
         let server = test_server().await;
         let session = test_session(&server);
 
+        // Tiered storage declines resumable uploads at or below 1 MiB, so send a larger,
+        // uncompressed payload.
         session
-            .put("payload")
+            .put("x".repeat(1024 * 1024 + 1))
+            .compress(None)
             .key("my-key")
             .resumable_threshold_bytes(0)
             .send()

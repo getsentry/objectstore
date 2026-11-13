@@ -1,5 +1,6 @@
 import gzip
 import os
+import random
 import shutil
 import signal
 import socket
@@ -76,6 +77,16 @@ class TestTokenGenerator:
         if not cls._instance:
             cls._instance = cls.create()
         return cls._instance
+
+
+# Tiered storage declines resumable uploads at or below 1 MiB, so resumable tests
+# prefix their payloads with this much padding.
+RESUMABLE_PADDING = 1024 * 1024
+
+
+def incompressible(length: int) -> bytes:
+    """Returns deterministic bytes that compression cannot meaningfully shrink."""
+    return random.Random(0).randbytes(length)
 
 
 class Server:
@@ -197,8 +208,10 @@ def test_resumable_upload(server_url: str) -> None:
         org=42,
         project=1337,
     )
+    padding = b"x" * RESUMABLE_PADDING
+    mid = RESUMABLE_PADDING + 3
     upload = session._create_upload(
-        6,
+        RESUMABLE_PADDING + 6,
         key="resumable-python",
         content_type="text/plain",
         metadata={"source": "test"},
@@ -209,27 +222,27 @@ def test_resumable_upload(server_url: str) -> None:
     assert upload.key == "resumable-python"
     assert upload.granularity is not None
     assert upload.progress() == UploadIncomplete(0)
-    assert upload.put(0, b"abc") == UploadIncomplete(3)
+    assert upload.put(0, padding + b"abc") == UploadIncomplete(mid)
 
     resumed = session._resume_upload(upload.key, upload.token)
     assert resumed.granularity is None
-    assert resumed.progress() == UploadIncomplete(3)
+    assert resumed.progress() == UploadIncomplete(mid)
     with pytest.raises(UploadOffsetMismatch) as mismatch:
         resumed.put(0, b"abc")
     assert mismatch.value.status == 409
-    assert mismatch.value.offset == 3
+    assert mismatch.value.offset == mid
     with pytest.raises(RequestError) as oversized:
-        resumed.put(3, b"defg")
+        resumed.put(mid, b"defg")
     assert oversized.value.status == 400
     stream = BytesIO(b"prefix-def")
     stream.seek(7)
-    assert resumed.put(3, (stream, 3)) == UploadComplete()
+    assert resumed.put(mid, (stream, 3)) == UploadComplete()
 
     response = session.get(upload.key)
     assert response is not None
     # The usecase defaults to zstd, but resumable creation must not inherit it.
     assert response.metadata.compression is None
-    assert response.payload.read() == b"abcdef"
+    assert response.payload.read() == padding + b"abcdef"
     assert response.metadata.content_type == "text/plain"
     assert response.metadata.expiration_policy == TimeToLive(timedelta(days=1))
     assert response.metadata.custom == {"source": "test"}
@@ -241,8 +254,9 @@ def test_resumable_upload_precompressed(server_url: str) -> None:
     session = Client(server_url, token=TestTokenGenerator.get()).session(
         Usecase("test-usecase", compression="none"), org=42, project=1337
     )
-    payload = b"abcdef"
+    payload = incompressible(RESUMABLE_PADDING + 6)
     compressed = zstandard.ZstdCompressor().compress(payload)
+    assert len(compressed) > RESUMABLE_PADDING
     upload = session._create_upload(len(compressed), compression="zstd")
     assert upload is not None
     split = len(compressed) // 2
@@ -263,7 +277,7 @@ def test_resumable_upload_cancel(server_url: str) -> None:
     session = Client(server_url, token=TestTokenGenerator.get()).session(
         Usecase("test-usecase"), org=42, project=1337
     )
-    upload = session._create_upload(6)
+    upload = session._create_upload(RESUMABLE_PADDING + 6)
     assert upload is not None
     assert upload.put(0, b"abc") == UploadIncomplete(3)
     upload.cancel()
@@ -954,7 +968,7 @@ def test_put_stores_under_literal_key(server_url: str) -> None:
 @pytest.mark.parametrize("source_kind", ["bytes", "buffer", "stream"])
 @pytest.mark.parametrize("compression", ["none", "zstd", "gzip"])
 @pytest.mark.parametrize("precompressed", [False, True])
-@pytest.mark.parametrize("threshold", [1, 2048])
+@pytest.mark.parametrize("threshold", [1, 2 * RESUMABLE_PADDING])
 def test_automatic_resumable_upload(
     server_url: str,
     source_kind: str,
@@ -971,7 +985,8 @@ def test_automatic_resumable_upload(
         ),
         org=42,
     )
-    contents = b"file contents\n" * 100
+    # Stays above the tiered storage threshold even when compressed.
+    contents = incompressible(RESUMABLE_PADDING + 1)
     encoded = contents
     if compression == "zstd" and precompressed:
         encoded = zstandard.ZstdCompressor().compress(contents)

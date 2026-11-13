@@ -20,6 +20,15 @@ const PROTECTED_SESSION: &str = "AAR0ZXN0AwMDAwMDAwMDAwMDXtzMYTBNPTYlKSd-0XWLaZ5
 
 const OBJECT_PATH: &str = "/v1/objects/test/org=1/my-key";
 
+/// Prefix that lifts a resumable upload above the 1 MiB tiered storage threshold.
+///
+/// Tiered storage declines resumable uploads at or below the threshold, so every upload in
+/// these tests starts with this padding.
+const PADDING: usize = 1024 * 1024;
+
+/// Smallest declared length that tiered storage accepts for a resumable upload.
+const MIN_UPLOAD_LENGTH: u64 = PADDING as u64 + 1;
+
 async fn test_server() -> TestServer {
     TestServer::with_config(Config {
         auth: AuthZ {
@@ -169,7 +178,7 @@ async fn test_resumable_upload() -> Result<()> {
     // Create a session.
     let response = client
         .put(server.url(&format!("{object}?upload_type=resumable")))
-        .header(HEADER_UPLOAD_LENGTH, "6")
+        .header(HEADER_UPLOAD_LENGTH, PADDING + 6)
         .header(reqwest::header::CONTENT_TYPE, "text/plain")
         .send()
         .await?;
@@ -184,14 +193,16 @@ async fn test_resumable_upload() -> Result<()> {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
     // Upload in chunks.
+    let padding = "x".repeat(PADDING);
     let response = client
         .put(server.url(&session_path))
         .header(HEADER_UPLOAD_OFFSET, "0")
-        .body("abc")
+        .body(format!("{padding}abc"))
         .send()
         .await?;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
-    assert_eq!(response.headers()[HEADER_UPLOAD_OFFSET], "3");
+    let offset = (PADDING + 3).to_string();
+    assert_eq!(response.headers()[HEADER_UPLOAD_OFFSET], offset.as_str());
 
     // Rejected: outdated offset.
     let response = client
@@ -203,10 +214,10 @@ async fn test_resumable_upload() -> Result<()> {
     assert_eq!(response.status(), StatusCode::CONFLICT);
 
     // Rejected: would exceed the total length declared on creation.
-    assert_eq!(response.headers()[HEADER_UPLOAD_OFFSET], "3");
+    assert_eq!(response.headers()[HEADER_UPLOAD_OFFSET], offset.as_str());
     let response = client
         .put(server.url(&session_path))
-        .header(HEADER_UPLOAD_OFFSET, "3")
+        .header(HEADER_UPLOAD_OFFSET, &offset)
         .body("defg")
         .send()
         .await?;
@@ -219,10 +230,10 @@ async fn test_resumable_upload() -> Result<()> {
         .send()
         .await?;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
-    assert_eq!(response.headers()[HEADER_UPLOAD_OFFSET], "3");
+    assert_eq!(response.headers()[HEADER_UPLOAD_OFFSET], offset.as_str());
     let response = client
         .put(server.url(&session_path))
-        .header(HEADER_UPLOAD_OFFSET, "3")
+        .header(HEADER_UPLOAD_OFFSET, &offset)
         .body("def")
         .send()
         .await?;
@@ -236,7 +247,7 @@ async fn test_resumable_upload() -> Result<()> {
         response.headers()[reqwest::header::CONTENT_TYPE],
         "text/plain"
     );
-    assert_eq!(response.text().await?, "abcdef");
+    assert_eq!(response.text().await?, format!("{padding}abcdef"));
     let response = client
         .put(server.url(&session_path))
         .header(HEADER_UPLOAD_OFFSET, "*")
@@ -252,7 +263,7 @@ async fn test_resumable_upload_cancel() -> Result<()> {
     let client = reqwest::Client::new();
 
     // Create a session and upload a partial payload.
-    let session_path = create_session_path(&server, &client, 6).await?;
+    let session_path = create_session_path(&server, &client, MIN_UPLOAD_LENGTH).await?;
     let response = client
         .put(server.url(&session_path))
         .header(HEADER_UPLOAD_OFFSET, "0")
@@ -283,7 +294,7 @@ async fn test_resumable_upload_cancel() -> Result<()> {
 async fn offset_query_does_not_require_content_length() -> Result<()> {
     let server = test_server().await;
     let client = reqwest::Client::new();
-    let session_path = create_session_path(&server, &client, 3).await?;
+    let session_path = create_session_path(&server, &client, MIN_UPLOAD_LENGTH).await?;
     let response = raw_put(
         &server,
         &session_path,
@@ -303,7 +314,7 @@ async fn offset_query_does_not_require_content_length() -> Result<()> {
 async fn offset_query_rejects_chunked_body_without_content_length() -> Result<()> {
     let server = test_server().await;
     let client = reqwest::Client::new();
-    let session_path = create_session_path(&server, &client, 7).await?;
+    let session_path = create_session_path(&server, &client, MIN_UPLOAD_LENGTH).await?;
     let response = raw_put(
         &server,
         &session_path,
@@ -323,7 +334,7 @@ async fn offset_query_rejects_chunked_body_without_content_length() -> Result<()
 async fn chunk_requires_upload_offset() -> Result<()> {
     let server = test_server().await;
     let client = reqwest::Client::new();
-    let session_path = create_session_path(&server, &client, 7).await?;
+    let session_path = create_session_path(&server, &client, MIN_UPLOAD_LENGTH).await?;
 
     let response = client
         .put(server.url(&session_path))
@@ -339,7 +350,7 @@ async fn chunk_requires_upload_offset() -> Result<()> {
 async fn chunk_rejects_malformed_upload_offset() -> Result<()> {
     let server = test_server().await;
     let client = reqwest::Client::new();
-    let session_path = create_session_path(&server, &client, 7).await?;
+    let session_path = create_session_path(&server, &client, MIN_UPLOAD_LENGTH).await?;
 
     for invalid in ["", "-1", "1.5", "**", "here"] {
         let response = client
@@ -363,7 +374,7 @@ async fn chunk_rejects_malformed_upload_offset() -> Result<()> {
 async fn offset_query_rejects_a_payload() -> Result<()> {
     let server = test_server().await;
     let client = reqwest::Client::new();
-    let session_path = create_session_path(&server, &client, 7).await?;
+    let session_path = create_session_path(&server, &client, MIN_UPLOAD_LENGTH).await?;
 
     let response = client
         .put(server.url(&session_path))
