@@ -3,7 +3,10 @@
 //!
 //! [`GcStorage`] is the backend-agnostic interface. Implementations record the
 //! expiration of each object when it is written and hand back the expired ids
-//! that the collector is allowed to delete.
+//! that the collector is allowed to delete. Each instance is scoped to one storage
+//! backend role, identified by a `role:backend-type` key in the server configuration.
+//! A separate cleanup process reads the index and deletes expired objects from the
+//! matching backend.
 
 /// [`GcStorage`] implementation backed by SQLite.
 pub mod sqlite;
@@ -52,17 +55,19 @@ pub trait GcStorage: Send + Sync + Debug {
     ) -> Result<Vec<ObjectId>, ChangeStreamError>;
 }
 
-/// Backend selection for the garbage collector's expiration index.
+/// Backend selection for one storage role's garbage-collector expiration index.
 ///
 /// Each variant wraps that backend's own configuration and corresponds to a [`GcStorage`]
-/// implementation. The enum is internally tagged: in YAML the variant is named by a `type`
-/// key, and through environment variables by the `OS__GARBAGE_COLLECTOR__TYPE` prefix plus
-/// the variant's fields (e.g. `OS__GARBAGE_COLLECTOR__TYPE=sqlite`).
+/// implementation. The server configuration maps a `role:backend-type` key to one of these
+/// values; the role is `storage` for a single backend, or `storage.high_volume` and
+/// `storage.long_term` in a tiered setup. The enum is internally tagged: in YAML the variant
+/// is named by a `type` key.
 ///
 /// ```yaml
 /// garbage_collector:
-///   type: sqlite
-///   path: /data/objectstore.db
+///   "storage.long_term:s3compatible":
+///     type: sqlite
+///     path: /data/objectstore.db
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
