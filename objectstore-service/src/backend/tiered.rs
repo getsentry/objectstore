@@ -179,7 +179,7 @@ pub struct TieredStorageConfig {
     /// Backend for high-volume, small objects.
     ///
     /// Must be a backend that implements [`HighVolumeBackend`] (currently
-    /// only BigTable).
+    /// BigTable or RocksDB).
     pub high_volume: HighVolumeStorageConfig,
     /// Backend for large, long-term objects.
     pub long_term: Box<StorageConfig>,
@@ -236,7 +236,7 @@ fn default_concurrency_timeout() -> Duration {
 /// Objects are routed at write time based on their size relative to a **1 MiB threshold**:
 ///
 /// - Objects **≤ 1 MiB** go to the `high_volume` backend — optimized for low-latency reads
-///   and writes of small objects (e.g. BigTable).
+///   and writes of small objects (e.g. BigTable or RocksDB).
 /// - Objects **> 1 MiB** go to the `long_term` backend — optimized for cost-efficient
 ///   storage of large objects (e.g. GCS).
 /// - Resumable uploads at or below 1 MiB are declined; larger uploads go to `long_term`.
