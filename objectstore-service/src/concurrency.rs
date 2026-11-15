@@ -1,4 +1,8 @@
-//! Concurrency limiter for backend operations.
+//! Concurrency limits and task execution helpers.
+//!
+//! [`Limiter`] and [`PriorityLimiter`] provide FIFO and high-priority admission,
+//! with configurable wait timeouts and queue limits. Both return [`Permit`],
+//! which can keep capacity held for a payload stream.
 //!
 //! [`ConcurrencyLimiter`] caps the number of in-flight backend operations
 //! using a tokio semaphore. Each acquired [`ConcurrencyPermit`] notifies
@@ -18,6 +22,10 @@ use sentry::{Hub, SentryFutureExt, TransactionContext};
 use tokio::sync::{AcquireError, Notify, OwnedSemaphorePermit, Semaphore};
 
 use crate::error::{Error, ErrorKind, Panic, Result};
+
+mod limiter;
+
+pub use limiter::{Limiter, LimiterStats, Permit, Priority, PriorityLimiter, PriorityLimiterStats};
 
 /// Interval for the periodic metrics emitter.
 const EMITTER_INTERVAL: Duration = Duration::from_secs(1);

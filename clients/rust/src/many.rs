@@ -13,6 +13,7 @@ use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::multipart::Part;
 
 use crate::error::Error;
+use crate::instrument::OperationSpan;
 use crate::put::{CompressionMode, PutBody};
 use crate::response::ResponseExt as _;
 use crate::{
@@ -117,6 +118,7 @@ impl From<PutBuilder> for BatchOperation {
             compression,
             body,
             session: _session,
+            resumable_threshold_bytes: _,
         } = value;
         BatchOperation::Insert {
             key,
@@ -164,8 +166,14 @@ impl BatchOperation {
                 metadata.compression = compression.map(CompressionMode::compression);
                 headers.extend(metadata.to_headers("")?);
 
-                let body = put::encode_body(body, compression).await?;
-                Ok(Part::stream(body).headers(headers))
+                // The batch request carries a `Content-Length` only if every part's length is
+                // known up front. Compressed parts are streamed, so their length is unknown.
+                let encoded = put::encode_body(body, compression).await?;
+                let part = match encoded.length {
+                    Some(length) => Part::stream_with_length(encoded.body, length),
+                    None => Part::stream(encoded.body),
+                };
+                Ok(part.headers(headers))
             }
             BatchOperation::Delete { key } => {
                 let headers = operation_headers("delete", Some(&key));
@@ -660,6 +668,8 @@ async fn execute_individual(op: BatchOperation, session: &Session) -> OperationR
         } => {
             let error_key = key.clone().unwrap_or_else(|| "<unknown>".to_owned());
             let put = PutBuilder {
+                // Automatic resumables are currently limited to standalone uploads.
+                resumable_threshold_bytes: None,
                 session: session.clone(),
                 metadata,
                 compression,
@@ -693,7 +703,8 @@ async fn execute_individual(op: BatchOperation, session: &Session) -> OperationR
 /// On batch-level failure, produces per-operation error results.
 async fn execute_batch(operations: Vec<BatchOperation>, session: &Session) -> Vec<OperationResult> {
     let contexts: Vec<_> = operations.iter().map(OperationContext::from).collect();
-    match send_batch(session, operations).await {
+    let span = OperationSpan::batch(session, operations.len());
+    match span.instrument(send_batch(session, operations)).await {
         Ok(results) => results,
         Err(e) => {
             let shared = Arc::new(e);

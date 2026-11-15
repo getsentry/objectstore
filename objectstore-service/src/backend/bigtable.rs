@@ -877,7 +877,7 @@ impl BigTableBackend {
     /// Reads a single row by key, returning parsed row data.
     ///
     /// Returns `None` if the row is absent or has expired.
-    #[tracing::instrument(level = "debug", fields(action), skip_all)]
+    #[tracing::instrument(level = "debug", fields(action, result), skip_all)]
     async fn read_row(
         &self,
         path: &[u8],
@@ -902,15 +902,19 @@ impl BigTableBackend {
         .await?;
         debug_assert!(response.len() <= 1, "Expected at most one row");
 
+        let span = tracing::Span::current();
         let Some((_, cells)) = response.into_iter().next() else {
             objectstore_log::debug!("Object not found");
+            span.record("result", "miss");
             return Ok(None);
         };
 
         let row = RowData::from_cells(cells)?;
         Ok(if row.expires_before(access_time) {
+            span.record("result", "expired");
             None
         } else {
+            span.record("result", "hit");
             Some(row)
         })
     }

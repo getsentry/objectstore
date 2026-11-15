@@ -71,14 +71,23 @@ async fn stores_uncompressed() {
 
     let body = "oh hai!";
 
-    let stored_id = session.put(body).compress(None).send().await.unwrap().key;
+    for threshold in [None, Some(0)] {
+        let stored_id = session
+            .put(body)
+            .resumable_threshold_bytes(threshold)
+            .compress(None)
+            .send()
+            .await
+            .unwrap()
+            .key;
 
-    let response = session.get(&stored_id).send().await.unwrap().unwrap();
-    assert_eq!(response.metadata.compression, None);
-    assert!(response.metadata.time_created.is_some());
+        let response = session.get(&stored_id).send().await.unwrap().unwrap();
+        assert_eq!(response.metadata.compression, None);
+        assert!(response.metadata.time_created.is_some());
 
-    let received = response.payload().await.unwrap();
-    assert_eq!(received, "oh hai!");
+        let received = response.payload().await.unwrap();
+        assert_eq!(received, "oh hai!");
+    }
 }
 
 #[tokio::test]
@@ -93,23 +102,31 @@ async fn uses_zstd_by_default() {
     let session = client.session(usecase.for_organization(12345)).unwrap();
 
     let body = "oh hai!";
-    let stored_id = session.put(body).send().await.unwrap().key;
+    for threshold in [None, Some(0)] {
+        let stored_id = session
+            .put(body)
+            .resumable_threshold_bytes(threshold)
+            .send()
+            .await
+            .unwrap()
+            .key;
 
-    // when the user indicates that it can deal with zstd, it gets zstd
-    let request = session.get(&stored_id).decompress(false);
-    let response = request.send().await.unwrap().unwrap();
-    assert_eq!(response.metadata.compression, Some(Compression::Zstd));
+        // when the user indicates that it can deal with zstd, it gets zstd
+        let request = session.get(&stored_id).decompress(false);
+        let response = request.send().await.unwrap().unwrap();
+        assert_eq!(response.metadata.compression, Some(Compression::Zstd));
 
-    let received_compressed = response.payload().await.unwrap();
-    let decompressed = zstd::bulk::decompress(&received_compressed, 1024).unwrap();
-    assert_eq!(decompressed, b"oh hai!");
+        let received_compressed = response.payload().await.unwrap();
+        let decompressed = zstd::bulk::decompress(&received_compressed, 1024).unwrap();
+        assert_eq!(decompressed, b"oh hai!");
 
-    // otherwise, the client does the decompression
-    let response = session.get(&stored_id).send().await.unwrap().unwrap();
-    assert_eq!(response.metadata.compression, None);
+        // otherwise, the client does the decompression
+        let response = session.get(&stored_id).send().await.unwrap().unwrap();
+        assert_eq!(response.metadata.compression, None);
 
-    let received = response.payload().await.unwrap();
-    assert_eq!(received, "oh hai!");
+        let received = response.payload().await.unwrap();
+        assert_eq!(received, "oh hai!");
+    }
 }
 
 #[tokio::test]
@@ -157,29 +174,32 @@ async fn stores_precompressed_payload_verbatim() {
     let session = client.session(usecase.for_organization(12345)).unwrap();
 
     let compressed = zstd::bulk::compress(b"oh hai!", 0).unwrap();
-    let stored_id = session
-        .put(compressed.clone())
-        .precompressed(Compression::Zstd)
-        .send()
-        .await
-        .unwrap()
-        .key;
+    for threshold in [None, Some(0)] {
+        let stored_id = session
+            .put(compressed.clone())
+            .resumable_threshold_bytes(threshold)
+            .precompressed(Compression::Zstd)
+            .send()
+            .await
+            .unwrap()
+            .key;
 
-    // the payload is stored as-is, without another compression pass
-    let response = session
-        .get(&stored_id)
-        .accept_encoding([Compression::Zstd])
-        .send()
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(response.metadata.compression, Some(Compression::Zstd));
-    assert_eq!(response.payload().await.unwrap(), compressed);
+        // the payload is stored as-is, without another compression pass
+        let response = session
+            .get(&stored_id)
+            .accept_encoding([Compression::Zstd])
+            .send()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.metadata.compression, Some(Compression::Zstd));
+        assert_eq!(response.payload().await.unwrap(), compressed);
 
-    // and the recorded encoding makes downloads decompress transparently
-    let response = session.get(&stored_id).send().await.unwrap().unwrap();
-    assert_eq!(response.metadata.compression, None);
-    assert_eq!(response.payload().await.unwrap(), "oh hai!");
+        // and the recorded encoding makes downloads decompress transparently
+        let response = session.get(&stored_id).send().await.unwrap().unwrap();
+        assert_eq!(response.metadata.compression, None);
+        assert_eq!(response.payload().await.unwrap(), "oh hai!");
+    }
 }
 
 #[tokio::test]
@@ -852,30 +872,39 @@ async fn put_file_with_compression() {
     let body = "hello compressed file!";
     std::fs::write(&path, body).unwrap();
 
-    // Default compression is zstd
-    let file = tokio::fs::File::open(&path).await.unwrap();
-    let stored_id = session.put_file(file).send().await.unwrap().key;
+    for threshold in [None, Some(0)] {
+        let file = tokio::fs::File::open(&path).await.unwrap();
+        for put in [session.put_file(file), session.put_path(&path)] {
+            // Default compression is zstd.
+            let stored_id = put
+                .resumable_threshold_bytes(threshold)
+                .send()
+                .await
+                .unwrap()
+                .key;
 
-    // When requesting raw, the stored object should be zstd-compressed
-    let response = session
-        .get(&stored_id)
-        .decompress(false)
-        .send()
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(response.metadata.compression, Some(Compression::Zstd));
+            // When requesting raw, the stored object should be zstd-compressed
+            let response = session
+                .get(&stored_id)
+                .decompress(false)
+                .send()
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(response.metadata.compression, Some(Compression::Zstd));
 
-    let compressed = response.payload().await.unwrap();
-    let decompressed = zstd::bulk::decompress(&compressed, 1024).unwrap();
-    assert_eq!(decompressed, body.as_bytes());
+            let compressed = response.payload().await.unwrap();
+            let decompressed = zstd::bulk::decompress(&compressed, 1024).unwrap();
+            assert_eq!(decompressed, body.as_bytes());
 
-    // Default get decompresses transparently
-    let response = session.get(&stored_id).send().await.unwrap().unwrap();
-    assert_eq!(response.metadata.compression, None);
+            // Default get decompresses transparently
+            let response = session.get(&stored_id).send().await.unwrap().unwrap();
+            assert_eq!(response.metadata.compression, None);
 
-    let received = response.payload().await.unwrap();
-    assert_eq!(received, body);
+            let received = response.payload().await.unwrap();
+            assert_eq!(received, body);
+        }
+    }
 }
 
 #[tokio::test]

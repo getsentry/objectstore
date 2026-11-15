@@ -4,6 +4,7 @@ use objectstore_types::metadata::{self, ExpiryAnchor, MetadataUpdate};
 use objectstore_types::time::Timestamp;
 use reqwest::StatusCode;
 
+use crate::instrument::OperationSpan;
 use crate::response::ResponseExt as _;
 use crate::{ObjectKey, Session};
 
@@ -111,6 +112,12 @@ pub struct ExtendExpiryBuilder {
 impl ExtendExpiryBuilder {
     /// Sends the extension request, failing locally for an out-of-range timestamp.
     pub async fn send(self) -> crate::Result<ExtendExpiryResponse> {
+        let span =
+            OperationSpan::storage("objectstore.extend_expiry", &self.session, Some(&self.key));
+        span.instrument(self.execute()).await
+    }
+
+    async fn execute(self) -> crate::Result<ExtendExpiryResponse> {
         let update = self.target.into_update()?;
         let response = self
             .session

@@ -7,6 +7,7 @@ use objectstore_types::metadata::{Compression, Metadata};
 use reqwest::StatusCode;
 use tokio_util::io::{ReaderStream, StreamReader};
 
+use crate::instrument::{OperationSpan, record_field};
 use crate::response::ResponseExt as _;
 use crate::{ClientStream, ObjectKey, Session};
 
@@ -87,16 +88,23 @@ impl GetBuilder {
 
     /// Sends the get request.
     pub async fn send(self) -> crate::Result<Option<GetResponse>> {
+        let span = OperationSpan::storage("objectstore.get", &self.session, Some(&self.key));
+        span.instrument(self.execute()).await
+    }
+
+    async fn execute(self) -> crate::Result<Option<GetResponse>> {
         let response = self
             .session
             .request(reqwest::Method::GET, &self.key)?
             .send()
             .await?;
         if response.status() == StatusCode::NOT_FOUND {
+            record_field("objectstore.found", false);
             response.drain_body().await;
             return Ok(None);
         }
         let response = response.error_for_status_and_drain().await?;
+        record_field("objectstore.found", true);
 
         let mut metadata = match Metadata::from_headers(response.headers(), "") {
             Ok(metadata) => metadata,
@@ -106,12 +114,23 @@ impl GetBuilder {
             }
         };
 
+        let stored_compression = metadata.compression;
         let stream = response.bytes_stream().map_err(io::Error::other).boxed();
         let stream = maybe_decompress(
             stream,
             &mut metadata,
             self.decompress,
             &self.accept_encoding,
+        );
+        record_field(
+            "objectstore.compression",
+            stored_compression
+                .as_ref()
+                .map_or("none", Compression::as_str),
+        );
+        record_field(
+            "objectstore.decompressed",
+            metadata.compression != stored_compression,
         );
 
         Ok(Some(GetResponse { metadata, stream }))

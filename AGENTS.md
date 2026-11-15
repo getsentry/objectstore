@@ -73,7 +73,6 @@ cargo doc --workspace --all-features --no-deps --document-private-items
 
 ## Pull Requests
 
-The Python client, the Rust client and the server are released separately as Craft workspaces (see `.craft.yml`), each with its own changelog (`clients/python/CHANGELOG.md`, `clients/rust/CHANGELOG.md`, `objectstore-server/CHANGELOG.md`). Changelog entries are generated from PR titles:
+Changelogs are generated from PR titles and descriptions. When opening a PR or writing its title or description, use the `changelog-entry` skill to write its changelog entry or exclude it from the changelogs.
 
-- A PR is listed in the changelog of every workspace whose files it changes, grouped by the conventional commit type of its title (`feat`, `fix`, ...). The scope doesn't matter. The server's changelog also covers `objectstore-service` (`includePaths` in `.craft.yml`); files outside all workspaces aren't listed anywhere.
-- If the title doesn't describe the change well for users, add a `### Changelog Entry` section to the PR description with the text to use instead. It's used for every changelog the PR is listed in.
+Mark breaking changes with `!` after the type in the PR title, for example `ref(types)!: ...`.

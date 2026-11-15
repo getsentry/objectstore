@@ -1,4 +1,5 @@
 use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,6 +22,7 @@ struct ClientBuilderInner {
     propagate_traces: bool,
     reqwest_builder: reqwest::ClientBuilder,
     token: Option<TokenProvider>,
+    spool_dir: Option<PathBuf>,
 }
 
 impl ClientBuilderInner {
@@ -71,6 +73,7 @@ impl ClientBuilder {
             propagate_traces: false,
             reqwest_builder,
             token: None,
+            spool_dir: None,
         }))
     }
 
@@ -124,6 +127,17 @@ impl ClientBuilder {
         Self(Ok(inner))
     }
 
+    /// Sets the directory for temporary files used to prepare compressed resumable uploads.
+    ///
+    /// By default, the system temporary directory is used. The directory must already exist.
+    /// If a temporary file cannot be created, uploads fall back to direct streaming.
+    /// Temporary storage may outlive the upload while HTTP readers remain open.
+    pub fn spool_dir(self, path: impl Into<PathBuf>) -> Self {
+        let Ok(mut inner) = self.0 else { return self };
+        inner.spool_dir = Some(path.into());
+        Self(Ok(inner))
+    }
+
     /// Returns a [`Client`] that uses this [`ClientBuilder`] configuration.
     ///
     /// # Errors
@@ -141,6 +155,7 @@ impl ClientBuilder {
                 service_url: inner.service_url,
                 propagate_traces: inner.propagate_traces,
                 token: inner.token,
+                spool_dir: inner.spool_dir,
             }),
         })
     }
@@ -161,6 +176,7 @@ pub struct Usecase {
     name: UsecaseName,
     compression: Option<Compression>,
     expiration_policy: ExpirationPolicy,
+    resumable_threshold_bytes: Option<u64>,
 }
 
 impl Usecase {
@@ -203,6 +219,7 @@ impl Usecase {
             compression: Some(Compression::Zstd),
             // `ExpirationPolicy::default()` isn't callable in a const fn.
             expiration_policy: ExpirationPolicy::Manual,
+            resumable_threshold_bytes: Some(256 * 1024 * 1024),
         }
     }
 
@@ -247,6 +264,21 @@ impl Usecase {
             expiration_policy,
             ..self
         }
+    }
+
+    /// Returns the automatic resumable upload threshold, or [`None`] if disabled.
+    pub fn resumable_threshold_bytes(&self) -> Option<u64> {
+        self.resumable_threshold_bytes
+    }
+
+    /// Sets the minimum remaining input size for automatic resumable uploads.
+    ///
+    /// Defaults to 256 MiB, measured before client compression. Pass [`None`] to disable or
+    /// zero to include every supported payload. Individual uploads can override this using
+    /// [`crate::PutBuilder::resumable_threshold_bytes`]. See [`crate::PutBuilder`] for eligibility.
+    pub fn with_resumable_threshold_bytes(mut self, threshold: impl Into<Option<u64>>) -> Self {
+        self.resumable_threshold_bytes = threshold.into();
+        self
     }
 
     /// Creates a new custom [`Scope`].
@@ -340,10 +372,17 @@ impl Scope {
 
 #[derive(Debug)]
 pub(crate) struct ClientInner {
+    spool_dir: Option<PathBuf>,
     reqwest: reqwest::Client,
     service_url: Url,
     propagate_traces: bool,
     token: Option<TokenProvider>,
+}
+
+impl ClientInner {
+    pub fn spool_dir(&self) -> Option<&Path> {
+        self.spool_dir.as_deref()
+    }
 }
 
 /// A client for Objectstore. Use [`Client::builder`] to configure and construct a Client.
@@ -444,6 +483,13 @@ impl Client {
     /// Convenience function to create a [`ClientBuilder`].
     pub fn builder(service_url: impl reqwest::IntoUrl) -> ClientBuilder {
         ClientBuilder::new(service_url)
+    }
+
+    /// Returns the configured spool directory.
+    ///
+    /// `None` means the system temporary directory is used.
+    pub fn spool_dir(&self) -> Option<&Path> {
+        self.inner.spool_dir()
     }
 
     /// Creates a session for the given scope using this client.

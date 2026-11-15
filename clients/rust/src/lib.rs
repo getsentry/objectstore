@@ -9,11 +9,11 @@ mod error;
 mod expiry;
 mod get;
 mod head;
+mod instrument;
 mod key;
 mod many;
 mod put;
 mod response;
-#[cfg(feature = "resumable-upload-api")]
 mod resumable;
 pub mod utils;
 
@@ -30,5 +30,9 @@ pub use head::*;
 pub use key::*;
 pub use many::*;
 pub use put::*;
+
 #[cfg(feature = "resumable-upload-api")]
-pub use resumable::*;
+pub use resumable::{
+    CancelUploadBuilder, CreateResumableUploadBuilder, PutChunkBuilder, ResumableUpload,
+    SessionToken, UploadProgress, UploadProgressBuilder,
+};

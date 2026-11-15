@@ -26,6 +26,7 @@ objectstore-log = { workspace = true }
 objectstore-metrics = { workspace = true }
 objectstore-types = { workspace = true }
 papaya = { workspace = true }
+percent-encoding = { workspace = true }
 quick-xml = { workspace = true, features = ["serialize"] }
 regex = { workspace = true }
 reqwest = { workspace = true, features = [

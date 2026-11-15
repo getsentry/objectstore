@@ -508,10 +508,14 @@ class Session:
                         )
                         if result_key is None:
                             # Session creation failed or resumables are unsupported.
-                            # Send the prepared body without compressing it again.
+                            # Send the prepared body without compressing it again,
+                            # capped at its declared length.
                             headers["Content-Length"] = str(compressed_size)
                             result_key, _, _ = self._put_direct(
-                                body, key, headers, compression="none"
+                                _resumable.bounded_reader(body, compressed_size),
+                                key,
+                                headers,
+                                compression="none",
                             )
             else:
                 result_key, source_size, compressed_size = self._put_direct(
@@ -559,6 +563,10 @@ class Session:
                         retries = pool_retries.new(read=0)
                     elif isinstance(pool_retries, int):
                         retries = urllib3.Retry(pool_retries, read=0)
+                elif isinstance(contents, bytes):
+                    # Buffers are sent verbatim and their size cannot change, so they
+                    # declare it upfront instead of using chunked encoding.
+                    headers = {**headers, "Content-Length": str(len(contents))}
 
                 response = self._pool.request(
                     "POST" if not key else "PUT",

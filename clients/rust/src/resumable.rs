@@ -3,15 +3,17 @@
 //! Enable the `resumable-upload-api` feature to use this API.
 //! It maps directly to the server operations and is intended for advanced use cases that need
 //! low-level protocol calls.
-//! A future release of `objectstore-client` will use this API under the hood for eligible
-//! `Session::put` calls, so users can benefit from this feature without the need to interact with
-//! this API directly.
+//! The client also uses this API internally for eligible `Session::put` calls.
+
+// Automatic uploads use only part of this module when the public API is disabled.
+#![cfg_attr(not(feature = "resumable-upload-api"), allow(dead_code))]
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
-use std::fmt;
+use std::{fmt, io};
 
 use bytes::Bytes;
+use futures_util::{StreamExt, TryStreamExt, future, stream};
 use objectstore_types::metadata::Metadata;
 use objectstore_types::resumable::{
     CompleteUploadResponse, CreateSessionResponse, HEADER_UPLOAD_LENGTH, HEADER_UPLOAD_OFFSET,
@@ -24,6 +26,7 @@ use tokio_util::io::ReaderStream;
 
 pub use objectstore_types::resumable::{SessionToken, UploadProgress};
 
+use crate::instrument::{OperationSpan, record_field};
 use crate::response::ResponseExt as _;
 use crate::{ClientStream, Compression, Error, ExpirationPolicy, ObjectKey, Session};
 
@@ -56,6 +59,7 @@ pub struct ResumableUpload {
     granularity: Option<u64>,
 }
 
+#[cfg(feature = "resumable-upload-api")]
 impl Session {
     /// Starts building a resumable upload for an object with `object_length` bytes.
     ///
@@ -72,12 +76,7 @@ impl Session {
             ..Default::default()
         };
 
-        CreateResumableUploadBuilder {
-            session: self.clone(),
-            total_length: object_length,
-            key: None,
-            metadata,
-        }
+        CreateResumableUploadBuilder::new(self.clone(), object_length, None, metadata)
     }
 
     /// Reconstructs a resumable upload handle without contacting the server.
@@ -85,17 +84,21 @@ impl Session {
     /// The `key` and `token` must come from the same previously created upload and scope. The
     /// server rejects a mismatched or unknown token when an operation is sent.
     pub fn resume_upload(&self, key: impl Into<ObjectKey>, token: SessionToken) -> ResumableUpload {
-        ResumableUpload {
-            session: self.clone(),
-            key: key.into(),
+        ResumableUpload::new(self.clone(), key.into(), token)
+    }
+}
+
+impl ResumableUpload {
+    fn new(session: Session, key: ObjectKey, token: SessionToken) -> Self {
+        Self {
+            session,
+            key,
             token,
             total_length: None,
             granularity: None,
         }
     }
-}
 
-impl ResumableUpload {
     /// Returns the object key bound to this upload.
     pub fn key(&self) -> &str {
         &self.key
@@ -130,35 +133,43 @@ impl ResumableUpload {
     /// The returned progress contains the authoritative server offset, which should be used for
     /// subsequent requests.
     pub fn put(&self, offset: u64, chunk: impl Into<Bytes>) -> PutChunkBuilder {
-        let chunk = chunk.into();
-        self.put_body(offset, chunk.len() as u64, chunk.into())
+        self.put_chunk(offset, UploadChunk::Buffer(chunk.into()))
     }
 
     /// Builds a request to write a streaming chunk of `length` bytes at `offset`.
     ///
-    /// The stream must yield exactly `length` bytes. If this upload records compression,
-    /// those bytes must come from the object after it has been compressed in full.
+    /// The stream must yield exactly `length` bytes and then end successfully. The client
+    /// checks this before sending the final bytes (before the request for zero-length uploads).
+    ///
+    /// If this upload records compression, those bytes must come from the object after it
+    /// has been compressed in full.
     pub fn put_stream(&self, offset: u64, length: u64, stream: ClientStream) -> PutChunkBuilder {
-        self.put_body(offset, length, Body::wrap_stream(stream))
+        self.put_chunk(
+            offset,
+            UploadChunk::Stream {
+                source: stream,
+                length,
+            },
+        )
     }
 
     /// Builds a request to write an [`AsyncRead`] chunk of `length` bytes at `offset`.
     ///
-    /// The reader must produce exactly `length` bytes. If this upload records compression,
+    /// The reader must produce exactly `length` bytes and then reach EOF successfully,
+    /// with the same validation as [`Self::put_stream`]. If this upload records compression,
     /// those bytes must come from the object after it has been compressed in full.
     pub fn put_read<R>(&self, offset: u64, length: u64, reader: R) -> PutChunkBuilder
     where
         R: AsyncRead + Send + Sync + 'static,
     {
-        self.put_body(offset, length, Body::wrap_stream(ReaderStream::new(reader)))
+        self.put_stream(offset, length, ReaderStream::new(reader).boxed())
     }
 
-    fn put_body(&self, offset: u64, length: u64, body: Body) -> PutChunkBuilder {
+    fn put_chunk(&self, offset: u64, chunk: UploadChunk) -> PutChunkBuilder {
         PutChunkBuilder {
             upload: self.clone(),
             offset,
-            length,
-            body,
+            chunk,
         }
     }
 
@@ -191,6 +202,10 @@ impl ResumableUpload {
         }
     }
 
+    fn span(&self, op: &'static str) -> OperationSpan {
+        OperationSpan::storage(op, &self.session, Some(&self.key))
+    }
+
     fn request(&self, method: Method) -> crate::Result<reqwest::RequestBuilder> {
         Ok(self
             .session
@@ -201,7 +216,7 @@ impl ResumableUpload {
     }
 }
 
-/// A builder for [`Session::create_upload`].
+/// A builder for creating a resumable upload.
 #[derive(Debug)]
 pub struct CreateResumableUploadBuilder {
     session: Session,
@@ -211,6 +226,20 @@ pub struct CreateResumableUploadBuilder {
 }
 
 impl CreateResumableUploadBuilder {
+    pub(crate) fn new(
+        session: Session,
+        total_length: u64,
+        key: Option<ObjectKey>,
+        metadata: Metadata,
+    ) -> Self {
+        Self {
+            session,
+            total_length,
+            key,
+            metadata,
+        }
+    }
+
     /// Sets an explicit object key instead of asking the server to generate one.
     pub fn key(mut self, key: impl Into<ObjectKey>) -> Self {
         self.key = Some(key.into()).filter(|key| !key.is_empty());
@@ -270,6 +299,15 @@ impl CreateResumableUploadBuilder {
     /// Returns `None` when the server declines resumable uploads for this object.
     /// Callers should fall back to a regular [`Session::put`] in that case.
     pub async fn send(self) -> crate::Result<Option<ResumableUpload>> {
+        let span = OperationSpan::storage(
+            "objectstore.resumable.create",
+            &self.session,
+            self.key.as_deref(),
+        );
+        span.instrument(self.execute()).await
+    }
+
+    async fn execute(self) -> crate::Result<Option<ResumableUpload>> {
         let method = if self.key.is_some() {
             Method::PUT
         } else {
@@ -301,6 +339,7 @@ impl CreateResumableUploadBuilder {
         }
 
         let response: CreateSessionResponse = response.json().await?;
+        record_field("objectstore.key", response.key.as_str());
         let upload = ResumableUpload {
             session: self.session,
             key: response.key,
@@ -326,6 +365,11 @@ impl UploadProgressBuilder {
     /// Returns [`Error::ResumableUploadUnavailable`] when the session expired, was canceled, or
     /// could not be found. The upload must be restarted with a new session in that case.
     pub async fn send(self) -> crate::Result<UploadProgress> {
+        let span = self.upload.span("objectstore.resumable.progress");
+        span.instrument(self.execute()).await
+    }
+
+    async fn execute(self) -> crate::Result<UploadProgress> {
         let response = self
             .upload
             .request(Method::PUT)?
@@ -341,8 +385,64 @@ impl UploadProgressBuilder {
 pub struct PutChunkBuilder {
     upload: ResumableUpload,
     offset: u64,
-    length: u64,
-    body: Body,
+    chunk: UploadChunk,
+}
+
+/// An upload payload whose byte count is derived from its buffer or checked against its stream.
+enum UploadChunk {
+    Buffer(Bytes),
+    Stream { source: ClientStream, length: u64 },
+}
+
+impl UploadChunk {
+    fn len(&self) -> u64 {
+        match self {
+            Self::Buffer(bytes) => bytes.len() as u64,
+            Self::Stream { length, .. } => *length,
+        }
+    }
+
+    /// Builds a body that checks the declared length and successful source EOF before
+    /// yielding the final bytes, since HTTP may stop polling at Content-Length.
+    async fn into_body(self) -> io::Result<Body> {
+        let (stream, length) = match self {
+            Self::Buffer(bytes) => return Ok(Body::from(bytes)),
+            Self::Stream { source, length } => (source, length),
+        };
+        let stream = stream
+            .try_filter(|chunk| future::ready(!chunk.is_empty()))
+            .fuse();
+        let stream = stream::try_unfold((stream, length), |(mut stream, remaining)| async move {
+            let Some(chunk) = stream.try_next().await? else {
+                return if remaining == 0 {
+                    Ok(None)
+                } else {
+                    Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "upload stream is too short",
+                    ))
+                };
+            };
+            let remaining = remaining.checked_sub(chunk.len() as u64).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "upload stream is too long")
+            })?;
+            if remaining == 0 && stream.try_next().await?.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "upload stream is too long",
+                ));
+            }
+            Ok(Some((chunk, (stream, remaining))))
+        });
+
+        // A zero-length HTTP body may never be polled at all.
+        if length == 0 {
+            futures_util::pin_mut!(stream);
+            stream.try_next().await?;
+            return Ok(Body::default());
+        }
+        Ok(Body::wrap_stream(stream))
+    }
 }
 
 impl fmt::Debug for PutChunkBuilder {
@@ -350,7 +450,7 @@ impl fmt::Debug for PutChunkBuilder {
         f.debug_struct("PutChunkBuilder")
             .field("upload", &self.upload)
             .field("offset", &self.offset)
-            .field("length", &self.length)
+            .field("length", &self.chunk.len())
             .finish()
     }
 }
@@ -377,14 +477,22 @@ impl PutChunkBuilder {
     /// };
     /// ```
     pub async fn send(self) -> crate::Result<UploadProgress> {
-        self.upload
-            .validate_chunk_length(self.offset, self.length)?;
+        let span = self.upload.span("objectstore.resumable.put");
+        span.instrument(self.execute()).await
+    }
+
+    async fn execute(self) -> crate::Result<UploadProgress> {
+        let length = self.chunk.len();
+        record_field("objectstore.offset", self.offset);
+        record_field("objectstore.size", length);
+        self.upload.validate_chunk_length(self.offset, length)?;
+        let body = self.chunk.into_body().await?;
         let response = self
             .upload
             .request(Method::PUT)?
             .header(HEADER_UPLOAD_OFFSET, self.offset.to_string())
-            .header(reqwest::header::CONTENT_LENGTH, self.length)
-            .body(self.body)
+            .header(reqwest::header::CONTENT_LENGTH, length)
+            .body(body)
             .send()
             .await?;
         parse_progress_response(response).await
@@ -405,6 +513,11 @@ impl CancelUploadBuilder {
     /// Returns [`Error::ResumableUploadUnavailable`] when the session expired, was already
     /// canceled, or could not be found.
     pub async fn send(self) -> crate::Result<()> {
+        let span = self.upload.span("objectstore.resumable.cancel");
+        span.instrument(self.execute()).await
+    }
+
+    async fn execute(self) -> crate::Result<()> {
         let response = self.upload.request(Method::DELETE)?.send().await?;
         match response.status() {
             StatusCode::NO_CONTENT => {
@@ -469,5 +582,78 @@ fn parse_offset(response: &Response) -> Option<u64> {
     match value.parse().ok()? {
         UploadOffset::At(offset) => Some(offset),
         UploadOffset::Unknown => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures_util::FutureExt;
+    use http_body_util::BodyExt;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn upload_chunk_checks_length() {
+        type Expected = Result<&'static [u8], ()>;
+        let cases: &[(u64, &[&[u8]], Expected)] = &[
+            (0, &[], Ok(b"")),
+            (0, &[b"", b""], Ok(b"")),
+            (0, &[b"x"], Err(())),
+            (5, &[], Err(())),
+            (5, &[b"hell"], Err(())),
+            (5, &[b"hello!"], Err(())),
+            (5, &[b"hello", b"!"], Err(())),
+            (5, &[b"hello"], Ok(b"hello")),
+            (5, &[b"", b"he", b"", b"llo", b""], Ok(b"hello")),
+        ];
+        for &(length, chunks, expected) in cases {
+            let stream = stream::iter(chunks.iter().map(|c| Ok(Bytes::from_static(c)))).boxed();
+            let result = async {
+                let body = UploadChunk::Stream {
+                    source: stream,
+                    length,
+                }
+                .into_body()
+                .await?;
+                Ok::<_, Error>(body.collect().await?.to_bytes())
+            }
+            .await;
+            assert_eq!(
+                result.as_deref().map_err(|_| ()),
+                expected,
+                "length={length}, chunks={chunks:?}: {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn upload_chunk_checks_eof() {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let stream = stream::unfold(receiver, |mut receiver| async {
+            receiver.recv().await.map(|chunk| (Ok(chunk), receiver))
+        })
+        .boxed();
+        let mut body = UploadChunk::Stream {
+            source: stream,
+            length: 5,
+        }
+        .into_body()
+        .await
+        .unwrap();
+
+        sender.send(Bytes::from_static(b"he")).unwrap();
+        let first = body
+            .frame()
+            .now_or_never()
+            .expect("first chunk must not wait");
+        assert_eq!(first.unwrap().unwrap().into_data().unwrap(), b"he"[..]);
+
+        sender.send(Bytes::from_static(b"llo")).unwrap();
+        assert!(
+            body.frame().now_or_never().is_none(),
+            "final chunk must wait for EOF"
+        );
+        drop(sender);
+        assert_eq!(body.collect().await.unwrap().to_bytes(), b"llo"[..]);
     }
 }

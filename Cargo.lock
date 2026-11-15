@@ -2951,10 +2951,11 @@ dependencies = [
 
 [[package]]
 name = "objectstore-client"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "async-compression",
+ "axum",
  "bytes",
  "flate2",
  "futures-util",
@@ -2964,13 +2965,17 @@ dependencies = [
  "multer",
  "objectstore-test",
  "objectstore-types",
+ "rand 0.10.3",
  "reqwest 0.13.5",
+ "sentry",
  "sentry-core",
  "serde",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
+ "tracing",
+ "tracing-subscriber",
  "url",
  "zstd",
  "zstd-safe",
@@ -3100,6 +3105,7 @@ dependencies = [
  "objectstore-metrics",
  "objectstore-types",
  "papaya",
+ "percent-encoding",
  "quick-xml",
  "regex",
  "reqwest 0.13.5",
@@ -3153,7 +3159,7 @@ dependencies = [
 
 [[package]]
 name = "objectstore-types"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "base64 0.23.1",
  "ed25519-dalek",

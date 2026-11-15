@@ -8,15 +8,21 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use objectstore_types::metadata::Metadata;
 use reqwest::Body;
+use reqwest::header::CONTENT_LENGTH;
 use serde::Deserialize;
 use tokio::fs::File;
-use tokio::io::{AsyncBufRead, AsyncRead, BufReader};
+use tokio::io::{AsyncBufRead, AsyncRead, AsyncReadExt as _, AsyncSeekExt as _, BufReader};
 use tokio_util::io::{ReaderStream, StreamReader};
 
 pub use objectstore_types::metadata::{Compression, ExpirationPolicy};
 
+use crate::instrument::{OperationSpan, debug, record_field};
 use crate::response::ResponseExt as _;
+use crate::resumable::CreateResumableUploadBuilder;
 use crate::{ClientStream, ObjectKey, Session};
+
+mod automatic;
+mod payload;
 
 /// The response returned from the service after uploading an object.
 #[derive(Debug, Deserialize)]
@@ -75,6 +81,7 @@ impl Session {
                 .compression()
                 .map(CompressionMode::Compress),
             key: None,
+            resumable_threshold_bytes: self.scope.usecase().resumable_threshold_bytes(),
             body,
         }
     }
@@ -85,11 +92,15 @@ impl Session {
     }
 
     /// Creates or replaces an object using a streaming payload.
+    ///
+    /// Streams use direct uploads, regardless of the resumable threshold.
     pub fn put_stream(&self, body: ClientStream) -> PutBuilder {
         self.put_body(PutBody::Stream(body))
     }
 
     /// Creates or replaces an object using an [`AsyncRead`] payload.
+    ///
+    /// Readers use direct uploads. Use [`Self::put_path`] for automatic resumable file uploads.
     pub fn put_read<R>(&self, body: R) -> PutBuilder
     where
         R: AsyncRead + Send + Sync + 'static,
@@ -99,6 +110,9 @@ impl Session {
     }
 
     /// Creates or replaces an object using the contents of an opened file.
+    ///
+    /// Uploads from the current position using a direct request, regardless of the resumable threshold.
+    /// The file must stay readable and must not be modified until the upload completes.
     ///
     /// The file descriptor is held open from the moment this method is called until the
     /// upload completes. When enqueueing many files via [`Session::many`], prefer
@@ -110,6 +124,12 @@ impl Session {
     }
 
     /// Creates or replaces an object using the contents of the file at `path`.
+    ///
+    /// The path must stay readable and must not be modified, renamed, removed, or replaced
+    /// until the upload completes.
+    /// If the request is executed using a resumable upload, then multiple attempts may be
+    /// performed, and each attempt opens a new handle. Handles may remain open until pending
+    /// HTTP requests release their readers.
     ///
     /// Unlike [`put_file`](Session::put_file), this method defers opening the file until the
     /// request is actually sent. When enqueueing many file uploads via [`Session::many`], this
@@ -125,6 +145,14 @@ impl Session {
 }
 
 /// A [`put`](Session::put) request builder.
+///
+/// # Automatic resumable uploads
+///
+/// Large buffers and paths to regular files use resumable uploads automatically,
+/// recovering from interrupted requests. Open files, streams, readers, and uploads queued through
+/// [`Session::many`] do not use resumables. No feature flag is required.
+///
+/// Configure this with [`Self::resumable_threshold_bytes`] and [`crate::ClientBuilder::spool_dir`].
 #[derive(Debug)]
 pub struct PutBuilder {
     pub(crate) session: Session,
@@ -132,9 +160,28 @@ pub struct PutBuilder {
     pub(crate) compression: Option<CompressionMode>,
     pub(crate) key: Option<ObjectKey>,
     pub(crate) body: PutBody,
+    pub(crate) resumable_threshold_bytes: Option<u64>,
 }
 
 impl PutBuilder {
+    /// Sets the minimum remaining input size for automatic resumable uploads.
+    ///
+    /// Measures remaining bytes before client compression. Inherits the
+    /// [`Usecase` threshold](crate::Usecase::with_resumable_threshold_bytes) unless overridden.
+    /// Pass [`None`] to disable or zero to include every supported payload.
+    /// See [`PutBuilder`] for eligibility.
+    ///
+    /// ```no_run
+    /// # async fn example(session: objectstore_client::Session) -> objectstore_client::Result<()> {
+    /// session.put("payload").resumable_threshold_bytes(None).send().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn resumable_threshold_bytes(mut self, threshold: impl Into<Option<u64>>) -> Self {
+        self.resumable_threshold_bytes = threshold.into();
+        self
+    }
+
     /// Sets an explicit object key.
     ///
     /// If a key is specified, the object will be stored under that key. Otherwise, the Objectstore
@@ -146,7 +193,7 @@ impl PutBuilder {
 
     /// Sets an explicit compression algorithm to be used for this payload.
     ///
-    /// The client compresses the payload while uploading it and records the algorithm in the
+    /// The client compresses the payload and records the algorithm in the
     /// object's metadata. [`None`] should be used if no compression should be performed by the
     /// client, either because the payload is uncompressible (such as a media format), or if the
     /// compression should not be recorded for this object.
@@ -263,10 +310,35 @@ impl PutBuilder {
     }
 }
 
+/// A request body along with its exact length, if known before sending.
+pub(crate) struct EncodedBody {
+    pub body: Body,
+    /// The number of bytes `body` yields, sent as `Content-Length` when known.
+    pub length: Option<u64>,
+}
+
+impl EncodedBody {
+    /// Creates a body whose length is known up front.
+    pub fn sized(length: u64, body: impl Into<Body>) -> Self {
+        Self {
+            body: body.into(),
+            length: Some(length),
+        }
+    }
+
+    /// Creates a body whose length is only known once it has been streamed.
+    pub fn streamed(body: Body) -> Self {
+        Self { body, length: None }
+    }
+}
+
 /// Turns the body into a request body, compressing it if the mode asks for it.
 ///
 /// Payloads declared as [`CompressionMode::Precompressed`] are forwarded verbatim.
-pub(crate) async fn encode_body(body: PutBody, mode: Option<CompressionMode>) -> io::Result<Body> {
+pub(crate) async fn encode_body(
+    body: PutBody,
+    mode: Option<CompressionMode>,
+) -> io::Result<EncodedBody> {
     let compression = match mode {
         Some(CompressionMode::Compress(compression)) => Some(compression),
         // The payload already carries the encoding, so nothing is left to do here.
@@ -275,18 +347,39 @@ pub(crate) async fn encode_body(body: PutBody, mode: Option<CompressionMode>) ->
 
     Ok(match compression {
         None => match body {
-            PutBody::Buffer(bytes) => bytes.into(),
-            PutBody::Stream(stream) => Body::wrap_stream(stream),
-            PutBody::File(file) => Body::wrap_stream(ReaderStream::new(file)),
-            PutBody::Path(path) => Body::wrap_stream(ReaderStream::new(File::open(path).await?)),
+            PutBody::Buffer(bytes) => EncodedBody::sized(bytes.len() as u64, bytes),
+            PutBody::Stream(stream) => EncodedBody::streamed(Body::wrap_stream(stream)),
+            PutBody::File(file) => encode_file(file).await?,
+            PutBody::Path(path) => encode_file(File::open(path).await?).await?,
         },
-        Some(compression) => match body {
+        Some(compression) => EncodedBody::streamed(match body {
             PutBody::Buffer(bytes) => compress(Cursor::new(bytes), compression),
             PutBody::Stream(stream) => compress(StreamReader::new(stream), compression),
             PutBody::File(file) => compress(BufReader::new(file), compression),
             PutBody::Path(path) => compress(BufReader::new(File::open(path).await?), compression),
-        },
+        }),
     })
+}
+
+/// Streams the remainder of a file from its current position.
+///
+/// For regular files, the length is taken from the file's metadata and the stream is capped to
+/// it, so that a file growing during the upload cannot exceed the declared length.
+///
+/// A reported size of zero is not trusted: virtual files such as those in `/proc` report zero
+/// bytes but still have content. These files, and empty ones, are streamed without a length.
+async fn encode_file(mut file: File) -> io::Result<EncodedBody> {
+    let metadata = file.metadata().await?;
+    if metadata.is_file() && metadata.len() > 0 {
+        let position = file.stream_position().await?;
+        let length = metadata.len().saturating_sub(position);
+        let stream = ReaderStream::new(file.take(length));
+        Ok(EncodedBody::sized(length, Body::wrap_stream(stream)))
+    } else {
+        // Pipes, special files, and virtual files do not report a meaningful size.
+        let stream = ReaderStream::new(file);
+        Ok(EncodedBody::streamed(Body::wrap_stream(stream)))
+    }
 }
 
 fn compress(reader: impl AsyncBufRead + Send + 'static, compression: Compression) -> Body {
@@ -296,28 +389,68 @@ fn compress(reader: impl AsyncBufRead + Send + 'static, compression: Compression
     }
 }
 
-// TODO: instead of a separate `send` method, it would be nice to just implement `IntoFuture`.
-// However, `IntoFuture` needs to define the resulting future as an associated type,
-// and "impl trait in associated type position" is not yet stable :-(
 impl PutBuilder {
     /// Sends the built put request to the upstream service.
-    pub async fn send(mut self) -> crate::Result<PutResponse> {
+    pub async fn send(self) -> crate::Result<PutResponse> {
+        let span = OperationSpan::storage("objectstore.put", &self.session, self.key.as_deref());
+        span.instrument(self.execute()).await
+    }
+
+    async fn execute(mut self) -> crate::Result<PutResponse> {
         let method = match self.key {
             Some(_) => reqwest::Method::PUT,
             None => reqwest::Method::POST,
         };
 
+        self.metadata.compression = self.compression.map(CompressionMode::compression);
+        record_field(
+            "objectstore.compression",
+            self.metadata
+                .compression
+                .as_ref()
+                .map_or("none", Compression::as_str),
+        );
+
+        let headers = self.metadata.to_headers("")?;
+        let prepared = payload::prepare(
+            self.body,
+            self.compression,
+            self.resumable_threshold_bytes,
+            self.session.client.spool_dir().map(PathBuf::from),
+        )
+        .await?;
+        if let payload::PreparedBody::Replayable(body) = &prepared {
+            let create = CreateResumableUploadBuilder::new(
+                self.session.clone(),
+                body.len(),
+                self.key.clone(),
+                self.metadata,
+            );
+            match create.send().await {
+                Ok(Some(upload)) => {
+                    let response = automatic::upload(body, upload).await?;
+                    record_field("objectstore.key", response.key.as_str());
+                    return Ok(response);
+                }
+                Ok(None) => {}
+                Err(_e) => {
+                    debug!(error = %_e, "Resumable upload creation failed; falling back to direct upload");
+                }
+            }
+        }
+
+        let EncodedBody { body, length } = prepared.into_reqwest_body(self.compression).await?;
         let mut builder = self
             .session
             .request(method, self.key.as_deref().unwrap_or_default())?;
-
-        self.metadata.compression = self.compression.map(CompressionMode::compression);
-        let body = encode_body(self.body, self.compression).await?;
-
-        builder = builder.headers(self.metadata.to_headers("")?);
-
+        builder = builder.headers(headers);
+        if let Some(length) = length {
+            builder = builder.header(CONTENT_LENGTH, length);
+        }
         let response = builder.body(body).send().await?;
-        Ok(response.error_for_status_and_drain().await?.json().await?)
+        let response: PutResponse = response.error_for_status_and_drain().await?.json().await?;
+        record_field("objectstore.key", response.key.as_str());
+        Ok(response)
     }
 }
 
@@ -339,8 +472,10 @@ mod tests {
         PutBody::Stream(stream::iter(chunks).boxed())
     }
 
-    async fn collect(body: Body) -> Vec<u8> {
-        body.collect()
+    async fn collect(encoded: EncodedBody) -> Vec<u8> {
+        encoded
+            .body
+            .collect()
             .await
             .expect("body to be readable")
             .to_bytes()

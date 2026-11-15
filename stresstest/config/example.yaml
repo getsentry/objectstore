@@ -8,7 +8,7 @@ duration: 5s
 
 workloads:
   - name: attachments
-    mode: throughput
+    mode: fixed-rate
     organizations: 1000
     file_sizes:
       p50: 50 KiB

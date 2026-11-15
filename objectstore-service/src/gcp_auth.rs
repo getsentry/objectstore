@@ -10,8 +10,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
 use tokio::time::Instant;
+use tokio_util::task::AbortOnDropHandle;
 
 /// How far ahead of expiry to start refreshing.
 ///
@@ -82,13 +82,8 @@ pub struct PrefetchingTokenProvider {
     scopes: Vec<&'static str>,
     rx: watch::Receiver<TokenResult>,
     provider: Arc<dyn gcp_auth::TokenProvider>,
-    task: JoinHandle<()>,
-}
-
-impl Drop for PrefetchingTokenProvider {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
+    /// Aborts the background refresh task when the provider is dropped.
+    _task: AbortOnDropHandle<()>,
 }
 
 impl std::fmt::Debug for PrefetchingTokenProvider {
@@ -128,7 +123,7 @@ impl PrefetchingTokenProvider {
             scopes: scopes.to_vec(),
             rx,
             provider,
-            task,
+            _task: AbortOnDropHandle::new(task),
         })
     }
 }

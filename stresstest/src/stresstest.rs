@@ -245,10 +245,10 @@ async fn run_workload(
     duration: Duration,
     ttl: Option<Duration>,
 ) -> (Workload, WorkloadMetrics, Duration) {
-    // In throughput mode, allow for a high concurrency value.
+    // Fixed-rate workloads can run up to 100 concurrent operations.
     let concurrency = match workload.mode {
-        WorkloadMode::Weighted | WorkloadMode::Batch => workload.concurrency,
-        WorkloadMode::Throughput => 100,
+        WorkloadMode::FixedConcurrency | WorkloadMode::Batch => workload.concurrency,
+        WorkloadMode::FixedRate => 100,
     };
 
     let semaphore = Arc::new(Semaphore::new(concurrency));

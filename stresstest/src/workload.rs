@@ -15,18 +15,18 @@ use tokio::io::{AsyncRead, ReadBuf};
 
 /// Defines how the workload schedules its operations.
 #[derive(Debug, Default, Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "kebab-case")]
 pub enum WorkloadMode {
     /// The workload runs with fixed concurrency as fast as possible.
     ///
     /// Actions are used to determine the distribution of writes, reads and deletes.
     #[default]
-    Weighted,
+    FixedConcurrency,
 
-    /// The workload runs with fixed ops per second.
+    /// The workload targets fixed ops per second, capped at 100 concurrent operations.
     ///
     /// Actions are used to determine the ops per second for each operation.
-    Throughput,
+    FixedRate,
 
     /// The workload sends batch requests containing multiple write operations each.
     ///
@@ -46,6 +46,7 @@ pub struct WorkloadBuilder {
 
     p50_size: u64,
     p99_size: u64,
+    min_size: u64,
     max_size: Option<u64>,
 
     write_weight: usize,
@@ -66,7 +67,7 @@ impl WorkloadBuilder {
         self
     }
 
-    /// The mode of the workload, either `weighted` or `throughput`.
+    /// How the workload schedules its operations.
     pub fn mode(mut self, mode: WorkloadMode) -> Self {
         self.mode = mode;
         self
@@ -76,6 +77,12 @@ impl WorkloadBuilder {
     pub fn size_distribution(mut self, p50: u64, p99: u64) -> Self {
         self.p50_size = p50;
         self.p99_size = p99;
+        self
+    }
+
+    /// Sets the minimum payload size. This must be less than the median and at most the maximum.
+    pub fn min_size(mut self, min_size: u64) -> Self {
+        self.min_size = min_size;
         self
     }
 
@@ -98,8 +105,9 @@ impl WorkloadBuilder {
         let rng = SmallRng::seed_from_u64(self.seed);
 
         // Inspired by <https://stats.stackexchange.com/a/649432>
-        let p50 = self.p50_size as f64;
-        let p99 = self.p99_size as f64;
+        // Fit the distribution above the floor so shifting the samples preserves p50 and p99.
+        let p50 = (self.p50_size - self.min_size) as f64;
+        let p99 = (self.p99_size - self.min_size) as f64;
         let mu = p50.ln();
         let sigma = (p99.ln() - mu) / 2.3263;
 
@@ -115,6 +123,7 @@ impl WorkloadBuilder {
 
             rng,
             size_distribution,
+            min_size: self.min_size,
             max_size: self.max_size,
             action_distribution,
 
@@ -142,13 +151,15 @@ pub struct Workload {
     pub(crate) concurrency: usize,
     /// The number of organizations to distribute the workload across.
     pub(crate) organizations: u64,
-    /// The target throughput for the workload, in bytes per second. Overrides concurrency.
+    /// How the workload schedules its operations.
     pub(crate) mode: WorkloadMode,
 
     /// The RNG driving all our distributions.
     rng: SmallRng,
     /// A distribution that generates payload sizes for the `write` action.
     size_distribution: LogNormal<f64>,
+    /// Minimum payload size in bytes, added to each sampled size.
+    min_size: u64,
     /// Optional maximum payload size in bytes.
     max_size: Option<u64>,
     /// A distribution that generates actions, such as write/read/delete.
@@ -173,6 +184,7 @@ impl Workload {
 
             p50_size: 16 * 1024,
             p99_size: 1024 * 1024,
+            min_size: 0,
             max_size: None,
 
             write_weight: 33,
@@ -183,7 +195,8 @@ impl Workload {
 
     fn get_payload(&self, seed: u64) -> Payload {
         let mut rng = SmallRng::seed_from_u64(seed);
-        let mut len = self.size_distribution.sample(&mut rng) as u64;
+        let mut len =
+            (self.size_distribution.sample(&mut rng) as u64).saturating_add(self.min_size);
 
         if let Some(max) = self.max_size {
             len = len.min(max);
@@ -203,21 +216,21 @@ impl Workload {
         Some(self.existing_files.remove(idx))
     }
 
-    fn next_action_throughput(&mut self) -> Option<Action> {
-        let write_throughput = self.action_distribution.weight(0).unwrap();
-        let read_throughput = self.action_distribution.weight(1).unwrap();
-        let delete_throughput = self.action_distribution.weight(2).unwrap();
+    fn next_action_fixed_rate(&mut self) -> Option<Action> {
+        let write_rate = self.action_distribution.weight(0).unwrap();
+        let read_rate = self.action_distribution.weight(1).unwrap();
+        let delete_rate = self.action_distribution.weight(2).unwrap();
 
         let elapsed = self.start_time.get_or_insert_with(Instant::now).elapsed();
 
         // Prioritize writes to create readback.
-        if (self.totals.writes as f64) < (elapsed.as_secs_f64() * write_throughput as f64) {
+        if (self.totals.writes as f64) < (elapsed.as_secs_f64() * write_rate as f64) {
             self.totals.writes += 1;
             let seed = self.rng.next_u64();
             return Some(Action::Write(InternalId(seed), self.get_payload(seed)));
         }
 
-        if (self.totals.reads as f64) < elapsed.as_secs_f64() * read_throughput as f64
+        if (self.totals.reads as f64) < elapsed.as_secs_f64() * read_rate as f64
             && let Some((internal, external)) = self.sample_readback()
         {
             self.totals.reads += 1;
@@ -228,7 +241,7 @@ impl Workload {
             ));
         }
 
-        if (self.totals.deletes as f64) < elapsed.as_secs_f64() * delete_throughput as f64
+        if (self.totals.deletes as f64) < elapsed.as_secs_f64() * delete_rate as f64
             && let Some((_internal, external)) = self.sample_readback()
         {
             self.totals.deletes += 1;
@@ -238,7 +251,7 @@ impl Workload {
         None
     }
 
-    fn next_action_weighted(&mut self) -> Action {
+    fn next_action_by_weight(&mut self) -> Action {
         loop {
             match self.action_distribution.sample(&mut self.rng) {
                 0 => {
@@ -261,8 +274,10 @@ impl Workload {
 
     pub(crate) fn next_action(&mut self) -> Option<Action> {
         match self.mode {
-            WorkloadMode::Weighted | WorkloadMode::Batch => Some(self.next_action_weighted()),
-            WorkloadMode::Throughput => self.next_action_throughput(),
+            WorkloadMode::FixedConcurrency | WorkloadMode::Batch => {
+                Some(self.next_action_by_weight())
+            }
+            WorkloadMode::FixedRate => self.next_action_fixed_rate(),
         }
     }
 
@@ -362,6 +377,20 @@ impl AsyncRead for Payload {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn payloads_respect_size_bounds() {
+        const MIN: u64 = 1024 * 1024 + 1;
+        const MAX: u64 = 128 * 1024 * 1024;
+        let workload = Workload::builder("test")
+            .size_distribution(2 * 1024 * 1024, 50 * 1024 * 1024)
+            .min_size(MIN)
+            .max_size(Some(MAX))
+            .build();
+        for seed in 0..1000 {
+            assert!((MIN..=MAX).contains(&workload.get_payload(seed).len));
+        }
+    }
 
     #[test]
     fn lognormal_percentiles_work() {
