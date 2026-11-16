@@ -279,7 +279,7 @@ impl ConcurrencyLimiter {
     ///
     /// This future runs forever and is intended to be spawned as a background
     /// task alongside the service.
-    pub async fn run_emitter<F, Fut>(&self, mut emit: F)
+    pub async fn run_emitter<F, Fut>(&self, mut emit: F) -> !
     where
         F: FnMut(Stats) -> Fut,
         Fut: Future<Output = ()>,
@@ -500,7 +500,7 @@ mod tests {
         });
 
         tokio::select! {
-            _ = emitter => unreachable!("emitter runs forever"),
+            never = emitter => never,
             _ = tokio::time::sleep(EMITTER_INTERVAL) => {}
         }
 
@@ -708,7 +708,7 @@ mod tests {
         });
 
         tokio::select! {
-            _ = emitter => unreachable!("emitter runs forever"),
+            never = emitter => never,
             _ = tokio::time::sleep(EMITTER_INTERVAL) => {}
         }
 

@@ -52,7 +52,7 @@ pub struct LimiterStats {
 }
 
 /// Shared interval loop for the metric emitters.
-async fn run_emitter<S, F, Fut>(mut snapshot: impl FnMut() -> S, mut emit: F)
+async fn run_emitter<S, F, Fut>(mut snapshot: impl FnMut() -> S, mut emit: F) -> !
 where
     F: FnMut(S) -> Fut,
     Fut: Future<Output = ()>,
@@ -117,12 +117,12 @@ impl Limiter {
     }
 
     /// Passes this limiter's stats to `emit` immediately and once per second thereafter.
-    pub async fn run_emitter<F, Fut>(&self, emit: F)
+    pub async fn run_emitter<F, Fut>(&self, emit: F) -> !
     where
         F: FnMut(LimiterStats) -> Fut,
         Fut: Future<Output = ()>,
     {
-        run_emitter(|| self.stats(), emit).await;
+        run_emitter(|| self.stats(), emit).await
     }
 }
 
@@ -255,12 +255,12 @@ impl PriorityLimiter {
     }
 
     /// Passes this limiter's stats to `emit` immediately and once per second thereafter.
-    pub async fn run_emitter<F, Fut>(&self, emit: F)
+    pub async fn run_emitter<F, Fut>(&self, emit: F) -> !
     where
         F: FnMut(PriorityLimiterStats) -> Fut,
         Fut: Future<Output = ()>,
     {
-        run_emitter(|| self.stats(), emit).await;
+        run_emitter(|| self.stats(), emit).await
     }
 }
 
