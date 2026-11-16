@@ -17,6 +17,7 @@ use tokio_util::io::{ReaderStream, StreamReader};
 pub use objectstore_types::metadata::{Compression, ExpirationPolicy};
 
 use crate::instrument::{OperationSpan, debug, record_field};
+use crate::metadata;
 use crate::response::ResponseExt as _;
 use crate::resumable::CreateResumableUploadBuilder;
 use crate::{ClientStream, ObjectKey, Session};
@@ -298,12 +299,24 @@ impl PutBuilder {
     /// This sets the custom metadata to the provided map.
     ///
     /// It will clear any previously set metadata.
+    ///
+    /// Keys are case-insensitive: ASCII letters are lowercased. A key must be non-empty and
+    /// consist only of `a-z`, `0-9`, and the symbols `_ - | ~ % $ # + . :`. Keys are checked when
+    /// the request is sent, not here, so chaining never fails. [`send`](PutBuilder::send) returns
+    /// [`Error::Metadata`](crate::Error::Metadata) naming the first invalid key and sends no
+    /// request.
     pub fn set_metadata(mut self, metadata: impl Into<BTreeMap<String, String>>) -> Self {
         self.metadata.custom = metadata.into();
         self
     }
 
-    /// Appends they `key`/`value` to the custom metadata of this object.
+    /// Appends the `key`/`value` to the custom metadata of this object.
+    ///
+    /// Keys are case-insensitive: ASCII letters are lowercased. A key must be non-empty and
+    /// consist only of `a-z`, `0-9`, and the symbols `_ - | ~ % $ # + . :`. Keys are checked when
+    /// the request is sent, not here, so chaining never fails. [`send`](PutBuilder::send) returns
+    /// [`Error::Metadata`](crate::Error::Metadata) naming the first invalid key and sends no
+    /// request.
     pub fn append_metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.metadata.custom.insert(key.into(), value.into());
         self
@@ -397,6 +410,8 @@ impl PutBuilder {
     }
 
     async fn execute(mut self) -> crate::Result<PutResponse> {
+        metadata::normalize_keys(&mut self.metadata)?;
+
         let method = match self.key {
             Some(_) => reqwest::Method::PUT,
             None => reqwest::Method::POST,

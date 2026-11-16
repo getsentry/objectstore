@@ -151,6 +151,10 @@ session.put("payload")
     .send().await?;
 ```
 
+Metadata keys are case-insensitive: ASCII letters are lowercased before sending. A key must be
+non-empty and consist only of `a-z`, `0-9`, and the symbols `_ - | ~ % $ # + . :`. Anything else,
+such as whitespace or non-ASCII characters, is rejected.
+
 ### Resumable Uploads
 
 The Objectstore server supports an additional API to perform PUT operations in a way
