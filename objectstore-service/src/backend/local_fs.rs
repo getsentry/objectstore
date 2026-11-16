@@ -72,6 +72,7 @@
 
 use std::fs::File;
 use std::io;
+use std::mem::DropGuard;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::pin::pin;
@@ -737,7 +738,7 @@ impl UploadFile {
     }
 
     /// Publishes the upload; requires a successful `append()` with no subsequent writes.
-    async fn publish(self, mut directory: DraftDirectory) -> Result<(u64, Option<Timestamp>)> {
+    async fn publish(self, directory: DraftGuard) -> Result<(u64, Option<Timestamp>)> {
         let Self {
             file,
             path,
@@ -756,7 +757,7 @@ impl UploadFile {
                 "publishing local-fs resumable upload",
             )?;
 
-        directory.keep();
+        DropGuard::dismiss(directory);
         Ok((stored_size, expires_at))
     }
 }
@@ -840,24 +841,28 @@ impl ObjectFile {
     }
 }
 
+/// A [`DraftDirectory`] that is removed again on drop.
+///
+/// Dismiss the guard with [`DropGuard::dismiss`] once the published object lives in it.
+type DraftGuard = DropGuard<DraftDirectory, fn(DraftDirectory)>;
+
 /// The directories of an object that is not published yet.
 ///
-/// Writers create the directories and place their entry with [`run`](Self::run). When dropped
-/// before [`keep`](Self::keep), for example after a failed or cancelled write, this removes the
-/// directories again as long as they are empty.
+/// Writers create the directories and place their entry with [`run`](Self::run). When the
+/// [`DraftGuard`] is dropped without being dismissed, for example after a failed or cancelled
+/// write, this removes the directories again as long as they are empty.
 struct DraftDirectory {
     root: PathBuf,
     object_path: PathBuf,
-    kept: bool,
 }
 
 impl DraftDirectory {
-    fn new(root: &Path, object_path: &Path) -> Self {
-        Self {
+    fn new(root: &Path, object_path: &Path) -> DraftGuard {
+        let directory = Self {
             root: root.to_path_buf(),
             object_path: object_path.to_path_buf(),
-            kept: false,
-        }
+        };
+        DropGuard::new(directory, Self::cleanup)
     }
 
     /// Returns the path the object is published at.
@@ -898,21 +903,9 @@ impl DraftDirectory {
         task.await.map_err(io::Error::other)?
     }
 
-    /// Keeps the directories, since the published object now lives in them.
-    fn keep(&mut self) {
-        self.kept = true;
-    }
-}
-
-impl Drop for DraftDirectory {
-    fn drop(&mut self) {
-        if self.kept {
-            return;
-        }
-
-        let root = std::mem::take(&mut self.root);
-        let object_path = std::mem::take(&mut self.object_path);
-        let cleanup = move || remove_empty_directories_sync(&root, &object_path);
+    /// Removes the directories if they are empty.
+    fn cleanup(self) {
+        let cleanup = move || remove_empty_directories_sync(&self.root, &self.object_path);
 
         // Drafts are usually dropped on an async worker, which must not block on filesystem calls.
         // Without a runtime, there is no blocking pool, so clean up in place.
@@ -930,7 +923,7 @@ struct Draft {
     /// Bytes the metadata preamble occupies, counted as it is written.
     preamble_len: u64,
     /// Declared after `path`, so an unpublished draft's file is removed before its directories.
-    directory: DraftDirectory,
+    directory: DraftGuard,
 }
 
 impl Draft {
@@ -982,7 +975,7 @@ impl Draft {
             writer,
             path,
             target,
-            mut directory,
+            directory,
             ..
         } = self;
 
@@ -1002,7 +995,7 @@ impl Draft {
                 "publishing local-fs object draft",
             )?;
 
-        directory.keep();
+        DropGuard::dismiss(directory);
         Ok(())
     }
 }
