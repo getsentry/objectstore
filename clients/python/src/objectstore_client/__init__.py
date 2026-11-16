@@ -1,3 +1,4 @@
+from objectstore_client import many
 from objectstore_client.auth import (
     Permission,
     SecretKey,
@@ -34,6 +35,7 @@ __all__ = [
     "RequestError",
     "ObjectNotFound",
     "ExpiryExtensionRejected",
+    "many",
     "Compression",
     "ExpirationPolicy",
     "Metadata",
