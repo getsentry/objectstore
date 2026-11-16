@@ -15,7 +15,7 @@
 //! - **HTTP headers** — used by the single-object public API. [`Metadata::from_headers`] and
 //!   [`Metadata::to_headers`] handle this conversion for public fields only.
 //! - **JSON over the wire** — an alternate representation in API request and response bodies:
-//!   [`InsertMetadata`] for writes and [`ObjectMetadata`] for reads.
+//!   [`WriteMetadata`] for writes and [`ReadMetadata`] for reads.
 //! - **JSON storage** — used internally by backends, through the serde implementation of
 //!   [`Metadata`]. It includes additional internal fields that are skipped in the header
 //!   representation, and differs from the wire format.
@@ -732,7 +732,8 @@ impl Default for Metadata {
 /// [`into_metadata`](Self::into_metadata). Unknown fields are ignored.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct InsertMetadata {
+#[non_exhaustive]
+pub struct WriteMetadata {
     /// See [`Metadata::content_type`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_type: Option<String>,
@@ -753,7 +754,7 @@ pub struct InsertMetadata {
     pub custom: BTreeMap<String, String>,
 }
 
-impl InsertMetadata {
+impl WriteMetadata {
     /// Validates the fields and converts them into [`Metadata`] for an object written at
     /// `access_time`.
     ///
@@ -795,7 +796,7 @@ impl InsertMetadata {
     }
 }
 
-impl From<&Metadata> for InsertMetadata {
+impl From<&Metadata> for WriteMetadata {
     /// Copies the writable fields, leaving the default content type and expiration unset.
     fn from(metadata: &Metadata) -> Self {
         Self {
@@ -816,7 +817,8 @@ impl From<&Metadata> for InsertMetadata {
 /// Values use their header syntax, for example `"zstd"` or `"ttl:30d"`, and timestamps are RFC
 /// 3339. Unset fields are omitted. Unknown fields are ignored.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ObjectMetadata {
+#[non_exhaustive]
+pub struct ReadMetadata {
     /// See [`Metadata::content_type`].
     pub content_type: String,
     /// See [`Metadata::compression`].
@@ -845,7 +847,7 @@ pub struct ObjectMetadata {
     pub size: Option<usize>,
 }
 
-impl From<Metadata> for ObjectMetadata {
+impl From<Metadata> for ReadMetadata {
     fn from(metadata: Metadata) -> Self {
         Self {
             content_type: metadata.content_type.into_owned(),
@@ -862,12 +864,12 @@ impl From<Metadata> for ObjectMetadata {
     }
 }
 
-impl TryFrom<ObjectMetadata> for Metadata {
+impl TryFrom<ReadMetadata> for Metadata {
     type Error = Error;
 
     /// Parses the values back without validating the content type or custom keys, so that any
     /// stored object can be read.
-    fn try_from(object: ObjectMetadata) -> Result<Self, Error> {
+    fn try_from(object: ReadMetadata) -> Result<Self, Error> {
         let expiration_policy = object.expiration.as_deref().map(str::parse).transpose()?;
         Ok(Self {
             expiration_policy: expiration_policy.unwrap_or_default(),
@@ -1741,8 +1743,8 @@ mod tests {
 
     // JSON wire representation
 
-    fn insert_json(json: &str) -> Result<Metadata, Error> {
-        let insert: InsertMetadata = serde_json::from_str(json).unwrap();
+    fn write_json(json: &str) -> Result<Metadata, Error> {
+        let insert: WriteMetadata = serde_json::from_str(json).unwrap();
         insert.into_metadata(Timestamp::from_unix_secs(1_700_000_000).unwrap())
     }
 
@@ -1761,8 +1763,8 @@ mod tests {
     }
 
     #[test]
-    fn insert_metadata_minimal() {
-        let metadata = insert_json("{}").unwrap();
+    fn write_metadata_minimal() {
+        let metadata = write_json("{}").unwrap();
         assert_eq!(
             metadata,
             Metadata {
@@ -1771,27 +1773,27 @@ mod tests {
             }
         );
 
-        let json = serde_json::to_string(&InsertMetadata::from(&Metadata::default())).unwrap();
+        let json = serde_json::to_string(&WriteMetadata::from(&Metadata::default())).unwrap();
         assert_eq!(json, "{}");
     }
 
     #[test]
-    fn insert_metadata_full() {
+    fn write_metadata_full() {
         let expected = Metadata {
             size: None,
             ..full_metadata()
         };
 
-        let json = serde_json::to_string(&InsertMetadata::from(&full_metadata())).unwrap();
+        let json = serde_json::to_string(&WriteMetadata::from(&full_metadata())).unwrap();
         assert_eq!(
             json,
             r#"{"content_type":"image/png","content_encoding":"zstd","expiration":"ttl:30d","origin":"203.0.113.42","filename":"résumé.png","custom":{"build":"123"}}"#
         );
-        assert_eq!(insert_json(&json).unwrap(), expected);
+        assert_eq!(write_json(&json).unwrap(), expected);
     }
 
     #[test]
-    fn insert_metadata_odd_cases() {
+    fn write_metadata_odd_cases() {
         // Unknown and read-only fields are ignored, custom keys are normalized, and strings are
         // never percent-decoded.
         let json = r#"{
@@ -1801,7 +1803,7 @@ mod tests {
             "filename": "50%41.txt",
             "custom": {"Build": "100%25"}
         }"#;
-        let metadata = insert_json(json).unwrap();
+        let metadata = write_json(json).unwrap();
         assert_eq!(
             metadata.time_created,
             Some(Timestamp::from_unix_secs(1_700_000_000).unwrap())
@@ -1816,12 +1818,12 @@ mod tests {
             r#"{"expiration":"garbage"}"#,
             r#"{"custom":{"a b":"v"}}"#,
         ] {
-            assert!(insert_json(json).is_err(), "unexpectedly accepted {json}");
+            assert!(write_json(json).is_err(), "unexpectedly accepted {json}");
         }
     }
 
     #[test]
-    fn insert_metadata_matches_insert_headers() {
+    fn write_metadata_matches_insert_headers() {
         let access_time = Timestamp::from_unix_secs(1_700_000_000).unwrap();
         for expiration in ["manual", "ttl:30d", "tti:1h"] {
             let mut headers = HeaderMap::new();
@@ -1830,22 +1832,22 @@ mod tests {
             let from_headers = Metadata::from_insert_headers(&headers, "", access_time).unwrap();
 
             let json = format!(r#"{{"content_type":"text/plain","expiration":"{expiration}"}}"#);
-            assert_eq!(insert_json(&json).unwrap(), from_headers, "{expiration}");
+            assert_eq!(write_json(&json).unwrap(), from_headers, "{expiration}");
         }
     }
 
     #[test]
-    fn object_metadata_minimal() {
-        let json = serde_json::to_string(&ObjectMetadata::from(Metadata::default())).unwrap();
+    fn read_metadata_minimal() {
+        let json = serde_json::to_string(&ReadMetadata::from(Metadata::default())).unwrap();
         assert_eq!(json, r#"{"content_type":"application/octet-stream"}"#);
 
-        let object: ObjectMetadata = serde_json::from_str(&json).unwrap();
+        let object: ReadMetadata = serde_json::from_str(&json).unwrap();
         assert_eq!(Metadata::try_from(object).unwrap(), Metadata::default());
     }
 
     #[test]
-    fn object_metadata_full() {
-        let json = serde_json::to_string_pretty(&ObjectMetadata::from(full_metadata())).unwrap();
+    fn read_metadata_full() {
+        let json = serde_json::to_string_pretty(&ReadMetadata::from(full_metadata())).unwrap();
         insta::assert_snapshot!(json, @r#"
         {
           "content_type": "image/png",
@@ -1862,19 +1864,19 @@ mod tests {
         }
         "#);
 
-        let object: ObjectMetadata = serde_json::from_str(&json).unwrap();
+        let object: ReadMetadata = serde_json::from_str(&json).unwrap();
         assert_eq!(Metadata::try_from(object).unwrap(), full_metadata());
     }
 
     #[test]
-    fn object_metadata_odd_cases() {
+    fn read_metadata_odd_cases() {
         // Unknown fields are ignored and any stored custom key is accepted.
         let json = r#"{"content_type":"text/plain","future":1,"custom":{"a*b":"v"}}"#;
-        let object: ObjectMetadata = serde_json::from_str(json).unwrap();
+        let object: ReadMetadata = serde_json::from_str(json).unwrap();
         assert_eq!(Metadata::try_from(object).unwrap().custom["a*b"], "v");
 
         let json = r#"{"content_type":"text/plain","expiration":"garbage"}"#;
-        let object: ObjectMetadata = serde_json::from_str(json).unwrap();
+        let object: ReadMetadata = serde_json::from_str(json).unwrap();
         assert!(Metadata::try_from(object).is_err());
     }
 }
