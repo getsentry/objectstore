@@ -11,7 +11,7 @@ use std::{fmt, io};
 use futures_util::{StreamExt, TryStreamExt};
 use gcp_auth::TokenProvider;
 use objectstore_types::headers;
-use objectstore_types::metadata::{ExpirationPolicy, Metadata};
+use objectstore_types::metadata::{ExpirationPolicy, Metadata, encode_custom_key};
 use objectstore_types::range::{ByteRange, ContentRange};
 use objectstore_types::time::{Rfc3339Timestamp, Timestamp};
 use reqwest::header::HeaderMap;
@@ -367,7 +367,7 @@ impl std::str::FromStr for GcsMetaKey {
             Some("filename") => GcsMetaKey::Filename,
             Some(unknown) => anyhow::bail!("unknown builtin metadata key: {unknown}"),
             None => match s.strip_prefix(CUSTOM_META_PREFIX) {
-                Some(key) => GcsMetaKey::Custom(key.to_string()),
+                Some(key) => GcsMetaKey::Custom(headers::decode_header_str_lossy(key).into_owned()),
                 None => anyhow::bail!("invalid GCS metadata key format: {s}"),
             },
         })
@@ -381,7 +381,7 @@ impl fmt::Display for GcsMetaKey {
             Self::Origin => write!(f, "{BUILTIN_META_PREFIX}origin"),
             Self::Filename => write!(f, "{BUILTIN_META_PREFIX}filename"),
             Self::EmulatorIgnored => unreachable!("do not serialize emulator metadata"),
-            Self::Custom(key) => write!(f, "{CUSTOM_META_PREFIX}{key}"),
+            Self::Custom(key) => write!(f, "{CUSTOM_META_PREFIX}{}", encode_custom_key(key)),
         }
     }
 }
@@ -2024,6 +2024,39 @@ mod tests {
         let roundtripped = gcs_object.into_metadata().unwrap();
         assert_eq!(roundtripped.time_created, Some(created));
         assert_eq!(roundtripped.time_expires, Some(expires));
+    }
+
+    #[test]
+    fn custom_keys_are_stored_as_header_names_and_roundtrip() {
+        let metadata = Metadata {
+            custom: BTreeMap::from_iter([
+                ("a:b".into(), "colon".into()),
+                ("a%3ab".into(), "encoded-looking".into()),
+                ("100%".into(), "percent".into()),
+                ("plain".into(), "plain".into()),
+            ]),
+            ..Default::default()
+        };
+
+        let gcs_object = GcsObject::from_metadata(&metadata);
+        let json = serde_json::to_value(&gcs_object).unwrap();
+        assert_eq!(
+            json["metadata"],
+            serde_json::json!({
+                "x-snme-a%3ab": "colon",
+                "x-snme-a%253ab": "encoded-looking",
+                "x-snme-100%25": "percent",
+                "x-snme-plain": "plain",
+            })
+        );
+
+        // GCS adds the versions to the stored resource.
+        let mut stored = json;
+        stored["generation"] = "1".into();
+        stored["metageneration"] = "1".into();
+        let reread: GcsObject = serde_json::from_value(stored).unwrap();
+        let roundtripped = reread.into_metadata().unwrap();
+        assert_eq!(roundtripped.custom, metadata.custom);
     }
 
     #[tokio::test]

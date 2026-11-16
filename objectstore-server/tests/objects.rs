@@ -488,3 +488,26 @@ async fn invalid_and_duplicate_options_are_rejected() -> Result<()> {
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn invalid_custom_metadata_key_is_rejected_on_put() -> Result<()> {
+    let server = test_server().await;
+    let client = reqwest::Client::new();
+
+    // `*` is a valid header-name character, but not an allowed custom metadata key character.
+    let resp = client
+        .put(server.url("/v1/objects/test/org=1/meta-bad-key"))
+        .header("x-snme-bad*key", "value")
+        .body("data")
+        .send()
+        .await?;
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    let resp = client
+        .get(server.url("/v1/objects/test/org=1/meta-bad-key"))
+        .send()
+        .await?;
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+
+    Ok(())
+}
