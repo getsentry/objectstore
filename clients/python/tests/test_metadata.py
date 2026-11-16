@@ -13,7 +13,6 @@ from objectstore_client.metadata import (
     parse_expiration,
     parse_timedelta,
 )
-from objectstore_client.utils import decode_header_value
 
 # Durations and their wire format, used in both directions.
 ROUND_TRIP_CASES = [
@@ -114,7 +113,7 @@ def test_normalize_metadata_key_error_names_the_key() -> None:
 )
 def test_metadata_key_header_name_round_trip(key: str, encoded: str) -> None:
     assert encode_metadata_key(key) == encoded
-    assert decode_header_value(encoded) == key
+    assert Metadata.from_headers({f"x-snme-{encoded}": "v"}).custom == {key: "v"}
 
 
 @pytest.mark.parametrize(
@@ -126,15 +125,11 @@ def test_metadata_key_header_name_round_trip(key: str, encoded: str) -> None:
         ("%253a", "%3a"),
         ("%zz", "%zz"),
         ("a%", "a%"),
+        ("%ff", "\ufffd"),
     ],
 )
-def test_key_header_name_decoding_accepts_any_escape(name: str, key: str) -> None:
-    assert decode_header_value(name) == key
-
-
-def test_key_header_name_decoding_rejects_invalid_utf8() -> None:
-    with pytest.raises(UnicodeDecodeError):
-        decode_header_value("%ff")
+def test_from_headers_decodes_key_names_leniently(name: str, key: str) -> None:
+    assert Metadata.from_headers({f"x-snme-{name}": "v"}).custom == {key: "v"}
 
 
 def test_from_headers_decodes_custom_key_names() -> None:

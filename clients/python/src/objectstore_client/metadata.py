@@ -6,6 +6,7 @@ from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Literal, TypeVar, cast
+from urllib.parse import unquote
 
 from objectstore_client.utils import decode_header_value
 
@@ -123,7 +124,9 @@ class Metadata:
                 size = int(v)
             elif k.startswith(HEADER_META_PREFIX):
                 name = k[len(HEADER_META_PREFIX) :]
-                custom_metadata[decode_header_value(name)] = decode_header_value(v)
+                # Key names are decoded leniently: reads never fail on a malformed key.
+                key = unquote(name, errors="replace")
+                custom_metadata[key] = decode_header_value(v)
 
         return Metadata(
             content_type=content_type,
