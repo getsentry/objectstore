@@ -1,6 +1,5 @@
 //! S3-compatible backend with generic protocol support.
 
-use std::convert::Infallible;
 use std::error::Error as StdError;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -120,21 +119,19 @@ pub trait TokenProvider: Send + Sync + 'static {
     ) -> impl Future<Output = std::result::Result<impl Token, Self::Error>> + Send;
 }
 
-/// Placeholder [`TokenProvider`] for unauthenticated backends.
-#[derive(Debug)]
-pub struct NoToken;
-
-impl TokenProvider for NoToken {
-    type Error = Infallible;
+/// Unauthenticated backends have no token provider, so `!` stands in for one.
+impl TokenProvider for ! {
+    type Error = !;
 
     #[allow(refining_impl_trait)]
-    async fn get_token(&self) -> std::result::Result<NoToken, Infallible> {
-        unimplemented!()
+    async fn get_token(&self) -> std::result::Result<!, !> {
+        match *self {}
     }
 }
-impl Token for NoToken {
+
+impl Token for ! {
     fn as_str(&self) -> &str {
-        unimplemented!()
+        match *self {}
     }
 }
 
@@ -375,7 +372,7 @@ impl<T> fmt::Debug for S3CompatibleBackend<T> {
     }
 }
 
-impl S3CompatibleBackend<NoToken> {
+impl S3CompatibleBackend<!> {
     /// Creates a new S3-compatible backend that sends unauthenticated requests.
     pub fn without_token(config: S3CompatibleConfig, streams: &ChangeStreamFactory) -> Self {
         Self::build(config, None, streams)
@@ -573,7 +570,7 @@ mod tests {
     //
     // Refer to the readme for how to set up SeaweedFS via devservices.
 
-    fn create_test_backend() -> S3CompatibleBackend<NoToken> {
+    fn create_test_backend() -> S3CompatibleBackend<!> {
         S3CompatibleBackend::without_token(
             S3CompatibleConfig {
                 endpoint: "http://localhost:8089".into(),
