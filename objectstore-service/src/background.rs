@@ -287,7 +287,7 @@ impl RenewalScheduler {
     ///
     /// This future runs forever and is intended to be spawned alongside the
     /// renewal worker.
-    pub async fn run_emitter<F, Fut>(&self, mut emit: F)
+    pub async fn run_emitter<F, Fut>(&self, mut emit: F) -> !
     where
         F: FnMut(usize) -> Fut,
         Fut: Future<Output = ()>,
