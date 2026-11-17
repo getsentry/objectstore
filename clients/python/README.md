@@ -120,6 +120,11 @@ Arbitrary key-value pairs can be attached to objects and retrieved on download.
 session.put(b"payload", metadata={"source": "upload-service"})
 ```
 
+Keys are case-insensitive and are lowercased. After lowercasing, a key must be
+non-empty and consist only of `a-z`, `0-9` and the characters `_ - | ~ % $ # + . :`.
+Anything else (spaces, other punctuation, non-ASCII characters) raises a `ValueError`
+naming the key as soon as the metadata is passed to `put`, before any request is sent.
+
 ### Authentication
 
 If your Objectstore instance enforces authorization, you must configure authentication

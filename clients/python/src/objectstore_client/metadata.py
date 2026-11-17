@@ -6,6 +6,7 @@ from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Literal, TypeVar, cast
+from urllib.parse import unquote
 
 from objectstore_client.utils import decode_header_value
 
@@ -18,6 +19,9 @@ HEADER_ORIGIN = "x-sn-origin"
 HEADER_FILENAME = "x-sn-filename"
 HEADER_SIZE = "x-sn-size"
 HEADER_META_PREFIX = "x-snme-"
+
+_METADATA_KEY_PATTERN = re.compile(r"[a-z0-9_\-|~%$#+.:]+")
+_KEY_HEADER_ENCODING = {"%": "%25", ":": "%3a"}
 
 
 @dataclass
@@ -85,6 +89,9 @@ class Metadata:
     """
 
     custom: dict[str, str]
+    """
+    User-defined key-value pairs. Keys are lowercase; values are arbitrary strings.
+    """
 
     @classmethod
     def from_headers(cls, headers: Mapping[str, str]) -> Metadata:
@@ -116,7 +123,10 @@ class Metadata:
             elif k == HEADER_SIZE:
                 size = int(v)
             elif k.startswith(HEADER_META_PREFIX):
-                custom_metadata[k[len(HEADER_META_PREFIX) :]] = decode_header_value(v)
+                name = k[len(HEADER_META_PREFIX) :]
+                # Key names are decoded leniently: reads never fail on a malformed key.
+                key = unquote(name, errors="replace")
+                custom_metadata[key] = decode_header_value(v)
 
         return Metadata(
             content_type=content_type,
@@ -129,6 +139,35 @@ class Metadata:
             size=size,
             custom=custom_metadata,
         )
+
+
+def normalize_metadata_key(key: str) -> str:
+    """
+    Validates a custom metadata key and returns it in canonical (lowercase) form.
+
+    ASCII letters are lowercased. The remaining key must be non-empty and consist only
+    of `a-z`, `0-9` and `_ - | ~ % $ # + . :`; anything else, including whitespace and
+    non-ASCII characters, raises a `ValueError` naming the key.
+    """
+    # str.lower() alone would map some non-ASCII characters (e.g. the Kelvin sign) to
+    # ASCII letters, so reject non-ASCII input first.
+    normalized = key.lower()
+    if not key.isascii() or not _METADATA_KEY_PATTERN.fullmatch(normalized):
+        raise ValueError(
+            f"invalid metadata key {key!r}: keys must be non-empty and contain only "
+            "ASCII letters, digits and the characters _ - | ~ % $ # + . :"
+        )
+    return normalized
+
+
+def encode_metadata_key(key: str) -> str:
+    """
+    Encodes a normalized metadata key for use in an `x-snme-<key>` header name.
+
+    Only `%` (as `%25`) and `:` (as `%3a`) are escaped; nothing else is.
+    Readers decode with full percent-decoding, so any escape spelling is accepted.
+    """
+    return "".join(_KEY_HEADER_ENCODING.get(char, char) for char in key)
 
 
 def format_expiration(expiration_policy: ExpirationPolicy) -> str:
