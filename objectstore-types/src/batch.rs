@@ -34,6 +34,17 @@ pub fn payload_part_name(index: usize) -> String {
 }
 
 /// The kind of a batch operation.
+///
+/// Kinds that this version does not know deserialize as [`OperationKind::Unknown`], so that a
+/// client can still read results of operations added to the server later.
+///
+/// ```
+/// use objectstore_types::batch::OperationKind;
+///
+/// let kind: OperationKind = serde_json::from_str(r#""copy""#)?;
+/// assert_eq!(kind, OperationKind::Unknown);
+/// # Ok::<(), serde_json::Error>(())
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OperationKind {
@@ -45,6 +56,11 @@ pub enum OperationKind {
     Delete,
     /// Stores an object.
     Insert,
+    /// A kind that this version does not know.
+    ///
+    /// Only produced when deserializing. It serializes as `"unknown"`.
+    #[serde(other)]
+    Unknown,
 }
 
 impl OperationKind {
@@ -55,6 +71,7 @@ impl OperationKind {
             Self::Head => "head",
             Self::Delete => "delete",
             Self::Insert => "insert",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -108,10 +125,10 @@ pub enum Descriptor {
 pub struct ResultPart {
     /// The HTTP status code of the operation.
     pub status: u16,
-    /// The kind of the operation. Absent if its descriptor could not be read.
+    /// The kind of the operation. Absent if the operation failed with an [`error`](Self::error).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<OperationKind>,
-    /// The key of the object. Absent if its descriptor could not be read.
+    /// The key of the object. Absent if the operation failed with an [`error`](Self::error).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
     /// The metadata of the object, for a successful get or head.
@@ -120,4 +137,19 @@ pub struct ResultPart {
     /// The error, for a failed operation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<ApiErrorResponse>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn result_part_with_unknown_kind_is_readable() {
+        let json = r#"{"status":200,"kind":"copy","key":"a"}"#;
+        let result: ResultPart = serde_json::from_str(json).unwrap();
+
+        assert_eq!(result.status, 200);
+        assert_eq!(result.kind, Some(OperationKind::Unknown));
+        assert_eq!(result.key.as_deref(), Some("a"));
+    }
 }
