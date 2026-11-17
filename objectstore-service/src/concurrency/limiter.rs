@@ -226,36 +226,32 @@ impl PriorityLimiter {
             if timeout == Some(Duration::ZERO) {
                 return Err(ErrorKind::AtCapacity.into());
             }
+            let id = state.next_id;
             let queue = state.queue(priority);
             if max_queue_size.is_some_and(|max| queue.len() >= max as usize) {
                 return Err(ErrorKind::AtCapacity.into());
             }
-
             let (sender, receiver) = oneshot::channel();
-            let id = state.next_id;
-            state.next_id = id.wrapping_add(1);
-            state.queue(priority).insert(id, sender);
+            queue.insert(id, sender);
+            state.next_id += 1;
+
             // Leaves the queue on timeout or cancellation. A no-op once a permit was handed over.
-            let entry = DropGuard::new((&*self.state, id), move |(state, id)| {
-                state
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .queue(priority)
-                    .remove(&id);
+            let entry = DropGuard::new(id, move |id| {
+                let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+                state.queue(priority).remove(&id);
             });
             (entry, receiver)
         };
 
         // A permit sent after a timeout or cancellation is dropped with the receiver, which passes
         // its slot on to the next waiter.
-        let permit = match timeout {
+        let received = match timeout {
             Some(timeout) => tokio::time::timeout(timeout, receiver)
                 .await
                 .map_err(|_| ErrorKind::AtCapacity)?,
             None => receiver.await,
-        }
-        .map_err(|_| ErrorKind::AtCapacity)?;
-        Ok(permit)
+        };
+        received.map_err(|_| ErrorKind::AtCapacity.into())
     }
 
     /// Returns a snapshot of permits in use and queued acquisitions.
