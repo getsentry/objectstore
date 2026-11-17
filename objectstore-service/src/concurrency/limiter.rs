@@ -26,20 +26,22 @@ pub struct Permit {
 
 #[derive(Debug)]
 enum PermitInner {
-    Semaphore(#[expect(dead_code, reason = "held for its Drop")] OwnedSemaphorePermit),
-    Priority(#[expect(dead_code, reason = "held for its Drop")] PriorityPermit),
+    Semaphore { _permit: OwnedSemaphorePermit },
+    Priority { _permit: PriorityPermit },
 }
 
 impl Permit {
     fn semaphore(permit: OwnedSemaphorePermit) -> Self {
         Self {
-            _inner: PermitInner::Semaphore(permit),
+            _inner: PermitInner::Semaphore { _permit: permit },
         }
     }
 
     fn priority(state: Arc<Mutex<PriorityState>>) -> Self {
         Self {
-            _inner: PermitInner::Priority(PriorityPermit { state }),
+            _inner: PermitInner::Priority {
+                _permit: PriorityPermit { state },
+            },
         }
     }
 
