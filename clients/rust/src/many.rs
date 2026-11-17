@@ -7,6 +7,7 @@ use std::task::{Context, Poll};
 
 use futures_util::{Stream, StreamExt as _};
 use multer::Field;
+use objectstore_types::batch::{MAX_BATCH_OPERATIONS, MAX_BATCH_PART_SIZE};
 use objectstore_types::headers;
 use objectstore_types::metadata::{Compression, Metadata};
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
@@ -26,12 +27,6 @@ const HEADER_BATCH_OPERATION_KEY: &str = "x-sn-batch-operation-key";
 const HEADER_BATCH_OPERATION_KIND: &str = "x-sn-batch-operation-kind";
 const HEADER_BATCH_OPERATION_INDEX: &str = "x-sn-batch-operation-index";
 const HEADER_BATCH_OPERATION_STATUS: &str = "x-sn-batch-operation-status";
-
-/// Maximum number of operations to send in a batch request.
-const MAX_BATCH_OPS: usize = 1000;
-
-/// Maximum amount of bytes to send as a part's body in a batch request.
-const MAX_BATCH_PART_SIZE: u32 = 1024 * 1024; // 1 MB
 
 /// Default maximum number of concurrent individual (non-batch) requests.
 ///
@@ -618,7 +613,7 @@ async fn classify(op: BatchOperation) -> Classified {
             };
 
             match size {
-                Some(s) if s <= MAX_BATCH_PART_SIZE as usize => Classified::Batchable(op, s as u64),
+                Some(s) if s <= MAX_BATCH_PART_SIZE => Classified::Batchable(op, s as u64),
                 _ => Classified::Individual(op),
             }
         }
@@ -724,7 +719,7 @@ async fn execute_batch(operations: Vec<BatchOperation>, session: &Session) -> Ve
 
 /// Returns a lazy iterator over batches of operations.
 ///
-/// Each batch respects both the operation-count limit ([`MAX_BATCH_OPS`]) and the total body-size
+/// Each batch respects both the operation-count limit ([`MAX_BATCH_OPERATIONS`]) and the total body-size
 /// limit ([`MAX_BATCH_BODY_SIZE`]).
 fn iter_batches(ops: Vec<(BatchOperation, u64)>) -> impl Iterator<Item = Vec<BatchOperation>> {
     let mut remaining = ops.into_iter().peekable();
@@ -735,7 +730,7 @@ fn iter_batches(ops: Vec<(BatchOperation, u64)>) -> impl Iterator<Item = Vec<Bat
         let mut batch = Vec::new();
 
         while let Some((_, op_size)) = remaining.peek() {
-            if batch.len() >= MAX_BATCH_OPS
+            if batch.len() >= MAX_BATCH_OPERATIONS
                 || (!batch.is_empty() && batch_size + op_size > MAX_BATCH_BODY_SIZE)
             {
                 break;
@@ -870,7 +865,7 @@ mod tests {
     async fn zstd_put_at_limit_is_batchable() {
         let size = 1_044_496;
         let post_compression = zstd_safe::compress_bound(size);
-        assert!(post_compression == MAX_BATCH_PART_SIZE as usize);
+        assert!(post_compression == MAX_BATCH_PART_SIZE);
 
         core::assert_matches!(
             classify(put_with_zstd(size)).await,
@@ -882,7 +877,7 @@ mod tests {
     async fn zstd_put_above_limit_is_individual() {
         let size = 1_044_497;
         let post_compression = zstd_safe::compress_bound(size);
-        assert!(post_compression > MAX_BATCH_PART_SIZE as usize);
+        assert!(post_compression > MAX_BATCH_PART_SIZE);
 
         core::assert_matches!(
             classify(put_with_zstd(size)).await,
@@ -904,8 +899,8 @@ mod tests {
     async fn precompressed_put_uses_exact_size() {
         // A size that would exceed the limit once inflated by `compress_bound`, but is sent
         // verbatim because the payload is already compressed.
-        let size = MAX_BATCH_PART_SIZE as usize;
-        assert!(zstd_safe::compress_bound(size) > MAX_BATCH_PART_SIZE as usize);
+        let size = MAX_BATCH_PART_SIZE;
+        assert!(zstd_safe::compress_bound(size) > MAX_BATCH_PART_SIZE);
 
         let op = put_with_compression(size, CompressionMode::Precompressed(Compression::Zstd));
         core::assert_matches!(
