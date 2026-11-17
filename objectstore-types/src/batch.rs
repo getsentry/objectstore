@@ -35,14 +35,16 @@ pub fn payload_part_name(index: usize) -> String {
 
 /// The kind of a batch operation.
 ///
-/// Kinds that this version does not know deserialize as [`OperationKind::Unknown`], so that a
-/// client can still read results of operations added to the server later.
+/// Kinds that this version does not know deserialize and convert from names as
+/// [`OperationKind::Unknown`], so that a client can still read results of operations added to the
+/// server later. Names are matched case-sensitively.
 ///
 /// ```
 /// use objectstore_types::batch::OperationKind;
 ///
 /// let kind: OperationKind = serde_json::from_str(r#""copy""#)?;
 /// assert_eq!(kind, OperationKind::Unknown);
+/// assert_eq!(OperationKind::from("insert"), OperationKind::Insert);
 /// # Ok::<(), serde_json::Error>(())
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,7 +60,7 @@ pub enum OperationKind {
     Insert,
     /// A kind that this version does not know.
     ///
-    /// Only produced when deserializing. It serializes as `"unknown"`.
+    /// Only produced when reading a kind name. It serializes as `"unknown"`.
     #[serde(other)]
     Unknown,
 }
@@ -72,6 +74,18 @@ impl OperationKind {
             Self::Delete => "delete",
             Self::Insert => "insert",
             Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl From<&str> for OperationKind {
+    fn from(name: &str) -> Self {
+        match name {
+            "get" => Self::Get,
+            "head" => Self::Head,
+            "delete" => Self::Delete,
+            "insert" => Self::Insert,
+            _ => Self::Unknown,
         }
     }
 }
@@ -151,5 +165,14 @@ mod tests {
         assert_eq!(result.status, 200);
         assert_eq!(result.kind, Some(OperationKind::Unknown));
         assert_eq!(result.key.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn kind_from_name() {
+        assert_eq!(OperationKind::from("get"), OperationKind::Get);
+        assert_eq!(OperationKind::from("head"), OperationKind::Head);
+        assert_eq!(OperationKind::from("delete"), OperationKind::Delete);
+        assert_eq!(OperationKind::from("insert"), OperationKind::Insert);
+        assert_eq!(OperationKind::from("copy"), OperationKind::Unknown);
     }
 }

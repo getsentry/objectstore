@@ -18,7 +18,7 @@ use http::{HeaderMap, HeaderValue, StatusCode};
 use objectstore_service::id::{ObjectContext, ObjectKey};
 use objectstore_service::streaming::{OpResponse, Operation};
 use objectstore_types::api::ApiErrorResponse;
-use objectstore_types::batch::{self, ResultPart};
+use objectstore_types::batch::{self, OperationKind, ResultPart};
 use objectstore_types::headers;
 use objectstore_types::metadata::{DEFAULT_CONTENT_TYPE, Metadata};
 
@@ -301,7 +301,7 @@ async fn convert_to_part(
         }) => create_success_part(
             idx,
             &key,
-            "get",
+            OperationKind::Get,
             StatusCode::NOT_FOUND,
             None,
             Bytes::new(),
@@ -310,7 +310,7 @@ async fn convert_to_part(
         Ok(OpResponse::Inserted { id }) => create_success_part(
             idx,
             &id.key,
-            "insert",
+            OperationKind::Insert,
             // XXX: this could actually be either StatusCode::OK or StatusCode::CREATED, the service
             // layer doesn't allow us to distinguish between them currently
             StatusCode::CREATED,
@@ -321,7 +321,7 @@ async fn convert_to_part(
         Ok(OpResponse::Deleted { key }) => create_success_part(
             idx,
             &key,
-            "delete",
+            OperationKind::Delete,
             StatusCode::NO_CONTENT,
             None,
             Bytes::new(),
@@ -341,7 +341,7 @@ async fn convert_to_part(
                 Ok(headers) => create_success_part(
                     idx,
                     &key,
-                    "head",
+                    OperationKind::Head,
                     StatusCode::OK,
                     None,
                     Bytes::new(),
@@ -356,7 +356,7 @@ async fn convert_to_part(
         }) => create_success_part(
             idx,
             &key,
-            "head",
+            OperationKind::Head,
             StatusCode::NOT_FOUND,
             None,
             Bytes::new(),
@@ -387,7 +387,7 @@ async fn got_to_part(
     Ok(create_success_part(
         idx,
         &key,
-        "get",
+        OperationKind::Get,
         StatusCode::OK,
         content_type,
         bytes,
@@ -411,11 +411,10 @@ fn insert_key_header(headers: &mut HeaderMap, key: &ObjectKey) {
     );
 }
 
-fn insert_kind_header(headers: &mut HeaderMap, kind: &str) {
+fn insert_kind_header(headers: &mut HeaderMap, kind: OperationKind) {
     headers.insert(
         HEADER_BATCH_OPERATION_KIND,
-        kind.parse()
-            .expect("operation kind is always a valid header value"),
+        HeaderValue::from_static(kind.as_str()),
     );
 }
 
@@ -437,7 +436,7 @@ fn insert_status_header(headers: &mut HeaderMap, status: StatusCode) {
 fn create_success_part(
     idx: usize,
     key: &ObjectKey,
-    kind: &str,
+    kind: OperationKind,
     status: StatusCode,
     content_type: Option<HeaderValue>,
     body: Bytes,

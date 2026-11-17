@@ -46,7 +46,7 @@ use objectstore_service::id::ObjectKey;
 use objectstore_service::streaming::{Delete, Get, Head, Insert, Operation};
 use objectstore_types::batch::{
     self, Descriptor, MAX_BATCH_OPERATIONS, MAX_BATCH_PART_SIZE, MAX_DESCRIPTOR_SIZE,
-    PAYLOAD_SUFFIX,
+    OperationKind, PAYLOAD_SUFFIX,
 };
 use objectstore_types::headers;
 use objectstore_types::metadata::{Metadata, WriteMetadata};
@@ -231,13 +231,13 @@ fn stream_parts(multipart: Multipart) -> Parts {
 
 /// Parses a part of the header layout into an operation.
 fn parse_header_part(part: Part, access_time: Timestamp) -> Result<Operation, BatchError> {
-    let kind = part
+    let kind_name = part
         .headers
         .get(HEADER_BATCH_OPERATION_KIND)
         .ok_or_else(|| {
             BatchError::BadRequest(format!("missing {HEADER_BATCH_OPERATION_KIND} header"))
         })?;
-    let kind = kind
+    let kind_name = kind_name
         .to_str()
         .map_err(|_| {
             BatchError::BadRequest(format!(
@@ -245,6 +245,7 @@ fn parse_header_part(part: Part, access_time: Timestamp) -> Result<Operation, Ba
             ))
         })?
         .to_lowercase();
+    let kind = OperationKind::from(kind_name.as_str());
 
     let key = part
         .headers
@@ -260,29 +261,29 @@ fn parse_header_part(part: Part, access_time: Timestamp) -> Result<Operation, Ba
     let required_key = |key: Option<ObjectKey>| {
         key.ok_or_else(|| {
             BatchError::BadRequest(format!(
-                "missing {HEADER_BATCH_OPERATION_KEY} header for {kind} operation"
+                "missing {HEADER_BATCH_OPERATION_KEY} header for {kind_name} operation"
             ))
         })
     };
 
-    let operation = match kind.as_str() {
-        "get" => Operation::Get(Get {
+    let operation = match kind {
+        OperationKind::Get => Operation::Get(Get {
             key: required_key(key)?,
         }),
-        "delete" => Operation::Delete(Delete {
+        OperationKind::Delete => Operation::Delete(Delete {
             key: required_key(key)?,
         }),
-        "head" => Operation::Head(Head {
+        OperationKind::Head => Operation::Head(Head {
             key: required_key(key)?,
         }),
-        "insert" => Operation::Insert(Box::new(Insert {
+        OperationKind::Insert => Operation::Insert(Box::new(Insert {
             metadata: Metadata::from_insert_headers(&part.headers, "", access_time)?,
             payload: part.body?,
             key,
         })),
-        _ => {
+        OperationKind::Unknown => {
             return Err(BatchError::BadRequest(format!(
-                "invalid operation kind: {kind}"
+                "invalid operation kind: {kind_name}"
             )));
         }
     };
