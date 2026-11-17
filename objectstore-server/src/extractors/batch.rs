@@ -45,7 +45,8 @@ use http::{HeaderMap, StatusCode};
 use objectstore_service::id::ObjectKey;
 use objectstore_service::streaming::{Delete, Get, Head, Insert, Operation};
 use objectstore_types::batch::{
-    Descriptor, MAX_BATCH_OPERATIONS, MAX_BATCH_PART_SIZE, MAX_DESCRIPTOR_SIZE, PAYLOAD_SUFFIX,
+    self, Descriptor, MAX_BATCH_OPERATIONS, MAX_BATCH_PART_SIZE, MAX_DESCRIPTOR_SIZE,
+    PAYLOAD_SUFFIX,
 };
 use objectstore_types::headers;
 use objectstore_types::metadata::{Metadata, WriteMetadata};
@@ -344,7 +345,7 @@ fn stream_json_ops(
             Ok(Descriptor::Insert { key, metadata }) => {
                 // The next part is the payload, unless it belongs elsewhere. A broken body fails
                 // the insert.
-                let payload_name = objectstore_types::batch::payload_part_name(index);
+                let payload_name = batch::payload_part_name(index);
                 let is_payload = |next: &Result<Part, BatchError>| match next {
                     Ok(part) => part.name.as_deref() == Some(payload_name.as_str()),
                     Err(_) => true,
@@ -898,11 +899,7 @@ mod tests {
         let mut body = String::new();
         for index in 0..=MAX_BATCH_OPERATIONS {
             body += &descriptor(&index.to_string(), r#"{"kind":"insert"}"#);
-            body += &payload(
-                &objectstore_types::batch::payload_part_name(index),
-                None,
-                "x",
-            );
+            body += &payload(&batch::payload_part_name(index), None, "x");
         }
         body += END;
 

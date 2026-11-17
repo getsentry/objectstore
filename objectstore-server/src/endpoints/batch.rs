@@ -18,7 +18,7 @@ use http::{HeaderMap, HeaderValue, StatusCode};
 use objectstore_service::id::{ObjectContext, ObjectKey};
 use objectstore_service::streaming::{OpResponse, Operation};
 use objectstore_types::api::ApiErrorResponse;
-use objectstore_types::batch::{ResultPart, payload_part_name};
+use objectstore_types::batch::{self, ResultPart};
 use objectstore_types::headers;
 use objectstore_types::metadata::{DEFAULT_CONTENT_TYPE, Metadata};
 
@@ -235,7 +235,7 @@ fn json_parts(
 
     let payload_part = payload.map(|(bytes, content_type)| {
         Part::named(
-            &payload_part_name(idx),
+            &batch::payload_part_name(idx),
             bytes,
             Some(&name),
             Some(content_type),
