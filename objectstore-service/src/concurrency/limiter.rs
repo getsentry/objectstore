@@ -1,17 +1,17 @@
 //! Simple and priority-based FIFO concurrency limiters.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::io;
 use std::mem::DropGuard;
 use std::num::NonZeroU32;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::task::Poll;
 use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::{Stream, stream};
-use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 
 use crate::error::{ErrorKind, Result};
 use crate::stream::PayloadStream;
@@ -21,10 +21,30 @@ const METRICS_EMITTER_INTERVAL: Duration = Duration::from_secs(1);
 /// Owned permit, released on drop.
 #[derive(Debug)]
 pub struct Permit {
-    _permit: OwnedSemaphorePermit,
+    _inner: PermitInner,
+}
+
+#[derive(Debug)]
+enum PermitInner {
+    Semaphore { _permit: OwnedSemaphorePermit },
+    Priority { _permit: PriorityPermit },
 }
 
 impl Permit {
+    fn semaphore(permit: OwnedSemaphorePermit) -> Self {
+        Self {
+            _inner: PermitInner::Semaphore { _permit: permit },
+        }
+    }
+
+    fn priority(state: Arc<Mutex<PriorityState>>) -> Self {
+        Self {
+            _inner: PermitInner::Priority {
+                _permit: PriorityPermit { state },
+            },
+        }
+    }
+
     /// Wraps `stream` so that it holds this permit until EOF, the first error, or stream drop.
     ///
     /// Returns an unboxed stream; call `.boxed()` if a [`PayloadStream`] is needed.
@@ -91,7 +111,7 @@ impl Limiter {
     /// Dropping the future releases its queue slot and any assigned permit.
     pub async fn acquire(&self) -> Result<Permit> {
         if let Ok(permit) = self.semaphore.clone().try_acquire_owned() {
-            return Ok(Permit { _permit: permit });
+            return Ok(Permit::semaphore(permit));
         }
         if self.timeout.is_zero() {
             return Err(ErrorKind::AtCapacity.into());
@@ -106,7 +126,7 @@ impl Limiter {
             .await
             .map_err(|_| ErrorKind::AtCapacity)?
             .map_err(|_| ErrorKind::AtCapacity)?;
-        Ok(Permit { _permit: permit })
+        Ok(Permit::semaphore(permit))
     }
 
     /// Returns the current number of permits in use.
@@ -131,30 +151,34 @@ impl Limiter {
 pub enum Priority {
     /// Normal priority.
     Normal,
-    /// High priority, blocks normal-priority waiters from entering the semaphore queue.
+    /// High priority, always served before queued normal-priority acquisitions.
     High,
 }
 
-/// Approximate snapshot of permits and outstanding acquisitions by priority.
+/// Snapshot of permits in use and queued acquisitions by priority.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PriorityLimiterStats {
     /// Permits currently in use.
     pub in_use: u32,
-    /// Outstanding normal-priority acquisitions.
+    /// Normal-priority acquisitions waiting in the queue.
     pub waiting_normal: usize,
-    /// Outstanding high-priority acquisitions.
+    /// High-priority acquisitions waiting in the queue.
     pub waiting_high: usize,
 }
 
 /// Limits concurrent operations with high-priority admission and FIFO within each priority.
 ///
 /// Each priority has its own wait timeout and optional queue limit; execution capacity is shared.
-/// Sustained high-priority traffic can starve normal-priority waiters.
+/// A released permit goes directly to the oldest high-priority waiter, or else to the oldest
+/// normal-priority waiter, so sustained high-priority traffic can starve normal-priority waiters.
 #[derive(Clone, Debug)]
 pub struct PriorityLimiter {
     normal_timeout: Duration,
     high_timeout: Option<Duration>,
-    state: Arc<PriorityState>,
+    max_normal_queue_size: Option<u32>,
+    max_high_queue_size: Option<u32>,
+    capacity: u32,
+    state: Arc<Mutex<PriorityState>>,
 }
 
 impl PriorityLimiter {
@@ -170,16 +194,15 @@ impl PriorityLimiter {
         Self {
             normal_timeout,
             high_timeout: high_timeout.into(),
-            state: Arc::new(PriorityState {
-                capacity: capacity.get(),
-                semaphore: Arc::new(Semaphore::new(capacity.get() as usize)),
-                normal_queue: max_normal_queue_size.map(|size| Semaphore::new(size as usize)),
-                high_queue: max_high_queue_size.map(|size| Semaphore::new(size as usize)),
-                normal_lane: Mutex::new(()),
-                waiting_normal: AtomicUsize::new(0),
-                waiting_high: AtomicUsize::new(0),
-                high_drained: Notify::new(),
-            }),
+            max_normal_queue_size,
+            max_high_queue_size,
+            capacity: capacity.get(),
+            state: Arc::new(Mutex::new(PriorityState {
+                free: capacity.get(),
+                next_id: 0,
+                normal_queue: WaiterQueue::new(),
+                high_queue: WaiterQueue::new(),
+            })),
         }
     }
 
@@ -188,69 +211,56 @@ impl PriorityLimiter {
     /// Returns [`ErrorKind::AtCapacity`] when this priority's queue is full or the wait times out.
     /// Dropping the future releases its queue slot and any assigned permit.
     pub async fn acquire(&self, priority: Priority) -> Result<Permit> {
-        let state = &self.state;
-        let (timeout, queue) = match priority {
-            Priority::Normal => (Some(self.normal_timeout), &state.normal_queue),
-            Priority::High => (self.high_timeout, &state.high_queue),
+        let (timeout, max_queue_size) = match priority {
+            Priority::Normal => (Some(self.normal_timeout), self.max_normal_queue_size),
+            Priority::High => (self.high_timeout, self.max_high_queue_size),
         };
-        let waiting = state.waiting(priority);
-        waiting.fetch_add(1, Ordering::AcqRel);
-        let _waiting = DropGuard::new(waiting, move |waiting| {
-            let previous = waiting.fetch_sub(1, Ordering::AcqRel);
-            if priority == Priority::High && previous == 1 {
-                state.high_drained.notify_waiters();
-            }
-        });
 
-        // Try immediate acquisition without consuming queue capacity.
-        let mut normal_lane = None;
-        let can_acquire = match priority {
-            Priority::High => true,
-            Priority::Normal => {
-                normal_lane = state.normal_lane.try_lock().ok();
-                normal_lane.is_some() && state.waiting_high.load(Ordering::Acquire) == 0
+        let (_entry, receiver) = {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            // A free permit implies that nobody is queued, so taking it overtakes no one.
+            if state.free > 0 {
+                state.free -= 1;
+                return Ok(Permit::priority(self.state.clone()));
             }
+            if timeout == Some(Duration::ZERO) {
+                return Err(ErrorKind::AtCapacity.into());
+            }
+            let id = state.next_id;
+            let queue = state.queue(priority);
+            if max_queue_size.is_some_and(|max| queue.len() >= max as usize) {
+                return Err(ErrorKind::AtCapacity.into());
+            }
+            let (sender, receiver) = oneshot::channel();
+            queue.insert(id, sender);
+            state.next_id += 1;
+
+            // Leaves the queue on timeout or cancellation. A no-op once a permit was handed over.
+            let entry = DropGuard::new(id, move |id| {
+                let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+                state.queue(priority).remove(&id);
+            });
+            (entry, receiver)
         };
-        if can_acquire && let Ok(permit) = state.semaphore.clone().try_acquire_owned() {
-            return Ok(Permit { _permit: permit });
-        }
-        if timeout == Some(Duration::ZERO) {
-            return Err(ErrorKind::AtCapacity.into());
-        }
 
-        let _queued = queue
-            .as_ref()
-            .map(|queue| queue.try_acquire())
-            .transpose()
-            .map_err(|_| ErrorKind::AtCapacity)?;
-        let acquire = async {
-            if priority == Priority::Normal {
-                // Keep any lock from the immediate attempt so other normal waiters cannot pass us.
-                if normal_lane.is_none() {
-                    normal_lane = Some(state.normal_lane.lock().await);
-                }
-                state.wait_until_high_drained().await;
-            }
-
-            state.semaphore.clone().acquire_owned().await
-        };
-        let permit = match timeout {
-            Some(timeout) => tokio::time::timeout(timeout, acquire)
+        // A permit sent after a timeout or cancellation is dropped with the receiver, which passes
+        // its slot on to the next waiter.
+        let received = match timeout {
+            Some(timeout) => tokio::time::timeout(timeout, receiver)
                 .await
                 .map_err(|_| ErrorKind::AtCapacity)?,
-            None => acquire.await,
-        }
-        .map_err(|_| ErrorKind::AtCapacity)?;
-        Ok(Permit { _permit: permit })
+            None => receiver.await,
+        };
+        received.map_err(|_| ErrorKind::AtCapacity.into())
     }
 
-    /// Returns an approximate snapshot of permits and outstanding acquisitions.
+    /// Returns a snapshot of permits in use and queued acquisitions.
     pub fn stats(&self) -> PriorityLimiterStats {
-        let state = &self.state;
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         PriorityLimiterStats {
-            in_use: state.capacity - state.semaphore.available_permits() as u32,
-            waiting_normal: state.waiting_normal.load(Ordering::Relaxed),
-            waiting_high: state.waiting_high.load(Ordering::Relaxed),
+            in_use: self.capacity - state.free,
+            waiting_normal: state.normal_queue.len(),
+            waiting_high: state.high_queue.len(),
         }
     }
 
@@ -264,45 +274,54 @@ impl PriorityLimiter {
     }
 }
 
-// Both priorities share `semaphore`.
-//
-// High-priority waiters increment `waiting_high`, and acquire `semaphore` directly.
-//
-// Normal-priority waiters lock `normal_lane`, so only one attempts acquisition at a time.
-// That waiter first tries an immediate acquisition if `waiting_high == 0`.
-// Otherwise, it waits on `high_drained` until `waiting_high == 0`, then acquires `semaphore`.
-// If high-priority work arrives after this check, this one normal waiter can acquire first.
-// Other normal waiters wait for `normal_lane` in the meantime.
+/// Waiters keyed by arrival order, each holding the channel its permit is delivered on.
+type WaiterQueue = BTreeMap<u64, oneshot::Sender<Permit>>;
+
+// A permit is either free or owned by exactly one `Permit`. On release, `PriorityPermit` hands
+// its slot directly to the next waiter instead of returning it to `free`, so a waiter never has
+// to race newcomers for it and every waiter can be admitted without waiting for another one.
 #[derive(Debug)]
 struct PriorityState {
-    capacity: u32,
-    semaphore: Arc<Semaphore>,
-    normal_queue: Option<Semaphore>,
-    high_queue: Option<Semaphore>,
-    normal_lane: Mutex<()>,
-    waiting_normal: AtomicUsize,
-    waiting_high: AtomicUsize,
-    high_drained: Notify,
+    free: u32,
+    next_id: u64,
+    normal_queue: WaiterQueue,
+    high_queue: WaiterQueue,
 }
 
 impl PriorityState {
-    fn waiting(&self, priority: Priority) -> &AtomicUsize {
+    fn queue(&mut self, priority: Priority) -> &mut WaiterQueue {
         match priority {
-            Priority::Normal => &self.waiting_normal,
-            Priority::High => &self.waiting_high,
+            Priority::Normal => &mut self.normal_queue,
+            Priority::High => &mut self.high_queue,
         }
     }
 
-    async fn wait_until_high_drained(&self) {
-        loop {
-            // Create the notification future before checking the counter, so a notification
-            // between the check and `.await` is not lost.
-            let drained = self.high_drained.notified();
-            if self.waiting_high.load(Ordering::Acquire) == 0 {
-                return;
-            }
-            drained.await;
-        }
+    fn pop_next_waiter(&mut self) -> Option<oneshot::Sender<Permit>> {
+        let (_, sender) = self
+            .high_queue
+            .pop_first()
+            .or_else(|| self.normal_queue.pop_first())?;
+        Some(sender)
+    }
+}
+
+/// One slot of a [`PriorityLimiter`], handed to the next waiter or freed on drop.
+#[derive(Debug)]
+struct PriorityPermit {
+    state: Arc<Mutex<PriorityState>>,
+}
+
+impl Drop for PriorityPermit {
+    fn drop(&mut self) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(sender) = state.pop_next_waiter() else {
+            state.free += 1;
+            return;
+        };
+        // Unlock before sending: if the waiter is gone, `send` returns the permit, and dropping
+        // it re-enters this function.
+        drop(state);
+        let _ = sender.send(Permit::priority(self.state.clone()));
     }
 }
 
@@ -484,7 +503,6 @@ mod tests {
         assert!(poll!(&mut normal2).is_pending());
         assert!(poll!(&mut high1).is_pending());
         assert!(poll!(&mut high2).is_pending());
-        drop(held);
         assert_eq!(
             limiter.stats(),
             PriorityLimiterStats {
@@ -493,23 +511,62 @@ mod tests {
                 waiting_high: 2
             }
         );
+        // The slot goes straight to the oldest high-priority waiter.
+        drop(held);
+        assert_eq!(
+            limiter.stats(),
+            PriorityLimiterStats {
+                in_use: 1,
+                waiting_normal: 2,
+                waiting_high: 1
+            }
+        );
+        // A newcomer cannot take the slot assigned to a waiter that has not woken up yet.
         let clone = limiter.clone();
         let mut newcomer = Box::pin(clone.acquire(Priority::Normal));
         assert!(poll!(&mut newcomer).is_pending());
-        // One normal waiter entered the semaphore queue before high-priority work arrived.
-        drop(normal1.await.unwrap());
-        // Other normal waiters must wait for all high-priority acquisitions to finish.
-        assert!(poll!(&mut normal2).is_pending());
+        // Normal waiters must wait for all high-priority acquisitions to finish.
+        assert!(poll!(&mut normal1).is_pending());
         assert!(poll!(&mut high2).is_pending());
         drop(high1.await.unwrap());
-        assert!(poll!(&mut normal2).is_pending());
+        assert!(poll!(&mut normal1).is_pending());
         drop(high2.await.unwrap());
-        // A free permit must not let a new normal waiter bypass the lane's older waiters.
-        let mut latecomer = Box::pin(limiter.acquire(Priority::Normal));
-        assert!(poll!(&mut latecomer).is_pending());
+        // Normal waiters are then served in arrival order.
+        assert!(poll!(&mut normal2).is_pending());
+        assert!(poll!(&mut newcomer).is_pending());
+        drop(normal1.await.unwrap());
+        assert!(poll!(&mut newcomer).is_pending());
         drop(normal2.await.unwrap());
         drop(newcomer.await.unwrap());
-        drop(latecomer.await.unwrap());
+        assert_eq!(limiter.stats(), PriorityLimiterStats::default());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn released_slots_admit_all_waiters_at_once() {
+        let limiter = priority_limiter(3);
+        let mut held = Vec::new();
+        for _ in 0..3 {
+            held.push(limiter.acquire(Priority::Normal).await.unwrap());
+        }
+        let mut waiters: Vec<_> = (0..3)
+            .map(|_| Box::pin(limiter.acquire(Priority::Normal)))
+            .collect();
+        for waiter in &mut waiters {
+            assert!(poll!(waiter).is_pending());
+        }
+        drop(held);
+        // Every waiter owns a slot before any of them is polled again.
+        assert_eq!(
+            limiter.stats(),
+            PriorityLimiterStats {
+                in_use: 3,
+                waiting_normal: 0,
+                waiting_high: 0
+            }
+        );
+        for waiter in &mut waiters {
+            assert!(poll!(waiter).is_ready());
+        }
         assert_eq!(limiter.stats(), PriorityLimiterStats::default());
     }
 
@@ -574,7 +631,7 @@ mod tests {
         assert!(poll!(&mut cancelled).is_pending());
         assert!(poll!(&mut next).is_pending());
 
-        // The semaphore assigns a slot to `cancelled`, which is dropped before receiving it.
+        // The slot is handed to `cancelled`, which is dropped before receiving it.
         drop(held);
         drop(cancelled);
         drop(next.await.unwrap());
@@ -656,7 +713,7 @@ mod tests {
     }
 
     /// Races releases against timeouts and cancellations on several threads, including
-    /// cancellation after the semaphore assigns a permit. Not guaranteed to hit every race on each
+    /// cancellation after a permit is handed over. Not guaranteed to hit every race on each
     /// run, but checks that no slot is ever lost or returned twice.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_releases_timeouts_and_cancellations_keep_accounting() {
