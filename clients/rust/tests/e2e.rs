@@ -612,10 +612,10 @@ async fn batch_operations() {
         .many()
         .push(
             session
-                .put("first object")
+                .put(&b"first \x00\xff\xfe\r\n--boundary object"[..])
                 .compress(None)
                 .filename("report.pdf")
-                .key("key-1"),
+                .key("key-1/résumé"),
         )
         .push(session.put("second object").key("key-2"))
         .push(session.put("third object").compress(None).key("key-3"))
@@ -634,12 +634,12 @@ async fn batch_operations() {
         })
         .collect();
     keys.sort();
-    assert_eq!(keys, vec!["key-1", "key-2", "key-3", "key-4"]);
+    assert_eq!(keys, vec!["key-1/résumé", "key-2", "key-3", "key-4"]);
 
     // Second batch: GET key-1, GET key-2 (automatic decompression), DELETE key-3, PUT key-4 (override)
     let results: Vec<_> = session
         .many()
-        .push(session.get("key-1"))
+        .push(session.get("key-1/résumé"))
         .push(session.get("key-2"))
         .push(session.delete("key-3"))
         .push(
@@ -676,14 +676,17 @@ async fn batch_operations() {
 
     // GET key-1 (uncompressed)
     let get1 = gets
-        .remove("key-1")
-        .expect("missing get key-1")
+        .remove("key-1/résumé")
+        .expect("missing get key-1/résumé")
         .unwrap()
         .unwrap();
     assert_eq!(get1.metadata.compression, None);
     assert!(get1.metadata.time_created.is_some());
     assert_eq!(get1.metadata.filename.as_deref(), Some("report.pdf"));
-    assert_eq!(get1.payload().await.unwrap().as_ref(), b"first object");
+    assert_eq!(
+        get1.payload().await.unwrap().as_ref(),
+        b"first \x00\xff\xfe\r\n--boundary object"
+    );
 
     // GET key-2 (automatic decompression)
     let get2 = gets
