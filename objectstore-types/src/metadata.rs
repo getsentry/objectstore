@@ -796,18 +796,17 @@ impl WriteMetadata {
     }
 }
 
-impl From<&Metadata> for WriteMetadata {
-    /// Copies the writable fields, leaving the default content type and expiration unset.
-    fn from(metadata: &Metadata) -> Self {
+impl From<Metadata> for WriteMetadata {
+    fn from(metadata: Metadata) -> Self {
         Self {
             content_type: (metadata.content_type != DEFAULT_CONTENT_TYPE)
-                .then(|| metadata.content_type.to_string()),
+                .then(|| metadata.content_type.into_owned()),
             content_encoding: metadata.compression.map(|c| c.to_string()),
             expiration: (!metadata.expiration_policy.is_manual())
                 .then(|| metadata.expiration_policy.to_string()),
-            origin: metadata.origin.clone(),
-            filename: metadata.filename.clone(),
-            custom: metadata.custom.clone(),
+            origin: metadata.origin,
+            filename: metadata.filename,
+            custom: metadata.custom,
         }
     }
 }
@@ -867,8 +866,6 @@ impl From<Metadata> for ReadMetadata {
 impl TryFrom<ReadMetadata> for Metadata {
     type Error = Error;
 
-    /// Parses the values back without validating the content type or custom keys, so that any
-    /// stored object can be read.
     fn try_from(object: ReadMetadata) -> Result<Self, Error> {
         let expiration_policy = object.expiration.as_deref().map(str::parse).transpose()?;
         Ok(Self {
@@ -1773,7 +1770,7 @@ mod tests {
             }
         );
 
-        let json = serde_json::to_string(&WriteMetadata::from(&Metadata::default())).unwrap();
+        let json = serde_json::to_string(&WriteMetadata::from(Metadata::default())).unwrap();
         assert_eq!(json, "{}");
     }
 
@@ -1784,7 +1781,7 @@ mod tests {
             ..full_metadata()
         };
 
-        let json = serde_json::to_string(&WriteMetadata::from(&full_metadata())).unwrap();
+        let json = serde_json::to_string(&WriteMetadata::from(full_metadata())).unwrap();
         assert_eq!(
             json,
             r#"{"content_type":"image/png","content_encoding":"zstd","expiration":"ttl:30d","origin":"203.0.113.42","filename":"résumé.png","custom":{"build":"123"}}"#
