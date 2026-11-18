@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::Result;
+use axum::extract::FromRequest;
 use http::{Method, StatusCode};
 use objectstore_server::config::{AuthZ, Config};
 use objectstore_test::server::TestServer;
@@ -508,6 +510,97 @@ async fn invalid_custom_metadata_key_is_rejected_on_put() -> Result<()> {
         .send()
         .await?;
     assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+
+    Ok(())
+}
+
+/// One part of a multipart batch response: filename, content type and body.
+type BatchPart = (Option<String>, Option<String>, bytes::Bytes);
+
+/// Sends a JSON-layout batch body and returns the response parts by name.
+async fn send_batch(server: &TestServer, body: String) -> Result<HashMap<String, BatchPart>> {
+    let response = reqwest::Client::new()
+        .post(server.url("/v1/objects:batch/test/org=1/"))
+        .header("content-type", "multipart/form-data; boundary=b")
+        .body(body)
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+    let request = axum::http::Request::builder()
+        .header("content-type", response.headers()["content-type"].clone())
+        .body(axum::body::Body::from(response.bytes().await?))?;
+    let mut multipart = axum::extract::Multipart::from_request(request, &())
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let mut parts = HashMap::new();
+    while let Some(field) = multipart.next_field().await? {
+        let name = field.name().unwrap_or_default().to_owned();
+        let filename = field.file_name().map(str::to_owned);
+        let content_type = field.content_type().map(str::to_owned);
+        parts.insert(name, (filename, content_type, field.bytes().await?));
+    }
+    Ok(parts)
+}
+
+fn batch_part(name: &str, json: &str) -> String {
+    format!("--b\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{json}\r\n")
+}
+
+#[tokio::test]
+async fn batch_json_layout_round_trip() -> Result<()> {
+    let server = test_server().await;
+
+    let inserts = [
+        batch_part(
+            "0",
+            r#"{"kind":"insert","key":"a","metadata":{"content_type":"text/plain"}}"#,
+        ),
+        batch_part("0.payload", "hello"),
+        batch_part(
+            "1",
+            r#"{"kind":"insert","key":"b","metadata":{"content_encoding":"zstd"}}"#,
+        ),
+        batch_part("1.payload", "zstd bytes"),
+    ]
+    .concat()
+        + "--b--\r\n";
+    let parts = send_batch(&server, inserts).await?;
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts["0"].2, r#"{"status":201,"kind":"insert","key":"a"}"#);
+    assert_eq!(parts["1"].2, r#"{"status":201,"kind":"insert","key":"b"}"#);
+
+    let reads = [
+        batch_part("0", r#"{"kind":"get","key":"a"}"#),
+        // A payload part that follows no insert is skipped.
+        batch_part("0.payload", "ignored"),
+        batch_part("1", r#"{"kind":"get","key":"b"}"#),
+        batch_part("2", r#"{"kind":"head","key":"a"}"#),
+        batch_part("3", r#"{"kind":"delete","key":"a"}"#),
+    ]
+    .concat()
+        + "--b--\r\n";
+    let parts = send_batch(&server, reads).await?;
+    assert_eq!(parts.len(), 6);
+
+    let get: serde_json::Value = serde_json::from_slice(&parts["0"].2)?;
+    assert_eq!(get["status"], 200);
+    assert_eq!(get["metadata"]["content_type"], "text/plain");
+    let payload = &parts["0.payload"];
+    assert_eq!(payload.0.as_deref(), Some("0"));
+    assert_eq!(payload.1.as_deref(), Some("text/plain"));
+    assert_eq!(payload.2, "hello");
+
+    // Encoded objects are returned as stored, typed as octet-stream.
+    let payload = &parts["1.payload"];
+    assert_eq!(payload.1.as_deref(), Some("application/octet-stream"));
+    assert_eq!(payload.2, "zstd bytes");
+
+    let head: serde_json::Value = serde_json::from_slice(&parts["2"].2)?;
+    assert_eq!(head["status"], 200);
+    assert_eq!(head["metadata"]["size"], 5);
+    assert_eq!(parts["3"].2, r#"{"status":204,"kind":"delete","key":"a"}"#);
 
     Ok(())
 }

@@ -28,6 +28,62 @@
 //! [`crate::extractors::response_options`] for validation. The object handlers construct
 //! download headers with browser safeguards and filename formatting.
 //!
+//! # Batch Endpoint
+//!
+//! `POST /v1/objects:batch/{usecase}/{scopes}/` runs up to 1000 get, head, delete and insert
+//! operations from one `multipart/form-data` request. Operations are read one at a time, run
+//! with bounded concurrency, and their results stream back in completion order. Each operation
+//! is authorized, rate limited and validated on its own and reports its own status.
+//! Request-level failures still fail the whole request with a plain HTTP error: a failed
+//! authentication, a rejection by admission control in the extractors, an invalid path, or a
+//! body that cannot be opened as multipart.
+//!
+//! Each operation is a JSON descriptor part named by its index, followed by a payload part for
+//! inserts:
+//!
+//! ```text
+//! --b
+//! Content-Disposition: form-data; name="0"
+//!
+//! {"kind":"insert","key":"a/résumé.png","metadata":{"content_type":"image/png","expiration":"ttl:30d"}}
+//! --b
+//! Content-Disposition: form-data; name="0.payload"; filename="blob"
+//! Content-Type: application/octet-stream
+//!
+//! <bytes>
+//! --b
+//! Content-Disposition: form-data; name="1"
+//!
+//! {"kind":"head","key":"c"}
+//! --b--
+//! ```
+//!
+//! Each result is a part named by the operation index with `Content-Type: application/json`.
+//! It holds `status` (an integer), `kind` and `key` for successful operations,
+//! `metadata` for a successful get or head (see
+//! [`ReadMetadata`](objectstore_types::metadata::ReadMetadata)), and `error` with the
+//! standard error body for failures. A successful get is followed by a `"<i>.payload"` part with
+//! `filename="<i>"` holding the stored bytes, typed `application/octet-stream` when the object
+//! is encoded:
+//!
+//! ```text
+//! --os-boundary-…
+//! Content-Disposition: form-data; name="1"
+//! Content-Type: application/json
+//!
+//! {"status":200,"kind":"head","key":"c","metadata":{"content_type":"text/plain","time_created":"2026-11-10T12:00:00Z","size":12}}
+//! --os-boundary-…
+//! Content-Disposition: form-data; name="0"
+//! Content-Type: application/json
+//!
+//! {"status":201,"kind":"insert","key":"a/résumé.png"}
+//! --os-boundary-…--
+//! ```
+//!
+//! [`crate::extractors::batch`] lists how descriptors and payloads are paired and how malformed
+//! parts are reported. A broken multipart body ends the response early, so clients must treat a
+//! missing result as a failure.
+//!
 //! # Resumable Upload Endpoints
 //!
 //! A resumable upload transfers a single object across several requests.

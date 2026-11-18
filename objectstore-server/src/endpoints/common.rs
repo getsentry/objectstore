@@ -124,14 +124,7 @@ impl ApiError {
             ApiError::Client { .. } => StatusCode::BAD_REQUEST,
             ApiError::Conflict(_) => StatusCode::CONFLICT,
 
-            ApiError::Batch(BatchError::BadRequest(_))
-            | ApiError::Batch(BatchError::Metadata(_))
-            | ApiError::Batch(BatchError::Multipart(_)) => StatusCode::BAD_REQUEST,
-            ApiError::Batch(BatchError::LimitExceeded(_)) => StatusCode::PAYLOAD_TOO_LARGE,
-            ApiError::Batch(BatchError::RateLimited(rejection)) => rejection.status(),
-            ApiError::Batch(BatchError::ResponseSerialization { .. }) => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            ApiError::Batch(error) => error.status(),
 
             ApiError::Auth(AuthError::BadRequest(_)) => StatusCode::BAD_REQUEST,
             ApiError::Auth(AuthError::ValidationFailure(_))
