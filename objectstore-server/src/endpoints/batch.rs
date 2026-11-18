@@ -17,16 +17,16 @@ use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue, StatusCode};
 use objectstore_service::id::{ObjectContext, ObjectKey};
 use objectstore_service::streaming::{OpResponse, Operation};
+use objectstore_types::api::ApiErrorResponse;
+use objectstore_types::batch::{self, OperationKind, ResultPart};
 use objectstore_types::headers;
-use objectstore_types::metadata::{DEFAULT_CONTENT_TYPE, Metadata, ReadMetadata};
-use serde::Serialize;
+use objectstore_types::metadata::{DEFAULT_CONTENT_TYPE, Metadata};
 
 use crate::auth::AuthAwareService;
 use crate::batch::{
     HEADER_BATCH_OPERATION_INDEX, HEADER_BATCH_OPERATION_KEY, HEADER_BATCH_OPERATION_KIND,
-    payload_part_name,
 };
-use crate::endpoints::common::{ApiError, ApiErrorResponse};
+use crate::endpoints::common::ApiError;
 use crate::extractors::Xt;
 use crate::extractors::batch::{BatchError, BatchFormat, BatchOperationStream};
 use crate::extractors::request_time::RequestTime;
@@ -143,31 +143,14 @@ async fn batch(
     }
 }
 
-/// The JSON body of a result part in the JSON layout.
-#[derive(Debug, Default, Serialize)]
-struct OperationResult {
-    /// The HTTP status code of the operation.
-    status: u16,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    kind: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    key: Option<ObjectKey>,
-    /// The object's metadata, for a successful get or head.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    metadata: Option<ReadMetadata>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<ApiErrorResponse>,
-}
-
-impl OperationResult {
-    fn failure(error: &ApiError) -> Self {
-        // Capture the error explicitly, as it is not converted via `IntoResponse` here.
-        error.capture();
-        Self {
-            status: error.status().as_u16(),
-            error: Some(ApiErrorResponse::from_error(error)),
-            ..Default::default()
-        }
+/// Builds the result part of a failed operation.
+fn failure_result(error: &ApiError) -> ResultPart {
+    // Capture the error explicitly, as it is not converted via `IntoResponse` here.
+    error.capture();
+    ResultPart {
+        status: error.status().as_u16(),
+        error: Some(ApiErrorResponse::from_error(error)),
+        ..Default::default()
     }
 }
 
@@ -198,10 +181,10 @@ async fn convert_to_json_parts(
 ) -> impl Iterator<Item = Part> + use<> {
     let response = match result {
         Ok(response) => response,
-        Err(error) => return json_parts(idx, OperationResult::failure(&error), None),
+        Err(error) => return json_parts(idx, failure_result(&error), None),
     };
 
-    let mut result = OperationResult {
+    let mut result = ResultPart {
         status: response_status(&response).as_u16(),
         kind: Some(response.kind()),
         key: Some(response.key().clone()),
@@ -218,7 +201,7 @@ async fn convert_to_json_parts(
                 payload = Some((bytes, payload_content_type(&metadata)));
                 result.metadata = Some(metadata.into());
             }
-            Err(error) => return json_parts(idx, OperationResult::failure(&error), None),
+            Err(error) => return json_parts(idx, failure_result(&error), None),
         },
         OpResponse::Head {
             metadata: Some(metadata),
@@ -233,7 +216,7 @@ async fn convert_to_json_parts(
 /// Builds the result part of `idx` and, for a get, its payload part.
 fn json_parts(
     idx: usize,
-    result: OperationResult,
+    result: ResultPart,
     payload: Option<(Bytes, HeaderValue)>,
 ) -> impl Iterator<Item = Part> {
     let (body, payload) = match serde_json::to_vec(&result) {
@@ -252,7 +235,7 @@ fn json_parts(
 
     let payload_part = payload.map(|(bytes, content_type)| {
         Part::named(
-            &payload_part_name(idx),
+            &batch::payload_part_name(idx),
             bytes,
             Some(&name),
             Some(content_type),
@@ -318,7 +301,7 @@ async fn convert_to_part(
         }) => create_success_part(
             idx,
             &key,
-            "get",
+            OperationKind::Get,
             StatusCode::NOT_FOUND,
             None,
             Bytes::new(),
@@ -327,7 +310,7 @@ async fn convert_to_part(
         Ok(OpResponse::Inserted { id }) => create_success_part(
             idx,
             &id.key,
-            "insert",
+            OperationKind::Insert,
             // XXX: this could actually be either StatusCode::OK or StatusCode::CREATED, the service
             // layer doesn't allow us to distinguish between them currently
             StatusCode::CREATED,
@@ -338,7 +321,7 @@ async fn convert_to_part(
         Ok(OpResponse::Deleted { key }) => create_success_part(
             idx,
             &key,
-            "delete",
+            OperationKind::Delete,
             StatusCode::NO_CONTENT,
             None,
             Bytes::new(),
@@ -358,7 +341,7 @@ async fn convert_to_part(
                 Ok(headers) => create_success_part(
                     idx,
                     &key,
-                    "head",
+                    OperationKind::Head,
                     StatusCode::OK,
                     None,
                     Bytes::new(),
@@ -373,7 +356,7 @@ async fn convert_to_part(
         }) => create_success_part(
             idx,
             &key,
-            "head",
+            OperationKind::Head,
             StatusCode::NOT_FOUND,
             None,
             Bytes::new(),
@@ -404,7 +387,7 @@ async fn got_to_part(
     Ok(create_success_part(
         idx,
         &key,
-        "get",
+        OperationKind::Get,
         StatusCode::OK,
         content_type,
         bytes,
@@ -428,11 +411,10 @@ fn insert_key_header(headers: &mut HeaderMap, key: &ObjectKey) {
     );
 }
 
-fn insert_kind_header(headers: &mut HeaderMap, kind: &str) {
+fn insert_kind_header(headers: &mut HeaderMap, kind: OperationKind) {
     headers.insert(
         HEADER_BATCH_OPERATION_KIND,
-        kind.parse()
-            .expect("operation kind is always a valid header value"),
+        HeaderValue::from_static(kind.as_str()),
     );
 }
 
@@ -454,7 +436,7 @@ fn insert_status_header(headers: &mut HeaderMap, status: StatusCode) {
 fn create_success_part(
     idx: usize,
     key: &ObjectKey,
-    kind: &str,
+    kind: OperationKind,
     status: StatusCode,
     content_type: Option<HeaderValue>,
     body: Bytes,

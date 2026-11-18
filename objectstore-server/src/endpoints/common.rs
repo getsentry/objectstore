@@ -8,39 +8,12 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use http::HeaderValue;
 use objectstore_service::error::{Error as ServiceError, ErrorKind as ServiceErrorKind};
-use serde::{Deserialize, Serialize};
+use objectstore_types::api::ApiErrorResponse;
 use thiserror::Error;
 
 use crate::auth::AuthError;
 use crate::extractors::batch::BatchError;
 use crate::rate_limits::LimitExceeded;
-
-/// A JSON error response returned by the API.
-#[derive(Serialize, Deserialize, Debug)]
-pub struct ApiErrorResponse {
-    /// The main error message.
-    #[serde(default)]
-    detail: Option<String>,
-    /// Chain of error causes.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    causes: Vec<String>,
-}
-
-impl ApiErrorResponse {
-    /// Creates an error response from an error, extracting the full cause chain.
-    pub fn from_error<E: Error + ?Sized>(error: &E) -> Self {
-        let detail = Some(error.to_string());
-
-        let mut causes = Vec::new();
-        let mut source = error.source();
-        while let Some(s) = source {
-            causes.push(s.to_string());
-            source = s.source();
-        }
-
-        Self { detail, causes }
-    }
-}
 
 /// Error type for API operations.
 #[derive(Debug, Error)]

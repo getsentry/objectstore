@@ -26,6 +26,7 @@
 use std::sync::Arc;
 
 use futures_util::{Stream, StreamExt};
+use objectstore_types::batch::OperationKind;
 use objectstore_types::metadata::Metadata;
 use objectstore_types::time::Timestamp;
 
@@ -103,13 +104,13 @@ impl Operation {
         }
     }
 
-    /// Returns the kind name for this operation.
-    pub fn kind(&self) -> &'static str {
+    /// Returns the kind of this operation.
+    pub fn kind(&self) -> OperationKind {
         match self {
-            Operation::Insert(_) => "insert",
-            Operation::Get(_) => "get",
-            Operation::Delete(_) => "delete",
-            Operation::Head(_) => "head",
+            Operation::Insert(_) => OperationKind::Insert,
+            Operation::Get(_) => OperationKind::Get,
+            Operation::Delete(_) => OperationKind::Delete,
+            Operation::Head(_) => OperationKind::Head,
         }
     }
 }
@@ -146,13 +147,13 @@ pub enum OpResponse {
 }
 
 impl OpResponse {
-    /// Returns the operation kind name.
-    pub fn kind(&self) -> &'static str {
+    /// Returns the kind of the operation.
+    pub fn kind(&self) -> OperationKind {
         match self {
-            OpResponse::Inserted { .. } => "insert",
-            OpResponse::Got { .. } => "get",
-            OpResponse::Deleted { .. } => "delete",
-            OpResponse::Head { .. } => "head",
+            OpResponse::Inserted { .. } => OperationKind::Insert,
+            OpResponse::Got { .. } => OperationKind::Get,
+            OpResponse::Deleted { .. } => OperationKind::Delete,
+            OpResponse::Head { .. } => OperationKind::Head,
         }
     }
 
@@ -296,7 +297,7 @@ impl StreamExecutor {
                         Err(e) => return (idx, Err(e)),
                     };
 
-                    let spawn = crate::concurrency::run_metered(op.kind(), permit, {
+                    let spawn = crate::concurrency::run_metered(op.kind().as_str(), permit, {
                         execute_operation(backend, renewals, context, op, access_time)
                     });
                     (idx, spawn.await.map_err(E::from))

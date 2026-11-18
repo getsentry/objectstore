@@ -44,15 +44,16 @@ use http::header::CONTENT_TYPE;
 use http::{HeaderMap, StatusCode};
 use objectstore_service::id::ObjectKey;
 use objectstore_service::streaming::{Delete, Get, Head, Insert, Operation};
+use objectstore_types::batch::{
+    self, Descriptor, MAX_BATCH_OPERATIONS, MAX_BATCH_PART_SIZE, MAX_DESCRIPTOR_SIZE,
+    OperationKind, PAYLOAD_SUFFIX,
+};
 use objectstore_types::headers;
 use objectstore_types::metadata::{Metadata, WriteMetadata};
 use objectstore_types::time::Timestamp;
-use serde::Deserialize;
 use thiserror::Error;
 
-use crate::batch::{
-    HEADER_BATCH_OPERATION_KEY, HEADER_BATCH_OPERATION_KIND, PAYLOAD_SUFFIX, payload_part_name,
-};
+use crate::batch::{HEADER_BATCH_OPERATION_KEY, HEADER_BATCH_OPERATION_KIND};
 use crate::extractors::request_time::RequestTime;
 use crate::rate_limits::LimitExceeded;
 
@@ -109,7 +110,7 @@ impl BatchError {
 
     fn too_many_operations() -> Self {
         Self::LimitExceeded(format!(
-            "exceeded {MAX_OPERATIONS} operations per batch request"
+            "exceeded {MAX_BATCH_OPERATIONS} operations per batch request"
         ))
     }
 }
@@ -161,7 +162,7 @@ impl Part {
 
     /// Parses this part as the descriptor of the operation at `index`.
     fn into_descriptor(self, index: usize) -> Result<Descriptor, BatchError> {
-        if index >= MAX_OPERATIONS {
+        if index >= MAX_BATCH_OPERATIONS {
             return Err(BatchError::too_many_operations());
         }
 
@@ -186,13 +187,13 @@ impl Part {
 /// The parts of a request, read one at a time. Ends after the first broken part.
 type Parts = Pin<Box<Peekable<BoxStream<'static, Result<Part, BatchError>>>>>;
 
-/// Reads the body of a field, failing once it exceeds `MAX_FIELD_SIZE`.
+/// Reads the body of a field, failing once it exceeds `MAX_BATCH_PART_SIZE`.
 async fn read_body(mut field: Field<'_>) -> Result<Bytes, BatchError> {
     let mut body = BytesMut::new();
     while let Some(chunk) = field.chunk().await? {
-        if body.len() + chunk.len() > MAX_FIELD_SIZE {
+        if body.len() + chunk.len() > MAX_BATCH_PART_SIZE {
             return Err(BatchError::LimitExceeded(format!(
-                "individual request in batch exceeds body size limit of {MAX_FIELD_SIZE} bytes"
+                "individual request in batch exceeds body size limit of {MAX_BATCH_PART_SIZE} bytes"
             )));
         }
         body.extend_from_slice(&chunk);
@@ -230,13 +231,13 @@ fn stream_parts(multipart: Multipart) -> Parts {
 
 /// Parses a part of the header layout into an operation.
 fn parse_header_part(part: Part, access_time: Timestamp) -> Result<Operation, BatchError> {
-    let kind = part
+    let kind_name = part
         .headers
         .get(HEADER_BATCH_OPERATION_KIND)
         .ok_or_else(|| {
             BatchError::BadRequest(format!("missing {HEADER_BATCH_OPERATION_KIND} header"))
         })?;
-    let kind = kind
+    let kind_name = kind_name
         .to_str()
         .map_err(|_| {
             BatchError::BadRequest(format!(
@@ -244,6 +245,7 @@ fn parse_header_part(part: Part, access_time: Timestamp) -> Result<Operation, Ba
             ))
         })?
         .to_lowercase();
+    let kind = OperationKind::from(kind_name.as_str());
 
     let key = part
         .headers
@@ -259,29 +261,29 @@ fn parse_header_part(part: Part, access_time: Timestamp) -> Result<Operation, Ba
     let required_key = |key: Option<ObjectKey>| {
         key.ok_or_else(|| {
             BatchError::BadRequest(format!(
-                "missing {HEADER_BATCH_OPERATION_KEY} header for {kind} operation"
+                "missing {HEADER_BATCH_OPERATION_KEY} header for {kind_name} operation"
             ))
         })
     };
 
-    let operation = match kind.as_str() {
-        "get" => Operation::Get(Get {
+    let operation = match kind {
+        OperationKind::Get => Operation::Get(Get {
             key: required_key(key)?,
         }),
-        "delete" => Operation::Delete(Delete {
+        OperationKind::Delete => Operation::Delete(Delete {
             key: required_key(key)?,
         }),
-        "head" => Operation::Head(Head {
+        OperationKind::Head => Operation::Head(Head {
             key: required_key(key)?,
         }),
-        "insert" => Operation::Insert(Box::new(Insert {
+        OperationKind::Insert => Operation::Insert(Box::new(Insert {
             metadata: Metadata::from_insert_headers(&part.headers, "", access_time)?,
             payload: part.body?,
             key,
         })),
-        _ => {
+        OperationKind::Unknown => {
             return Err(BatchError::BadRequest(format!(
-                "invalid operation kind: {kind}"
+                "invalid operation kind: {kind_name}"
             )));
         }
     };
@@ -294,32 +296,11 @@ fn stream_header_ops(
     access_time: Timestamp,
 ) -> impl Stream<Item = Result<Operation, BatchError>> {
     parts.enumerate().map(move |(index, part)| {
-        if index >= MAX_OPERATIONS {
+        if index >= MAX_BATCH_OPERATIONS {
             return Err(BatchError::too_many_operations());
         }
         parse_header_part(part?, access_time)
     })
-}
-
-/// The JSON body of a descriptor part. Unknown fields are ignored.
-#[derive(Debug, Deserialize)]
-#[serde(tag = "kind", rename_all = "lowercase")]
-enum Descriptor {
-    Get {
-        key: ObjectKey,
-    },
-    Head {
-        key: ObjectKey,
-    },
-    Delete {
-        key: ObjectKey,
-    },
-    Insert {
-        #[serde(default)]
-        key: Option<ObjectKey>,
-        #[serde(default)]
-        metadata: WriteMetadata,
-    },
 }
 
 /// Builds an insert from its descriptor and the part that follows it, if that is its payload.
@@ -365,7 +346,7 @@ fn stream_json_ops(
             Ok(Descriptor::Insert { key, metadata }) => {
                 // The next part is the payload, unless it belongs elsewhere. A broken body fails
                 // the insert.
-                let payload_name = payload_part_name(index);
+                let payload_name = batch::payload_part_name(index);
                 let is_payload = |next: &Result<Part, BatchError>| match next {
                     Ok(part) => part.name.as_deref() == Some(payload_name.as_str()),
                     Err(_) => true,
@@ -398,10 +379,6 @@ impl Debug for BatchOperationStream {
             .finish_non_exhaustive()
     }
 }
-
-const MAX_FIELD_SIZE: usize = 1024 * 1024; // 1 MB
-const MAX_DESCRIPTOR_SIZE: usize = 64 * 1024; // 64 KiB
-const MAX_OPERATIONS: usize = 1000;
 
 impl<S> FromRequest<S> for BatchOperationStream
 where
@@ -438,8 +415,6 @@ mod tests {
     use objectstore_service::streaming::Operation;
     use objectstore_types::headers;
     use objectstore_types::metadata::{ExpirationPolicy, HEADER_EXPIRATION, HEADER_ORIGIN};
-
-    use crate::batch::payload_part_name;
 
     #[tokio::test]
     async fn test_valid_request_works() {
@@ -560,7 +535,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_individual_errors_with_isolation() {
-        let large_payload = "x".repeat(MAX_FIELD_SIZE + 1);
+        let large_payload = "x".repeat(MAX_BATCH_PART_SIZE + 1);
         let valid_key = headers::encode_header_str("valid");
         let body = format!(
             "--boundary\r\n\
@@ -623,7 +598,7 @@ mod tests {
     #[tokio::test]
     async fn test_max_operations_limit_enforced() {
         let mut body = String::new();
-        for i in 0..(MAX_OPERATIONS + 1) {
+        for i in 0..(MAX_BATCH_OPERATIONS + 1) {
             let key = headers::encode_header_str(&format!("test{i}")).to_string();
             body.push_str(&format!(
                 "--boundary\r\n\
@@ -645,9 +620,9 @@ mod tests {
             .unwrap();
         let operations: Vec<_> = batch_request.operations.collect().await;
 
-        assert_eq!(operations.len(), MAX_OPERATIONS + 1);
+        assert_eq!(operations.len(), MAX_BATCH_OPERATIONS + 1);
         assert!(matches!(
-            &operations[MAX_OPERATIONS],
+            &operations[MAX_BATCH_OPERATIONS],
             Err(BatchError::LimitExceeded(_))
         ));
     }
@@ -900,7 +875,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_json_size_limits() {
-        let large_payload = "x".repeat(MAX_FIELD_SIZE + 1);
+        let large_payload = "x".repeat(MAX_BATCH_PART_SIZE + 1);
         let large_key = "k".repeat(MAX_DESCRIPTOR_SIZE);
         let body = [
             descriptor("0", r#"{"kind":"insert"}"#),
@@ -923,17 +898,17 @@ mod tests {
     #[tokio::test]
     async fn test_json_operation_limit_counts_descriptors() {
         let mut body = String::new();
-        for index in 0..=MAX_OPERATIONS {
+        for index in 0..=MAX_BATCH_OPERATIONS {
             body += &descriptor(&index.to_string(), r#"{"kind":"insert"}"#);
-            body += &payload(&payload_part_name(index), None, "x");
+            body += &payload(&batch::payload_part_name(index), None, "x");
         }
         body += END;
 
         let (_, operations) = parse(body).await;
-        assert_eq!(operations.len(), MAX_OPERATIONS + 1);
-        assert!(operations[..MAX_OPERATIONS].iter().all(Result::is_ok));
+        assert_eq!(operations.len(), MAX_BATCH_OPERATIONS + 1);
+        assert!(operations[..MAX_BATCH_OPERATIONS].iter().all(Result::is_ok));
         assert!(matches!(
-            operations[MAX_OPERATIONS],
+            operations[MAX_BATCH_OPERATIONS],
             Err(BatchError::LimitExceeded(_))
         ));
     }

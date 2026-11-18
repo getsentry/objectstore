@@ -5,7 +5,9 @@
 #![warn(missing_docs)]
 #![warn(missing_debug_implementations)]
 
+pub mod api;
 pub mod auth;
+pub mod batch;
 pub mod duration;
 pub mod headers;
 pub mod metadata;
