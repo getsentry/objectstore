@@ -1167,15 +1167,33 @@ async fn batch_head_operations() {
     assert!(head_missing.is_none());
 }
 
+/// Payload prefix that lifts a resumable upload above the 1 MiB tiered storage threshold.
+#[cfg(feature = "resumable-upload-api")]
+const RESUMABLE_PADDING: usize = 1024 * 1024;
+
+/// Returns `len` deterministic bytes that zstd cannot meaningfully compress.
+#[cfg(feature = "resumable-upload-api")]
+fn incompressible(len: usize) -> Vec<u8> {
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+
+    let mut bytes = vec![0; len];
+    StdRng::seed_from_u64(0).fill_bytes(&mut bytes);
+    bytes
+}
+
 #[cfg(feature = "resumable-upload-api")]
 #[tokio::test]
 async fn test_resumable_upload() {
     let server = test_server().await;
     let session = common::test_session(&server);
 
-    // Create a session and upload the first chunk.
+    // Create a session and upload the first chunk. The padding lifts the upload above the
+    // 1 MiB threshold below which tiered storage declines resumable uploads.
+    let padding = "x".repeat(RESUMABLE_PADDING);
+    let mid = RESUMABLE_PADDING as u64 + 3;
     let upload = session
-        .create_upload(6)
+        .create_upload(RESUMABLE_PADDING as u64 + 6)
         .key("resumable-client")
         .content_type("text/plain")
         .compression(None)
@@ -1190,8 +1208,8 @@ async fn test_resumable_upload() {
         UploadProgress::Incomplete { offset: 0 }
     );
     assert_eq!(
-        upload.put(0, "abc").send().await.unwrap(),
-        UploadProgress::Incomplete { offset: 3 }
+        upload.put(0, format!("{padding}abc")).send().await.unwrap(),
+        UploadProgress::Incomplete { offset: mid }
     );
 
     // Resume the session and finish the upload.
@@ -1199,23 +1217,26 @@ async fn test_resumable_upload() {
     assert_eq!(resumed.granularity(), None);
     assert_eq!(
         resumed.progress().send().await.unwrap(),
-        UploadProgress::Incomplete { offset: 3 }
+        UploadProgress::Incomplete { offset: mid }
     );
     assert_eq!(resumed.granularity(), None);
     assert!(matches!(
         resumed.put(0, "bad").send().await.unwrap_err(),
-        Error::UploadOffsetMismatch { offset: 3 }
+        Error::UploadOffsetMismatch { offset } if offset == mid
     ));
-    assert!(resumed.put(3, "defg").send().await.is_err());
+    assert!(resumed.put(mid, "defg").send().await.is_err());
     assert_eq!(
-        resumed.put(3, "def").send().await.unwrap(),
+        resumed.put(mid, "def").send().await.unwrap(),
         UploadProgress::Complete
     );
 
     // Verify the published object and terminal session.
     let response = session.get(upload.key()).send().await.unwrap().unwrap();
     assert_eq!(response.metadata.content_type, "text/plain");
-    assert_eq!(response.payload().await.unwrap(), "abcdef");
+    assert_eq!(
+        response.payload().await.unwrap(),
+        format!("{padding}abcdef")
+    );
     assert!(resumed.progress().send().await.is_err());
 }
 
@@ -1225,7 +1246,9 @@ async fn test_resumable_upload_streaming() {
     let server = test_server().await;
     let session = common::test_session(&server);
 
-    let compressed = zstd::encode_all(&b"abcdef"[..], 0).unwrap();
+    let payload = incompressible(RESUMABLE_PADDING + 6);
+    let compressed = zstd::encode_all(&payload[..], 0).unwrap();
+    assert!(compressed.len() > RESUMABLE_PADDING);
     let second_piece_start = compressed.len() / 2;
     let first_piece_len = second_piece_start / 2;
     let upload = session
@@ -1272,7 +1295,7 @@ async fn test_resumable_upload_streaming() {
     );
 
     let response = session.get(upload.key()).send().await.unwrap().unwrap();
-    assert_eq!(response.payload().await.unwrap(), "abcdef");
+    assert_eq!(response.payload().await.unwrap(), payload);
 }
 
 #[cfg(feature = "resumable-upload-api")]
@@ -1282,7 +1305,7 @@ async fn test_resumable_upload_cancel() {
     let session = common::test_session(&server);
 
     let upload = session
-        .create_upload(6)
+        .create_upload(RESUMABLE_PADDING as u64 + 6)
         .key("resumable-cancel")
         .send()
         .await
