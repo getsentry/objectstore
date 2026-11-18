@@ -225,7 +225,7 @@ enum Classified {
 }
 
 /// Creates a typed error [`OperationResult`] for the given operation context.
-fn error_result(ctx: OperationContext, error: Error) -> OperationResult {
+fn error_result(ctx: &OperationContext, error: Error) -> OperationResult {
     let key = ctx.key().unwrap_or("<unknown>").to_owned();
     match ctx {
         OperationContext::Get { .. } => OperationResult::Get(key, Err(error)),
@@ -291,16 +291,14 @@ impl OperationResults {
     }
 }
 
+/// Sends `operations` as one batch request and reads its results.
+///
+/// `contexts` holds the context of each operation, in the same order as `operations`.
 async fn send_batch(
     session: &Session,
     operations: Vec<BatchOperation>,
+    contexts: &[OperationContext],
 ) -> crate::Result<Vec<OperationResult>> {
-    let contexts: BTreeMap<usize, OperationContext> = operations
-        .iter()
-        .enumerate()
-        .map(|(idx, op)| (idx, OperationContext::from(op)))
-        .collect();
-
     let form = build_form(operations).await?;
     let request = session.batch_request()?.multipart(form);
     let response = request.send().await?.error_for_status_and_drain().await?;
@@ -321,76 +319,46 @@ async fn send_batch(
     Ok(collect_results(multipart, contexts).await)
 }
 
-// --- Wire format ---------------------------------------------------------------------------
-//
-// Each operation `i` is sent as a JSON descriptor part named `"<i>"` with `kind`, `key` and, for
-// inserts, a `WriteMetadata` object. An insert is followed by a payload part named
-// `"<i>.payload"`. Parts carry no headers besides `Content-Disposition` and `Content-Type`.
-//
-// The server answers with one JSON result part named `"<i>"` per operation, in completion order.
-// A successful get is followed by its payload part `"<i>.payload"`. A missing result counts as a
-// failure of that operation.
-
-/// Serializes a descriptor into a part. Like `FormData` does for strings, it sets no
-/// `Content-Type`, which the server ignores.
-fn descriptor_part(descriptor: &Descriptor) -> Part {
-    // INVARIANT: The descriptor only holds strings and string maps, which always serialize.
-    Part::bytes(serde_json::to_vec(descriptor).expect("descriptor serializes to JSON"))
-}
-
-impl BatchOperation {
-    /// Adds the descriptor part and, for inserts, the payload part of the operation at `index`.
-    async fn add_to_form(self, form: Form, index: usize) -> crate::Result<Form> {
-        let descriptor = match self {
-            BatchOperation::Get { key, .. } => Descriptor::Get { key },
-            BatchOperation::Delete { key } => Descriptor::Delete { key },
-            BatchOperation::Head { key } => Descriptor::Head { key },
-            BatchOperation::Insert {
-                key,
-                metadata,
-                compression,
-                body,
-            } => return add_insert_to_form(form, index, key, metadata, compression, body).await,
-        };
-
-        Ok(form.part(index.to_string(), descriptor_part(&descriptor)))
-    }
-}
-
-/// Adds the descriptor and payload parts of the insert at `index`.
-async fn add_insert_to_form(
-    form: Form,
-    index: usize,
-    key: Option<ObjectKey>,
-    mut metadata: Metadata,
-    compression: Option<CompressionMode>,
-    body: PutBody,
-) -> crate::Result<Form> {
-    metadata.compression = compression.map(CompressionMode::compression);
-    let descriptor = Descriptor::Insert {
-        key,
-        metadata: WriteMetadata::from(metadata),
-    };
-
-    // The batch request carries a `Content-Length` only if every part's length is known up front.
-    // Compressed parts are streamed, so their length is unknown.
-    let encoded = put::encode_body(body, compression).await?;
-    let payload = match encoded.length {
-        Some(length) => Part::stream_with_length(encoded.body, length),
-        None => Part::stream(encoded.body),
-    };
-
-    Ok(form
-        .part(index.to_string(), descriptor_part(&descriptor))
-        .part(batch::payload_part_name(index), payload))
-}
+// The wire format of requests and responses is documented in `objectstore_types::batch`.
 
 /// Builds the request body for `operations`, numbering them by their position.
 async fn build_form(operations: Vec<BatchOperation>) -> crate::Result<Form> {
     let mut form = Form::new();
     for (index, operation) in operations.into_iter().enumerate() {
-        form = operation.add_to_form(form, index).await?;
+        let (descriptor, payload) = match operation {
+            BatchOperation::Get { key, .. } => (Descriptor::Get { key }, None),
+            BatchOperation::Delete { key } => (Descriptor::Delete { key }, None),
+            BatchOperation::Head { key } => (Descriptor::Head { key }, None),
+            BatchOperation::Insert {
+                key,
+                mut metadata,
+                compression,
+                body,
+            } => {
+                metadata.compression = compression.map(CompressionMode::compression);
+
+                // The batch request carries a `Content-Length` only if every part's length is
+                // known up front. Compressed parts are streamed, so their length is unknown.
+                let encoded = put::encode_body(body, compression).await?;
+                let payload = match encoded.length {
+                    Some(length) => Part::stream_with_length(encoded.body, length),
+                    None => Part::stream(encoded.body),
+                };
+
+                let metadata = WriteMetadata::from(metadata);
+                (Descriptor::Insert { key, metadata }, Some(payload))
+            }
+        };
+
+        // INVARIANT: The descriptor only holds strings and string maps, which always serialize.
+        let descriptor = serde_json::to_vec(&descriptor).expect("descriptor serializes to JSON");
+        form = form.part(index.to_string(), Part::bytes(descriptor));
+
+        if let Some(payload) = payload {
+            form = form.part(batch::payload_part_name(index), payload);
+        }
     }
+
     Ok(form)
 }
 
@@ -452,10 +420,8 @@ fn resolve(ctx: &OperationContext, part: ResultPart) -> crate::Result<Resolved> 
         return Err(Error::OperationFailure { status, message });
     }
 
-    // Prioritize the server-provided key, which is the only one of an insert without a key.
-    let key = key
-        .or_else(|| ctx.key().map(str::to_owned))
-        .ok_or_else(|| Error::MalformedResponse("result is missing the object key".to_owned()))?;
+    let key =
+        key.ok_or_else(|| Error::MalformedResponse("result is missing the object key".to_owned()))?;
 
     let result = match ctx {
         OperationContext::Get { .. } if status == 404 => OperationResult::Get(key, Ok(None)),
@@ -531,9 +497,10 @@ fn stream_parts(
 /// stream with one [`OperationResult::Error`], keeping the results read before it.
 async fn collect_results(
     multipart: Multipart<'_>,
-    mut contexts: BTreeMap<usize, OperationContext>,
+    contexts: &[OperationContext],
 ) -> Vec<OperationResult> {
     let mut parts = Box::pin(stream_parts(multipart).peekable());
+    let mut contexts: BTreeMap<usize, &OperationContext> = contexts.iter().enumerate().collect();
     let mut results = Vec::new();
 
     while let Some(part) = parts.next().await {
@@ -565,14 +532,14 @@ async fn collect_results(
                     "invalid result for the operation at index {index}: {error}"
                 ))
             })
-            .and_then(|part| resolve(&ctx, part));
+            .and_then(|part| resolve(ctx, part));
 
         let result = match resolved {
             Ok(Resolved::Done(result)) => result,
             Ok(Resolved::Get { key, metadata }) => {
                 let is_payload = |next: &Result<ResponsePart, _>| matches!(next, Ok(part) if part.name == Some(PartName::Payload(index)));
                 match parts.as_mut().next_if(is_payload).await {
-                    Some(Ok(payload)) => complete_get(&ctx, key, metadata, payload.body),
+                    Some(Ok(payload)) => complete_get(ctx, key, metadata, payload.body),
                     _ => {
                         let error = Error::MalformedResponse(format!(
                             "response has no payload part for the operation at index {index}"
@@ -765,12 +732,13 @@ async fn execute_individual(op: BatchOperation, session: &Session) -> OperationR
 async fn execute_batch(operations: Vec<BatchOperation>, session: &Session) -> Vec<OperationResult> {
     let contexts: Vec<_> = operations.iter().map(OperationContext::from).collect();
     let span = OperationSpan::batch(session, operations.len());
-    match span.instrument(send_batch(session, operations)).await {
+    let request = send_batch(session, operations, &contexts);
+    match span.instrument(request).await {
         Ok(results) => results,
         Err(e) => {
             let shared = Arc::new(e);
             contexts
-                .into_iter()
+                .iter()
                 .map(|ctx| error_result(ctx, Error::Batch(shared.clone())))
                 .collect()
         }
@@ -888,9 +856,13 @@ impl ManyBuilder {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use http_body_util::BodyExt as _;
 
+    use super::OperationResult::{Delete, Get, Put};
     use super::*;
+    use crate::Error::{MalformedResponse, OperationFailure};
 
     /// Creates a dummy sized op for use in `iter_batches` tests.
     fn op(size: u64) -> (BatchOperation, u64) {
@@ -1026,6 +998,12 @@ mod tests {
         }
     }
 
+    fn delete(key: &str) -> BatchOperation {
+        BatchOperation::Delete {
+            key: key.to_owned(),
+        }
+    }
+
     fn insert(key: Option<&str>, metadata: Metadata, body: &'static [u8]) -> BatchOperation {
         BatchOperation::Insert {
             key: key.map(str::to_owned),
@@ -1060,44 +1038,41 @@ mod tests {
             insert(None, Metadata::default(), b"keyless"),
         ];
 
-        let body = encode(operations).await;
+        let request = encode(operations).await;
 
         // Descriptors and payloads are named by index, with nothing but `Content-Disposition`.
+        let metadata = r#"{"content_type":"image/png","custom":{"build":"123"}}"#;
+        let insert = format!(r#"{{"kind":"insert","key":"b","metadata":{metadata}}}"#);
         let parts = [
-            "name=\"0\"\r\n\r\n{\"kind\":\"get\",\"key\":\"a/résumé\"}",
-            "name=\"1\"\r\n\r\n{\"kind\":\"insert\",\"key\":\"b\",\"metadata\":{\"content_type\":\"image/png\",\"custom\":{\"build\":\"123\"}}}",
-            "name=\"1.payload\"\r\n\r\npng",
-            "name=\"2\"\r\n\r\n{\"kind\":\"insert\",\"metadata\":{}}",
-            "name=\"2.payload\"\r\n\r\nkeyless",
+            ("0", r#"{"kind":"get","key":"a/résumé"}"#),
+            ("1", &insert),
+            ("1.payload", "png"),
+            ("2", r#"{"kind":"insert","metadata":{}}"#),
+            ("2.payload", "keyless"),
         ];
-        let mut rest = body.as_str();
-        for part in parts {
-            let expected = format!("Content-Disposition: form-data; {part}");
-            let start = rest
-                .find(&expected)
-                .unwrap_or_else(|| panic!("{expected} in {body}"));
+
+        let mut rest = request.as_str();
+        for (name, body) in parts {
+            let expected = format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n{body}");
+            let Some(start) = rest.find(&expected) else {
+                panic!("{expected} in {request}");
+            };
             rest = &rest[start + expected.len()..];
         }
-        assert!(!body.to_lowercase().contains("x-sn-"));
+        assert!(!request.to_lowercase().contains("x-sn-"));
     }
 
-    /// Builds a part of a canned response. Payload parts get a filename, like the server's.
+    /// Builds a part of a canned response.
     fn part(name: &str, body: &str) -> String {
-        let filename = match name.strip_suffix(PAYLOAD_SUFFIX) {
-            Some(index) => format!("; filename=\"{index}\""),
-            None => String::new(),
-        };
-        format!(
-            "--b\r\nContent-Disposition: form-data; name=\"{name}\"{filename}\r\n\r\n{body}\r\n"
-        )
+        format!("--b\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{body}\r\n")
     }
 
     /// Runs `collect_results` over the parts of a response.
     async fn collect(parts: &[String], operations: &[BatchOperation]) -> Vec<OperationResult> {
         let body = Bytes::from(parts.concat() + "--b--\r\n");
-        let contexts = operations.iter().map(OperationContext::from).enumerate();
+        let contexts: Vec<_> = operations.iter().map(OperationContext::from).collect();
         let stream = futures_util::stream::once(async { Ok::<_, io::Error>(body) });
-        collect_results(Multipart::new(stream, "b"), contexts.collect()).await
+        collect_results(Multipart::new(stream, "b"), &contexts).await
     }
 
     #[tokio::test]
@@ -1107,61 +1082,73 @@ mod tests {
             get("b"),
             get("c"),
             insert(None, Metadata::default(), b""),
-            BatchOperation::Delete {
-                key: "e".to_owned(),
-            },
-            get("f"),
+            delete("e"),
         ];
         let metadata = r#""metadata":{"content_type":"text/plain","custom":{"build":"1"}}"#;
+        let failure = r#"{"status":400,"error":{"detail":"bad","causes":["why"]}}"#;
         let parts = [
             part("1", &format!(r#"{{"status":200,"key":"b",{metadata}}}"#)),
             part("1.payload", "hello"),
             part("0", r#"{"status":201,"key":"a"}"#),
             part("2", r#"{"status":404,"key":"c"}"#),
-            part(
-                "3",
-                r#"{"status":400,"error":{"detail":"bad","causes":["why"]}}"#,
-            ),
-            // A get without its payload part fails. Operation 4 has no result at all.
-            part("5", &format!(r#"{{"status":200,"key":"f",{metadata}}}"#)),
+            part("3", failure),
+            part("4", r#"{"status":204,"key":"e"}"#),
         ];
 
-        let mut results = collect(&parts, &operations).await;
+        let mut results = collect(&parts, &operations).await.into_iter();
 
-        let OperationResult::Get(_, Ok(Some(object))) = results.remove(0) else {
+        let Some(Get(key, Ok(Some(object)))) = results.next() else {
             panic!("expected an object");
         };
+        assert_eq!(key, "b");
         assert_eq!(object.metadata.custom["build"], "1");
         assert_eq!(object.payload().await.unwrap().as_ref(), b"hello");
 
-        assert!(matches!(
-            results.as_slice(),
-            [
-                OperationResult::Put(a, Ok(_)),
-                OperationResult::Get(c, Ok(None)),
-                OperationResult::Put(d, Err(Error::OperationFailure { status: 400, .. })),
-                OperationResult::Get(f, Err(Error::MalformedResponse(_))),
-                OperationResult::Delete(e, Err(Error::MalformedResponse(_))),
-            ] if [a, c, d, e, f] == ["a", "c", "<unknown>", "e", "f"]
-        ));
+        assert_matches!(results.next(), Some(Put(key, Ok(_))) if key == "a");
+        assert_matches!(results.next(), Some(Get(key, Ok(None))) if key == "c");
+        let failed = results.next().unwrap();
+        assert_matches!(failed, Put(_, Err(OperationFailure { status: 400, .. })));
+        assert_matches!(results.next(), Some(Delete(key, Ok(()))) if key == "e");
+        assert!(results.next().is_none());
+    }
+
+    #[tokio::test]
+    async fn response_get_without_payload_fails() {
+        let operations = [get("a"), get("b")];
+        let found = r#"{"status":200,"key":"a","metadata":{"content_type":"text/plain"}}"#;
+        let parts = [part("0", found), part("1", r#"{"status":404,"key":"b"}"#)];
+
+        let mut results = collect(&parts, &operations).await.into_iter();
+
+        assert_matches!(results.next(), Some(Get(_, Err(MalformedResponse(_)))));
+        assert_matches!(results.next(), Some(Get(_, Ok(None))));
+        assert!(results.next().is_none());
+    }
+
+    #[tokio::test]
+    async fn response_operation_without_result_fails() {
+        let operations = [get("a"), delete("b")];
+        let parts = [part("0", r#"{"status":404,"key":"a"}"#)];
+
+        let mut results = collect(&parts, &operations).await.into_iter();
+
+        assert_matches!(results.next(), Some(Get(_, Ok(None))));
+        assert_matches!(results.next(), Some(Delete(key, Err(MalformedResponse(_)))) if key == "b");
+        assert!(results.next().is_none());
     }
 
     #[tokio::test]
     async fn response_broken_body_fails_remaining_operations() {
         let operations = [get("a"), get("b")];
-        let parts = [
-            part("0", r#"{"status":404,"key":"a"}"#),
-            "--b\r\nnot a header line\r\n\r\n".to_owned(),
-        ];
+        let broken = "--b\r\nnot a header line\r\n\r\n".to_owned();
+        let parts = [part("0", r#"{"status":404,"key":"a"}"#), broken];
 
-        let results = collect(&parts, &operations).await;
-        assert!(matches!(
-            results.as_slice(),
-            [
-                OperationResult::Get(_, Ok(None)),
-                OperationResult::Error(Error::Multipart(_)),
-                OperationResult::Get(_, Err(_)),
-            ]
-        ));
+        let mut results = collect(&parts, &operations).await.into_iter();
+
+        assert_matches!(results.next(), Some(Get(_, Ok(None))));
+        let error = results.next().unwrap();
+        assert_matches!(error, OperationResult::Error(Error::Multipart(_)));
+        assert_matches!(results.next(), Some(Get(_, Err(_))));
+        assert!(results.next().is_none());
     }
 }

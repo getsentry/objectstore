@@ -608,11 +608,12 @@ async fn batch_operations() {
 
     // First batch: 4 PUT operations
     // key-2 uses default compression (zstd), others are uncompressed
+    let first_payload = &b"first \x00\xff\xfe\r\n--boundary object"[..];
     let results: Vec<_> = session
         .many()
         .push(
             session
-                .put(&b"first \x00\xff\xfe\r\n--boundary object"[..])
+                .put(first_payload)
                 .compress(None)
                 .filename("report.pdf")
                 .key("key-1/résumé"),
@@ -683,10 +684,7 @@ async fn batch_operations() {
     assert_eq!(get1.metadata.compression, None);
     assert!(get1.metadata.time_created.is_some());
     assert_eq!(get1.metadata.filename.as_deref(), Some("report.pdf"));
-    assert_eq!(
-        get1.payload().await.unwrap().as_ref(),
-        b"first \x00\xff\xfe\r\n--boundary object"
-    );
+    assert_eq!(get1.payload().await.unwrap().as_ref(), first_payload);
 
     // GET key-2 (automatic decompression)
     let get2 = gets
