@@ -256,8 +256,8 @@ fn parse_header_part(part: Part, access_time: Timestamp) -> Result<Operation, Ba
             })
         })
         .transpose()?;
-    let required_key = || {
-        key.clone().ok_or_else(|| {
+    let required_key = |key: Option<ObjectKey>| {
+        key.ok_or_else(|| {
             BatchError::BadRequest(format!(
                 "missing {HEADER_BATCH_OPERATION_KEY} header for {kind} operation"
             ))
@@ -266,13 +266,13 @@ fn parse_header_part(part: Part, access_time: Timestamp) -> Result<Operation, Ba
 
     let operation = match kind.as_str() {
         "get" => Operation::Get(Get {
-            key: required_key()?,
+            key: required_key(key)?,
         }),
         "delete" => Operation::Delete(Delete {
-            key: required_key()?,
+            key: required_key(key)?,
         }),
         "head" => Operation::Head(Head {
-            key: required_key()?,
+            key: required_key(key)?,
         }),
         "insert" => Operation::Insert(Box::new(Insert {
             metadata: Metadata::from_insert_headers(&part.headers, "", access_time)?,
