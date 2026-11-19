@@ -59,10 +59,6 @@ impl Services {
     /// This returns a [`ServiceState`], which is a shared reference to the services suitable for
     /// use in the web server.
     pub async fn spawn(config: Config) -> Result<ServiceState> {
-        tokio::spawn(track_runtime_metrics(config.runtime.metrics_interval));
-        #[cfg(target_os = "linux")]
-        tokio::spawn(track_allocator_metrics(config.runtime.metrics_interval));
-
         // Absent config means no transport, and therefore no reporting.
         #[cfg(feature = "storage-cogs")]
         let streams = config
@@ -72,6 +68,22 @@ impl Services {
             .unwrap_or_default();
         #[cfg(not(feature = "storage-cogs"))]
         let streams = ChangeStreamFactory::default();
+        let backend = backend::from_config(config.storage.clone(), &streams).await?;
+        Self::spawn_with_backend(config, backend).await
+    }
+
+    /// Spawns all services like [`spawn`](Self::spawn), but stores objects in `backend`.
+    ///
+    /// The `storage` section of `config` is ignored. This lets tests run the server on backends
+    /// that cannot be configured, such as an in-memory high-volume tier.
+    pub async fn spawn_with_backend(
+        config: Config,
+        backend: Box<dyn backend::common::Backend>,
+    ) -> Result<ServiceState> {
+        tokio::spawn(track_runtime_metrics(config.runtime.metrics_interval));
+        #[cfg(target_os = "linux")]
+        tokio::spawn(track_allocator_metrics(config.runtime.metrics_interval));
+
         let cipher = match config.service.cipher()? {
             Some(cipher) => cipher,
             None => {
@@ -82,7 +94,6 @@ impl Services {
                 cipher
             }
         };
-        let backend = backend::from_config(config.storage.clone(), &streams).await?;
         let concurrency = ConcurrencyLimiter::new(config.service.max_concurrency)
             .with_queue(config.service.concurrency_queue)
             .with_timeout(config.service.concurrency_timeout)

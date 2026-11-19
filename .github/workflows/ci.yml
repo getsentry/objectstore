@@ -147,6 +147,17 @@ jobs:
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
+      # The e2e tests run the server binary, whose tiered storage needs Bigtable.
+      - name: Start Bigtable Emulator
+        run: |
+          docker run -d \
+            --name bigtable-emulator \
+            -p 8086:8086 \
+            -e BIGTABLE_EMULATOR_HOST=localhost:8086 \
+            -v $PWD/devservices/run-bigtable.sh:/run-bigtable.sh \
+            ghcr.io/getsentry/image-mirror-google-cloud-sdk:588.0.0 \
+            /run-bigtable.sh
+
       - name: Install Rust Toolchain
         run: |
           rustup toolchain install stable --profile minimal --no-self-update

@@ -30,32 +30,36 @@ const PADDING: usize = 1024 * 1024;
 const MIN_UPLOAD_LENGTH: u64 = PADDING as u64 + 1;
 
 async fn test_server() -> TestServer {
-    TestServer::with_config(Config {
-        auth: AuthZ {
-            enforce: false,
+    TestServer::tiered()
+        .config(Config {
+            auth: AuthZ {
+                enforce: false,
+                ..Default::default()
+            },
             ..Default::default()
-        },
-        ..Default::default()
-    })
-    .await
+        })
+        .build()
+        .await
 }
 
 async fn test_server_with_protected_session() -> Result<TestServer> {
-    Ok(TestServer::with_config(Config {
-        auth: AuthZ {
-            enforce: false,
+    Ok(TestServer::tiered()
+        .config(Config {
+            auth: AuthZ {
+                enforce: false,
+                ..Default::default()
+            },
+            service: Service {
+                encryption: Some(EncryptionConfig {
+                    active_key_id: "test".into(),
+                    keys: BTreeMap::from([("test".into(), [7; 32].into())]),
+                }),
+                ..Default::default()
+            },
             ..Default::default()
-        },
-        service: Service {
-            encryption: Some(EncryptionConfig {
-                active_key_id: "test".into(),
-                keys: BTreeMap::from([("test".into(), [7; 32].into())]),
-            }),
-            ..Default::default()
-        },
-        ..Default::default()
-    })
-    .await)
+        })
+        .build()
+        .await)
 }
 
 /// Sends a raw HTTP/1.1 `PUT`, preserving the caller's exact body framing headers.
@@ -253,7 +257,7 @@ async fn test_resumable_upload() -> Result<()> {
         .header(HEADER_UPLOAD_OFFSET, "*")
         .send()
         .await?;
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::GONE);
     Ok(())
 }
 
@@ -280,7 +284,7 @@ async fn test_resumable_upload_cancel() -> Result<()> {
         .header(HEADER_UPLOAD_OFFSET, "*")
         .send()
         .await?;
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::GONE);
     assert_eq!(
         client.get(server.url(OBJECT_PATH)).send().await?.status(),
         StatusCode::NOT_FOUND

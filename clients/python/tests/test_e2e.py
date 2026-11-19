@@ -139,8 +139,15 @@ class Server:
         env = {
             **os.environ,
             "OS__HTTP_ADDR": addr,
-            "OS__STORAGE__TYPE": "filesystem",
-            "OS__STORAGE__PATH": self._tempdir,
+            # Requires the Bigtable emulator from devservices.
+            "OS__STORAGE__TYPE": "tiered",
+            "OS__STORAGE__HIGH_VOLUME__TYPE": "bigtable",
+            "OS__STORAGE__HIGH_VOLUME__ENDPOINT": "localhost:8086",
+            "OS__STORAGE__HIGH_VOLUME__PROJECT_ID": "testing",
+            "OS__STORAGE__HIGH_VOLUME__INSTANCE_NAME": "objectstore",
+            "OS__STORAGE__HIGH_VOLUME__TABLE_NAME": "objectstore",
+            "OS__STORAGE__LONG_TERM__TYPE": "filesystem",
+            "OS__STORAGE__LONG_TERM__PATH": self._tempdir,
             "OS__LOG__LEVEL": "trace",
             "OS__AUTH__ENFORCE": "true",
             "OS__AUTH__KEYS": env_key_map,

@@ -15,5 +15,7 @@ pub mod observability;
 pub mod rate_limits;
 pub mod resumable;
 pub mod state;
+#[cfg(test)]
+mod testing;
 pub mod usecases;
 pub mod web;
