@@ -70,8 +70,9 @@ single storage system optimally handles both small, frequently-accessed objects
 and large, infrequently-accessed ones:
 
 - **High-volume backend** (typically
-  [BigTable](backend::StorageConfig::BigTable)): optimized for low-latency reads
-  and writes of small objects. Objects in practice are small (metadata blobs,
+  [BigTable](backend::HighVolumeStorageConfig::BigTable) or
+  [RocksDB](backend::HighVolumeStorageConfig::RocksDb)): optimized for low-latency
+  reads and writes of small objects. Objects in practice are small (metadata blobs,
   event attachments, etc.), so this path handles the majority of traffic by
   volume.
 - **Long-term backend** (typically [GCS](backend::StorageConfig::Gcs)):
@@ -83,7 +84,8 @@ size to the high-volume backend; objects exceeding it go to the long-term
 backend. The backend rejects Resumable Upload creation requests when the
 given object size is below this threshold.
 
-See [`backend::StorageConfig`] for available backend implementations.
+See [`backend::StorageConfig`] for available single backends and
+[`backend::HighVolumeStorageConfig`] for the high-volume choices.
 
 ## Redirect Tombstones
 

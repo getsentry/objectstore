@@ -502,7 +502,7 @@ pub struct Config {
     ///
     /// For tiered storage, sub-backend fields are nested under `high_volume` and `long_term`:
     /// - `OS__STORAGE__TYPE=tiered`
-    /// - `OS__STORAGE__HIGH_VOLUME__TYPE=bigtable`
+    /// - `OS__STORAGE__HIGH_VOLUME__TYPE=bigtable` or `rocksdb`
     /// - `OS__STORAGE__LONG_TERM__TYPE=gcs`
     ///
     /// # Example (tiered)
@@ -515,6 +515,19 @@ pub struct Config {
     ///     project_id: my-project
     ///     instance_name: objectstore
     ///     table_name: objectstore
+    ///   long_term:
+    ///     type: gcs
+    ///     bucket: my-objectstore-bucket
+    /// ```
+    ///
+    /// # Example (tiered with RocksDB)
+    ///
+    /// ```yaml
+    /// storage:
+    ///   type: tiered
+    ///   high_volume:
+    ///     type: rocksdb
+    ///     path: /data/high-volume
     ///   long_term:
     ///     type: gcs
     ///     bucket: my-objectstore-bucket
@@ -1127,7 +1140,9 @@ mod tests {
             let StorageConfig::Tiered(c) = &dbg!(&config).storage else {
                 panic!("expected tiered storage");
             };
-            let HighVolumeStorageConfig::BigTable(hv) = &c.high_volume;
+            let HighVolumeStorageConfig::BigTable(hv) = &c.high_volume else {
+                panic!("expected bigtable high-volume storage");
+            };
             assert_eq!(hv.project_id, "my-project");
             assert_eq!(hv.rpc_timeout, Duration::from_secs(2));
             let StorageConfig::Gcs(lt) = c.long_term.as_ref() else {
@@ -1156,11 +1171,77 @@ mod tests {
             let StorageConfig::Tiered(c) = &dbg!(&config).storage else {
                 panic!("expected tiered storage");
             };
-            let HighVolumeStorageConfig::BigTable(hv) = &c.high_volume;
+            let HighVolumeStorageConfig::BigTable(hv) = &c.high_volume else {
+                panic!("expected bigtable high-volume storage");
+            };
             assert_eq!(hv.project_id, "my-project");
             assert_eq!(hv.instance_name, "my-instance");
             assert_eq!(hv.table_name, "my-table");
             assert_eq!(hv.rpc_timeout, Duration::from_millis(750));
+            let StorageConfig::FileSystem(lt) = c.long_term.as_ref() else {
+                panic!("expected filesystem long_term");
+            };
+            assert_eq!(lt.path, Path::new("/data/lt"));
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn tiered_storage_with_rocksdb_via_yaml() {
+        let mut tempfile = tempfile::NamedTempFile::new().unwrap();
+        tempfile
+            .write_all(
+                br#"
+            storage:
+                type: tiered
+                high_volume:
+                    type: rocksdb
+                    path: /data/high-volume
+                long_term:
+                    type: gcs
+                    bucket: my-objectstore-bucket
+            "#,
+            )
+            .unwrap();
+
+        figment::Jail::expect_with(|_jail| {
+            let config = Config::load(Some(tempfile.path())).unwrap();
+
+            let StorageConfig::Tiered(c) = &dbg!(&config).storage else {
+                panic!("expected tiered storage");
+            };
+            let HighVolumeStorageConfig::RocksDb(hv) = &c.high_volume else {
+                panic!("expected RocksDB high-volume storage");
+            };
+            assert_eq!(hv.path, Path::new("/data/high-volume"));
+            let StorageConfig::Gcs(lt) = c.long_term.as_ref() else {
+                panic!("expected gcs long_term");
+            };
+            assert_eq!(lt.bucket, "my-objectstore-bucket");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn tiered_storage_with_rocksdb_via_env() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("OS__STORAGE__TYPE", "tiered");
+            jail.set_env("OS__STORAGE__HIGH_VOLUME__TYPE", "rocksdb");
+            jail.set_env("OS__STORAGE__HIGH_VOLUME__PATH", "/data/high-volume");
+            jail.set_env("OS__STORAGE__LONG_TERM__TYPE", "filesystem");
+            jail.set_env("OS__STORAGE__LONG_TERM__PATH", "/data/lt");
+
+            let config = Config::load(None).unwrap();
+
+            let StorageConfig::Tiered(c) = &dbg!(&config).storage else {
+                panic!("expected tiered storage");
+            };
+            let HighVolumeStorageConfig::RocksDb(hv) = &c.high_volume else {
+                panic!("expected RocksDB high-volume storage");
+            };
+            assert_eq!(hv.path, Path::new("/data/high-volume"));
             let StorageConfig::FileSystem(lt) = c.long_term.as_ref() else {
                 panic!("expected filesystem long_term");
             };

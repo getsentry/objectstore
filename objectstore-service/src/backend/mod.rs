@@ -2,7 +2,7 @@
 //!
 //! This module contains the [`Backend`](common::Backend) trait and its
 //! implementations. Each backend adapts a specific storage system (BigTable,
-//! GCS, local filesystem, S3-compatible) to a uniform interface that
+//! GCS, local filesystem, RocksDB, S3-compatible) to a uniform interface that
 //! [`StorageService`](crate::StorageService) consumes.
 //!
 //! Two-tier routing is encapsulated in [`TieredStorage`](tiered::TieredStorage)
@@ -104,7 +104,7 @@ async fn from_leaf_config(
 /// Configuration for the high-volume backend in a [`tiered::TieredStorageConfig`].
 ///
 /// Only backends that implement [`common::HighVolumeBackend`] are valid here.
-/// Currently this is limited to BigTable.
+/// Currently this is limited to BigTable and RocksDB.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum HighVolumeStorageConfig {
@@ -112,6 +112,11 @@ pub enum HighVolumeStorageConfig {
     ///
     /// [Google Bigtable]: https://cloud.google.com/bigtable
     BigTable(bigtable::BigTableConfig),
+
+    /// Embedded RocksDB backend (type `"rocksdb"`).
+    ///
+    /// Stores the database in a local directory; see [`rocksdb::RocksDbConfig`].
+    RocksDb(rocksdb::RocksDbConfig),
 }
 
 /// Constructs a type-erased [`common::HighVolumeBackend`] from the given config.
@@ -123,5 +128,26 @@ async fn hv_from_config(
         HighVolumeStorageConfig::BigTable(c) => {
             Box::new(bigtable::BigTableBackend::new(c, streams).await?)
         }
+        HighVolumeStorageConfig::RocksDb(c) => Box::new(rocksdb::RocksDbBackend::new(c, streams)?),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn rocksdb_high_volume_config_builds_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = HighVolumeStorageConfig::RocksDb(rocksdb::RocksDbConfig {
+            path: dir.path().to_path_buf(),
+            cogs: None,
+        });
+
+        let backend = hv_from_config(config, &ChangeStreamFactory::default())
+            .await
+            .unwrap();
+
+        assert_eq!(backend.name(), "rocksdb");
+    }
 }
