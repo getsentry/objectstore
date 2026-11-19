@@ -1,32 +1,29 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use bytes::Bytes;
 use futures_util::{Stream, StreamExt as _};
-use multer::Field;
-use objectstore_types::batch::{MAX_BATCH_OPERATIONS, MAX_BATCH_PART_SIZE};
-use objectstore_types::headers;
-use objectstore_types::metadata::{Compression, Metadata};
-use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
-use reqwest::multipart::Part;
+use multer::Multipart;
+use objectstore_types::batch::{
+    self, Descriptor, MAX_BATCH_OPERATIONS, MAX_BATCH_PART_SIZE, PAYLOAD_SUFFIX, ResultPart,
+};
+use objectstore_types::metadata::{Compression, Metadata, ReadMetadata, WriteMetadata};
+use reqwest::header::CONTENT_TYPE;
+use reqwest::multipart::{Form, Part};
 
 use crate::error::Error;
 use crate::instrument::OperationSpan;
 use crate::metadata;
-use crate::put::{CompressionMode, PutBody};
+use crate::put::{self, CompressionMode, PutBody};
 use crate::response::ResponseExt as _;
 use crate::{
     DeleteBuilder, DeleteResponse, GetBuilder, GetResponse, HeadBuilder, HeadResponse, ObjectKey,
-    PutBuilder, PutResponse, Session, get, put,
+    PutBuilder, PutResponse, Session, get,
 };
-
-const HEADER_BATCH_OPERATION_KEY: &str = "x-sn-batch-operation-key";
-const HEADER_BATCH_OPERATION_KIND: &str = "x-sn-batch-operation-kind";
-const HEADER_BATCH_OPERATION_INDEX: &str = "x-sn-batch-operation-index";
-const HEADER_BATCH_OPERATION_STATUS: &str = "x-sn-batch-operation-status";
 
 /// Default maximum number of concurrent individual (non-batch) requests.
 ///
@@ -145,59 +142,6 @@ impl From<HeadBuilder> for BatchOperation {
     }
 }
 
-impl BatchOperation {
-    async fn into_part(self) -> crate::Result<Part> {
-        match self {
-            BatchOperation::Get { key, .. } => {
-                let headers = operation_headers("get", Some(&key));
-                Ok(Part::text("").headers(headers))
-            }
-            BatchOperation::Insert {
-                key,
-                mut metadata,
-                compression,
-                body,
-            } => {
-                let mut headers = operation_headers("insert", key.as_deref());
-                metadata.compression = compression.map(CompressionMode::compression);
-                headers.extend(metadata.to_headers("")?);
-
-                // The batch request carries a `Content-Length` only if every part's length is
-                // known up front. Compressed parts are streamed, so their length is unknown.
-                let encoded = put::encode_body(body, compression).await?;
-                let part = match encoded.length {
-                    Some(length) => Part::stream_with_length(encoded.body, length),
-                    None => Part::stream(encoded.body),
-                };
-                Ok(part.headers(headers))
-            }
-            BatchOperation::Delete { key } => {
-                let headers = operation_headers("delete", Some(&key));
-                Ok(Part::text("").headers(headers))
-            }
-            BatchOperation::Head { key } => {
-                let headers = operation_headers("head", Some(&key));
-                Ok(Part::text("").headers(headers))
-            }
-        }
-    }
-}
-
-fn operation_headers(operation: &str, key: Option<&str>) -> HeaderMap {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        HeaderName::from_static(HEADER_BATCH_OPERATION_KIND),
-        HeaderValue::from_str(operation).expect("operation kind is always a valid header value"),
-    );
-    if let Some(key) = key {
-        headers.insert(
-            HeaderName::from_static(HEADER_BATCH_OPERATION_KEY),
-            headers::encode_header_value(key),
-        );
-    }
-    headers
-}
-
 /// The result of an individual operation.
 #[derive(Debug)]
 pub enum OperationResult {
@@ -216,8 +160,8 @@ pub enum OperationResult {
     /// An error occurred while parsing or correlating a response part.
     ///
     /// This makes it impossible to attribute the error to a specific operation.
-    /// It can happen if the response contains malformed or missing headers, references
-    /// unknown operation indices, or if a network error occurs while reading a response part.
+    /// It can happen if the response contains a part with an invalid name, references
+    /// an unknown operation index, or if a network error occurs while reading a response part.
     Error(Error),
 }
 
@@ -281,142 +225,13 @@ enum Classified {
 }
 
 /// Creates a typed error [`OperationResult`] for the given operation context.
-fn error_result(ctx: OperationContext, error: Error) -> OperationResult {
+fn error_result(ctx: &OperationContext, error: Error) -> OperationResult {
     let key = ctx.key().unwrap_or("<unknown>").to_owned();
     match ctx {
         OperationContext::Get { .. } => OperationResult::Get(key, Err(error)),
         OperationContext::Insert { .. } => OperationResult::Put(key, Err(error)),
         OperationContext::Delete { .. } => OperationResult::Delete(key, Err(error)),
         OperationContext::Head { .. } => OperationResult::Head(key, Err(error)),
-    }
-}
-
-impl OperationResult {
-    async fn from_field(
-        field: Field<'_>,
-        context_map: &HashMap<usize, OperationContext>,
-    ) -> (Option<usize>, Self) {
-        match Self::try_from_field(field, context_map).await {
-            Ok((index, result)) => (Some(index), result),
-            Err(e) => (None, OperationResult::Error(e)),
-        }
-    }
-
-    async fn try_from_field(
-        field: Field<'_>,
-        context_map: &HashMap<usize, OperationContext>,
-    ) -> Result<(usize, Self), Error> {
-        let mut headers = field.headers().clone();
-
-        let index: usize = headers
-            .remove(HEADER_BATCH_OPERATION_INDEX)
-            .and_then(|v| v.to_str().ok().and_then(|s| s.parse().ok()))
-            .ok_or_else(|| {
-                Error::MalformedResponse(format!(
-                    "missing or invalid {HEADER_BATCH_OPERATION_INDEX} header"
-                ))
-            })?;
-
-        let status: u16 = headers
-            .remove(HEADER_BATCH_OPERATION_STATUS)
-            .and_then(|v| {
-                v.to_str().ok().and_then(|s| {
-                    // Status header format is "code reason" (e.g., "200 OK")
-                    // Split on first space and parse the code
-                    s.split_once(' ')
-                        .map(|(code, _)| code)
-                        .unwrap_or(s)
-                        .parse()
-                        .ok()
-                })
-            })
-            .ok_or_else(|| {
-                Error::MalformedResponse(format!(
-                    "missing or invalid {HEADER_BATCH_OPERATION_STATUS} header"
-                ))
-            })?;
-
-        let ctx = context_map.get(&index).ok_or_else(|| {
-            Error::MalformedResponse(format!(
-                "response references unknown operation index {index}"
-            ))
-        })?;
-
-        // Prioritize the server-provided key, fall back to the one from context.
-        let key = headers
-            .remove(HEADER_BATCH_OPERATION_KEY)
-            .and_then(|v| headers::decode_header_value(&v).ok())
-            .or_else(|| ctx.key().map(str::to_owned));
-
-        let body = field.bytes().await?;
-
-        let is_error = status >= 400
-            && !(matches!(
-                ctx,
-                OperationContext::Get { .. } | OperationContext::Head { .. }
-            ) && status == 404);
-
-        // For error responses, the key may be absent (e.g., server-generated key inserts
-        // that fail before execution — the server never generated a key and the client
-        // never provided one). Use a sentinel fallback since there is no key to report.
-        // For success responses, the key is always required.
-        let key = match key {
-            Some(key) => key,
-            None if is_error => "<unknown>".to_owned(),
-            None => {
-                return Err(Error::MalformedResponse(format!(
-                    "missing or invalid {HEADER_BATCH_OPERATION_KEY} header"
-                )));
-            }
-        };
-        if is_error {
-            let message = String::from_utf8_lossy(&body).into_owned();
-            let error = Error::OperationFailure { status, message };
-
-            return Ok((
-                index,
-                match ctx {
-                    OperationContext::Get { .. } => OperationResult::Get(key, Err(error)),
-                    OperationContext::Insert { .. } => OperationResult::Put(key, Err(error)),
-                    OperationContext::Delete { .. } => OperationResult::Delete(key, Err(error)),
-                    OperationContext::Head { .. } => OperationResult::Head(key, Err(error)),
-                },
-            ));
-        }
-
-        let result = match ctx {
-            OperationContext::Get {
-                decompress,
-                accept_encoding,
-                ..
-            } => {
-                if status == 404 {
-                    OperationResult::Get(key, Ok(None))
-                } else {
-                    let mut metadata = Metadata::from_headers(&headers, "")?;
-
-                    let stream =
-                        futures_util::stream::once(async move { Ok::<_, io::Error>(body) }).boxed();
-                    let stream =
-                        get::maybe_decompress(stream, &mut metadata, *decompress, accept_encoding);
-
-                    OperationResult::Get(key, Ok(Some(GetResponse { metadata, stream })))
-                }
-            }
-            OperationContext::Insert { .. } => {
-                OperationResult::Put(key.clone(), Ok(PutResponse { key }))
-            }
-            OperationContext::Delete { .. } => OperationResult::Delete(key, Ok(())),
-            OperationContext::Head { .. } => {
-                if status == 404 {
-                    OperationResult::Head(key, Ok(None))
-                } else {
-                    let metadata = Metadata::from_headers(&headers, "")?;
-                    OperationResult::Head(key, Ok(Some(metadata)))
-                }
-            }
-        };
-        Ok((index, result))
     }
 }
 
@@ -476,23 +291,15 @@ impl OperationResults {
     }
 }
 
+/// Sends `operations` as one batch request and reads its results.
+///
+/// `contexts` holds the context of each operation, in the same order as `operations`.
 async fn send_batch(
     session: &Session,
     operations: Vec<BatchOperation>,
+    contexts: &[OperationContext],
 ) -> crate::Result<Vec<OperationResult>> {
-    let mut context_map: HashMap<usize, OperationContext> = operations
-        .iter()
-        .enumerate()
-        .map(|(idx, op)| (idx, OperationContext::from(op)))
-        .collect();
-    let num_operations = operations.len();
-
-    let mut form = reqwest::multipart::Form::new();
-    for op in operations {
-        let part = op.into_part().await?;
-        form = form.part("part", part);
-    }
-
+    let form = build_form(operations).await?;
     let request = session.batch_request()?.multipart(form);
     let response = request.send().await?.error_for_status_and_drain().await?;
 
@@ -507,32 +314,252 @@ async fn send_batch(
     // response. That's because `multer` doesn't drain nor expose its underlying stream after a
     // parse error.
     let byte_stream = response.bytes_stream().map(|r| r.map_err(io::Error::other));
-    let mut multipart = multer::Multipart::new(byte_stream, boundary);
+    let multipart = multer::Multipart::new(byte_stream, boundary);
 
-    let mut results = Vec::new();
-    let mut seen_indices = HashSet::new();
-    while let Some(field) = multipart.next_field().await? {
-        let (index, result) = OperationResult::from_field(field, &context_map).await;
-        if let Some(idx) = index {
-            seen_indices.insert(idx);
+    Ok(collect_results(multipart, contexts).await)
+}
+
+// The wire format of requests and responses is documented in `objectstore_types::batch`.
+
+/// Builds the request body for `operations`, numbering them by their position.
+async fn build_form(operations: Vec<BatchOperation>) -> crate::Result<Form> {
+    let mut form = Form::new();
+    for (index, operation) in operations.into_iter().enumerate() {
+        let (descriptor, payload) = match operation {
+            BatchOperation::Get { key, .. } => (Descriptor::Get { key }, None),
+            BatchOperation::Delete { key } => (Descriptor::Delete { key }, None),
+            BatchOperation::Head { key } => (Descriptor::Head { key }, None),
+            BatchOperation::Insert {
+                key,
+                mut metadata,
+                compression,
+                body,
+            } => {
+                metadata.compression = compression.map(CompressionMode::compression);
+
+                // The batch request carries a `Content-Length` only if every part's length is
+                // known up front. Compressed parts are streamed, so their length is unknown.
+                let encoded = put::encode_body(body, compression).await?;
+                let payload = match encoded.length {
+                    Some(length) => Part::stream_with_length(encoded.body, length),
+                    None => Part::stream(encoded.body),
+                };
+
+                let metadata = WriteMetadata::from(metadata);
+                (Descriptor::Insert { key, metadata }, Some(payload))
+            }
+        };
+
+        // INVARIANT: The descriptor only holds strings and string maps, which always serialize.
+        let descriptor = serde_json::to_vec(&descriptor).expect("descriptor serializes to JSON");
+        form = form.part(index.to_string(), Part::bytes(descriptor));
+
+        if let Some(payload) = payload {
+            form = form.part(batch::payload_part_name(index), payload);
         }
+    }
+
+    Ok(form)
+}
+
+/// The name of a part of the response, identifying the operation it belongs to.
+#[derive(Debug, PartialEq, Eq)]
+enum PartName {
+    /// The result part `"<i>"`.
+    Result(usize),
+    /// The payload part `"<i>.payload"`.
+    Payload(usize),
+}
+
+impl PartName {
+    fn parse(name: &str) -> Option<Self> {
+        match name.strip_suffix(PAYLOAD_SUFFIX) {
+            Some(index) => index.parse().ok().map(Self::Payload),
+            None => name.parse().ok().map(Self::Result),
+        }
+    }
+}
+
+/// The outcome of interpreting a result part.
+enum Resolved {
+    Done(OperationResult),
+    /// A successful get, which completes with the payload part that follows.
+    Get {
+        key: ObjectKey,
+        metadata: Metadata,
+    },
+}
+
+/// Returns the metadata of a result, which successful gets and heads require.
+fn require_metadata(metadata: Option<ReadMetadata>) -> crate::Result<Metadata> {
+    let metadata = metadata
+        .ok_or_else(|| Error::MalformedResponse("result is missing object metadata".to_owned()))?;
+    Ok(Metadata::try_from(metadata)?)
+}
+
+/// Interprets the result of the operation that was started with `ctx`.
+fn resolve(ctx: &OperationContext, part: ResultPart) -> crate::Result<Resolved> {
+    let ResultPart {
+        status,
+        key,
+        metadata,
+        error,
+        kind: _,
+    } = part;
+
+    let not_found_is_ok = matches!(
+        ctx,
+        OperationContext::Get { .. } | OperationContext::Head { .. }
+    );
+    if status >= 400 && !(not_found_is_ok && status == 404) {
+        // The message is the JSON error body, as the header layout reported it.
+        // INVARIANT: The error body only holds strings, which always serialize.
+        let message = error
+            .map(|error| serde_json::to_string(&error).expect("error body serializes to JSON"))
+            .unwrap_or_default();
+        return Err(Error::OperationFailure { status, message });
+    }
+
+    let key =
+        key.ok_or_else(|| Error::MalformedResponse("result is missing the object key".to_owned()))?;
+
+    let result = match ctx {
+        OperationContext::Get { .. } if status == 404 => OperationResult::Get(key, Ok(None)),
+        OperationContext::Get { .. } => {
+            let metadata = require_metadata(metadata)?;
+            return Ok(Resolved::Get { key, metadata });
+        }
+        OperationContext::Insert { .. } => {
+            OperationResult::Put(key.clone(), Ok(PutResponse { key }))
+        }
+        OperationContext::Delete { .. } => OperationResult::Delete(key, Ok(())),
+        OperationContext::Head { .. } if status == 404 => OperationResult::Head(key, Ok(None)),
+        OperationContext::Head { .. } => {
+            OperationResult::Head(key, Ok(Some(require_metadata(metadata)?)))
+        }
+    };
+    Ok(Resolved::Done(result))
+}
+
+/// Completes a get with its payload, decompressing it as the operation asked for.
+fn complete_get(
+    ctx: &OperationContext,
+    key: ObjectKey,
+    mut metadata: Metadata,
+    payload: Bytes,
+) -> OperationResult {
+    let (decompress, accept_encoding) = match ctx {
+        OperationContext::Get {
+            decompress,
+            accept_encoding,
+            ..
+        } => (*decompress, accept_encoding.as_slice()),
+        // `resolve` only yields gets for get operations, so this is never reached.
+        _ => (false, [].as_slice()),
+    };
+
+    let stream = futures_util::stream::once(async move { Ok::<_, io::Error>(payload) }).boxed();
+    let stream = get::maybe_decompress(stream, &mut metadata, decompress, accept_encoding);
+    OperationResult::Get(key, Ok(Some(GetResponse { metadata, stream })))
+}
+
+/// A part of the response, read into memory.
+struct ResponsePart {
+    /// The parsed name, or `None` if it is missing or invalid.
+    name: Option<PartName>,
+    body: Bytes,
+}
+
+/// Streams the parts of the response, each read into memory. Ends after the first broken part.
+fn stream_parts(
+    multipart: Multipart<'_>,
+) -> impl Stream<Item = Result<ResponsePart, multer::Error>> + '_ {
+    futures_util::stream::unfold(Some(multipart), |multipart| async move {
+        let mut multipart = multipart?;
+        let field = match multipart.next_field().await {
+            Ok(Some(field)) => field,
+            Ok(None) => return None,
+            Err(error) => return Some((Err(error), None)),
+        };
+
+        let name = field.name().and_then(PartName::parse);
+        match field.bytes().await {
+            Ok(body) => Some((Ok(ResponsePart { name, body }), Some(multipart))),
+            Err(error) => Some((Err(error), None)),
+        }
+    })
+}
+
+/// Reads all results from a batch response in the order they arrive.
+///
+/// A successful get takes the payload part that directly follows its result. Every operation in
+/// `contexts` is accounted for: operations without a result fail. A broken response body ends the
+/// stream with one [`OperationResult::Error`], keeping the results read before it.
+async fn collect_results(
+    multipart: Multipart<'_>,
+    contexts: &[OperationContext],
+) -> Vec<OperationResult> {
+    let mut parts = Box::pin(stream_parts(multipart).peekable());
+    let mut contexts: BTreeMap<usize, &OperationContext> = contexts.iter().enumerate().collect();
+    let mut results = Vec::new();
+
+    while let Some(part) = parts.next().await {
+        let part = match part {
+            Ok(part) => part,
+            Err(error) => {
+                results.push(OperationResult::Error(error.into()));
+                break;
+            }
+        };
+
+        let Some(PartName::Result(index)) = part.name else {
+            let error =
+                Error::MalformedResponse(format!("unexpected response part {:?}", part.name));
+            results.push(OperationResult::Error(error));
+            continue;
+        };
+        let Some(ctx) = contexts.remove(&index) else {
+            let error = Error::MalformedResponse(format!(
+                "response references unknown or duplicate operation index {index}"
+            ));
+            results.push(OperationResult::Error(error));
+            continue;
+        };
+
+        let resolved = serde_json::from_slice::<ResultPart>(&part.body)
+            .map_err(|error| {
+                Error::MalformedResponse(format!(
+                    "invalid result for the operation at index {index}: {error}"
+                ))
+            })
+            .and_then(|part| resolve(ctx, part));
+
+        let result = match resolved {
+            Ok(Resolved::Done(result)) => result,
+            Ok(Resolved::Get { key, metadata }) => {
+                let is_payload = |next: &Result<ResponsePart, _>| matches!(next, Ok(part) if part.name == Some(PartName::Payload(index)));
+                match parts.as_mut().next_if(is_payload).await {
+                    Some(Ok(payload)) => complete_get(ctx, key, metadata, payload.body),
+                    _ => {
+                        let error = Error::MalformedResponse(format!(
+                            "response has no payload part for the operation at index {index}"
+                        ));
+                        error_result(ctx, error)
+                    }
+                }
+            }
+            Err(error) => error_result(ctx, error),
+        };
         results.push(result);
     }
 
-    for idx in 0..num_operations {
-        if !seen_indices.contains(&idx) {
-            let error = Error::MalformedResponse(format!(
-                "server did not return a response for operation at index {idx}"
-            ));
-            let result = match context_map.remove(&idx) {
-                Some(ctx) => error_result(ctx, error),
-                None => OperationResult::Error(error),
-            };
-            results.push(result);
-        }
+    for (index, ctx) in contexts {
+        let error = Error::MalformedResponse(format!(
+            "server did not return a response for operation at index {index}"
+        ));
+        results.push(error_result(ctx, error));
     }
-
-    Ok(results)
+    results
 }
 
 /// Returns the worst-case size of `size` bytes after compressing them with `compression`.
@@ -705,12 +732,13 @@ async fn execute_individual(op: BatchOperation, session: &Session) -> OperationR
 async fn execute_batch(operations: Vec<BatchOperation>, session: &Session) -> Vec<OperationResult> {
     let contexts: Vec<_> = operations.iter().map(OperationContext::from).collect();
     let span = OperationSpan::batch(session, operations.len());
-    match span.instrument(send_batch(session, operations)).await {
+    let request = send_batch(session, operations, &contexts);
+    match span.instrument(request).await {
         Ok(results) => results,
         Err(e) => {
             let shared = Arc::new(e);
             contexts
-                .into_iter()
+                .iter()
                 .map(|ctx| error_result(ctx, Error::Batch(shared.clone())))
                 .collect()
         }
@@ -828,7 +856,13 @@ impl ManyBuilder {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
+    use http_body_util::BodyExt as _;
+
+    use super::OperationResult::{Delete, Get, Put};
     use super::*;
+    use crate::Error::{MalformedResponse, OperationFailure};
 
     /// Creates a dummy sized op for use in `iter_batches` tests.
     fn op(size: u64) -> (BatchOperation, u64) {
@@ -954,5 +988,167 @@ mod tests {
         for batch in &result[..result.len() - 1] {
             assert_eq!(batch.len(), per_batch);
         }
+    }
+
+    fn get(key: &str) -> BatchOperation {
+        BatchOperation::Get {
+            key: key.to_owned(),
+            decompress: true,
+            accept_encoding: vec![],
+        }
+    }
+
+    fn delete(key: &str) -> BatchOperation {
+        BatchOperation::Delete {
+            key: key.to_owned(),
+        }
+    }
+
+    fn insert(key: Option<&str>, metadata: Metadata, body: &'static [u8]) -> BatchOperation {
+        BatchOperation::Insert {
+            key: key.map(str::to_owned),
+            metadata,
+            compression: None,
+            body: PutBody::Buffer(Bytes::from_static(body)),
+        }
+    }
+
+    /// Encodes `operations` into the body of a batch request.
+    async fn encode(operations: Vec<BatchOperation>) -> String {
+        let form = build_form(operations).await.unwrap();
+        let mut request = reqwest::Client::new()
+            .post("http://localhost/")
+            .multipart(form)
+            .build()
+            .unwrap();
+        let body = request.body_mut().take().unwrap();
+        String::from_utf8(body.collect().await.unwrap().to_bytes().to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn request_wire_format() {
+        let metadata = Metadata {
+            content_type: "image/png".into(),
+            custom: [("build".to_owned(), "123".to_owned())].into(),
+            ..Metadata::default()
+        };
+        let operations = vec![
+            get("a/résumé"),
+            insert(Some("b"), metadata, b"png"),
+            insert(None, Metadata::default(), b"keyless"),
+        ];
+
+        let request = encode(operations).await;
+
+        // Descriptors and payloads are named by index, with nothing but `Content-Disposition`.
+        let metadata = r#"{"content_type":"image/png","custom":{"build":"123"}}"#;
+        let insert = format!(r#"{{"kind":"insert","key":"b","metadata":{metadata}}}"#);
+        let parts = [
+            ("0", r#"{"kind":"get","key":"a/résumé"}"#),
+            ("1", &insert),
+            ("1.payload", "png"),
+            ("2", r#"{"kind":"insert","metadata":{}}"#),
+            ("2.payload", "keyless"),
+        ];
+
+        let mut rest = request.as_str();
+        for (name, body) in parts {
+            let expected = format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n{body}");
+            let Some(start) = rest.find(&expected) else {
+                panic!("{expected} in {request}");
+            };
+            rest = &rest[start + expected.len()..];
+        }
+        assert!(!request.to_lowercase().contains("x-sn-"));
+    }
+
+    /// Builds a part of a canned response.
+    fn part(name: &str, body: &str) -> String {
+        format!("--b\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{body}\r\n")
+    }
+
+    /// Runs `collect_results` over the parts of a response.
+    async fn collect(parts: &[String], operations: &[BatchOperation]) -> Vec<OperationResult> {
+        let body = Bytes::from(parts.concat() + "--b--\r\n");
+        let contexts: Vec<_> = operations.iter().map(OperationContext::from).collect();
+        let stream = futures_util::stream::once(async { Ok::<_, io::Error>(body) });
+        collect_results(Multipart::new(stream, "b"), &contexts).await
+    }
+
+    #[tokio::test]
+    async fn response_in_completion_order() {
+        let operations = [
+            insert(Some("a"), Metadata::default(), b""),
+            get("b"),
+            get("c"),
+            insert(None, Metadata::default(), b""),
+            delete("e"),
+        ];
+        let metadata = r#""metadata":{"content_type":"text/plain","custom":{"build":"1"}}"#;
+        let failure = r#"{"status":400,"error":{"detail":"bad","causes":["why"]}}"#;
+        let parts = [
+            part("1", &format!(r#"{{"status":200,"key":"b",{metadata}}}"#)),
+            part("1.payload", "hello"),
+            part("0", r#"{"status":201,"key":"a"}"#),
+            part("2", r#"{"status":404,"key":"c"}"#),
+            part("3", failure),
+            part("4", r#"{"status":204,"key":"e"}"#),
+        ];
+
+        let mut results = collect(&parts, &operations).await.into_iter();
+
+        let Some(Get(key, Ok(Some(object)))) = results.next() else {
+            panic!("expected an object");
+        };
+        assert_eq!(key, "b");
+        assert_eq!(object.metadata.custom["build"], "1");
+        assert_eq!(object.payload().await.unwrap().as_ref(), b"hello");
+
+        assert_matches!(results.next(), Some(Put(key, Ok(_))) if key == "a");
+        assert_matches!(results.next(), Some(Get(key, Ok(None))) if key == "c");
+        let failed = results.next().unwrap();
+        assert_matches!(failed, Put(_, Err(OperationFailure { status: 400, .. })));
+        assert_matches!(results.next(), Some(Delete(key, Ok(()))) if key == "e");
+        assert!(results.next().is_none());
+    }
+
+    #[tokio::test]
+    async fn response_get_without_payload_fails() {
+        let operations = [get("a"), get("b")];
+        let found = r#"{"status":200,"key":"a","metadata":{"content_type":"text/plain"}}"#;
+        let parts = [part("0", found), part("1", r#"{"status":404,"key":"b"}"#)];
+
+        let mut results = collect(&parts, &operations).await.into_iter();
+
+        assert_matches!(results.next(), Some(Get(_, Err(MalformedResponse(_)))));
+        assert_matches!(results.next(), Some(Get(_, Ok(None))));
+        assert!(results.next().is_none());
+    }
+
+    #[tokio::test]
+    async fn response_operation_without_result_fails() {
+        let operations = [get("a"), delete("b")];
+        let parts = [part("0", r#"{"status":404,"key":"a"}"#)];
+
+        let mut results = collect(&parts, &operations).await.into_iter();
+
+        assert_matches!(results.next(), Some(Get(_, Ok(None))));
+        assert_matches!(results.next(), Some(Delete(key, Err(MalformedResponse(_)))) if key == "b");
+        assert!(results.next().is_none());
+    }
+
+    #[tokio::test]
+    async fn response_broken_body_fails_remaining_operations() {
+        let operations = [get("a"), get("b")];
+        let broken = "--b\r\nnot a header line\r\n\r\n".to_owned();
+        let parts = [part("0", r#"{"status":404,"key":"a"}"#), broken];
+
+        let mut results = collect(&parts, &operations).await.into_iter();
+
+        assert_matches!(results.next(), Some(Get(_, Ok(None))));
+        let error = results.next().unwrap();
+        assert_matches!(error, OperationResult::Error(Error::Multipart(_)));
+        assert_matches!(results.next(), Some(Get(_, Err(_))));
+        assert!(results.next().is_none());
     }
 }
