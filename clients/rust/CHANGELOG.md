@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.2
+
+### New Features
+
+- Send batch requests in the standards-compliant JSON layout. by @jan-auer in [#807](https://github.com/getsentry/objectstore/pull/807)
+  - Requires a server that supports it.
+  - A broken batch response keeps the results read before the break.
+- Validate custom metadata keys before sending by @jan-auer in [#790](https://github.com/getsentry/objectstore/pull/790)
+
 ## 0.3.1
 
 ### New Features
