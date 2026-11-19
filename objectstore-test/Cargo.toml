@@ -14,6 +14,7 @@ objectstore-options = { workspace = true, features = ["testing"] }
 objectstore-server = { workspace = true }
 objectstore-service = { workspace = true }
 objectstore-types = { workspace = true }
+rand = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }

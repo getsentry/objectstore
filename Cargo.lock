@@ -3017,6 +3017,7 @@ dependencies = [
  "objectstore-server",
  "objectstore-service",
  "objectstore-types",
+ "rand 0.10.3",
  "tempfile",
  "tokio",
  "tracing-subscriber",

@@ -67,7 +67,9 @@ async fn stores_uncompressed() {
         .build()
         .unwrap();
     let usecase = Usecase::from_static("usecase");
-    let session = client.session(usecase.for_organization(12345)).unwrap();
+    let session = client
+        .session(usecase.for_organization(server.org_id()))
+        .unwrap();
 
     let body = "oh hai!";
 
@@ -99,7 +101,9 @@ async fn uses_zstd_by_default() {
         .build()
         .unwrap();
     let usecase = Usecase::from_static("usecase");
-    let session = client.session(usecase.for_organization(12345)).unwrap();
+    let session = client
+        .session(usecase.for_organization(server.org_id()))
+        .unwrap();
 
     let body = "oh hai!";
     for threshold in [None, Some(0)] {
@@ -140,7 +144,9 @@ async fn roundtrips_gzip() {
     let usecase = Usecase::new("usecase")
         .unwrap()
         .with_compression(Compression::Gzip);
-    let session = client.session(usecase.for_organization(12345)).unwrap();
+    let session = client
+        .session(usecase.for_organization(server.org_id()))
+        .unwrap();
 
     let stored_id = session.put("oh hai!").send().await.unwrap().key;
 
@@ -171,7 +177,9 @@ async fn stores_precompressed_payload_verbatim() {
         .build()
         .unwrap();
     let usecase = Usecase::from_static("usecase");
-    let session = client.session(usecase.for_organization(12345)).unwrap();
+    let session = client
+        .session(usecase.for_organization(server.org_id()))
+        .unwrap();
 
     let compressed = zstd::bulk::compress(b"oh hai!", 0).unwrap();
     for threshold in [None, Some(0)] {
@@ -211,7 +219,9 @@ async fn deletes_stores_stuff() {
         .build()
         .unwrap();
     let usecase = Usecase::from_static("usecase");
-    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+    let session = client
+        .session(usecase.for_project(server.org_id(), 1337))
+        .unwrap();
 
     let body = "oh hai!";
     let stored_id = session.put(body).send().await.unwrap().key;
@@ -231,7 +241,9 @@ async fn stores_under_given_key() {
         .build()
         .unwrap();
     let usecase = Usecase::from_static("usecase");
-    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+    let session = client
+        .session(usecase.for_project(server.org_id(), 1337))
+        .unwrap();
 
     let body = "oh hai!";
     let request = session.put(body).key("test-key123!!");
@@ -249,7 +261,9 @@ async fn roundtrips_unicode_metadata() {
         .build()
         .unwrap();
     let usecase = Usecase::from_static("usecase");
-    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+    let session = client
+        .session(usecase.for_project(server.org_id(), 1337))
+        .unwrap();
 
     let filename = "réport-📄.pdf";
     let release = "vérsion-1.0-🚀";
@@ -297,7 +311,9 @@ async fn roundtrips_custom_metadata_keys() {
         .build()
         .unwrap();
     let usecase = Usecase::from_static("usecase");
-    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+    let session = client
+        .session(usecase.for_project(server.org_id(), 1337))
+        .unwrap();
 
     let stored_id = session
         .put("oh hai!")
@@ -366,7 +382,9 @@ async fn stores_structured_keys() {
         .build()
         .unwrap();
     let usecase = Usecase::from_static("usecase");
-    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+    let session = client
+        .session(usecase.for_project(server.org_id(), 1337))
+        .unwrap();
 
     let body = "oh hai!";
     let request = session.put(body).key("1/shard-0.json");
@@ -387,7 +405,9 @@ async fn overwrites_existing_key() {
         .build()
         .unwrap();
     let usecase = Usecase::from_static("usecase");
-    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+    let session = client
+        .session(usecase.for_project(server.org_id(), 1337))
+        .unwrap();
 
     let stored_id = session.put("initial body").send().await.unwrap().key;
     let request = session.put("new body").key(&stored_id);
@@ -411,11 +431,15 @@ async fn not_found_with_wrong_scope() {
     let usecase = Usecase::from_static("usecase");
 
     // First we have to place an object with one scope
-    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+    let session = client
+        .session(usecase.for_project(server.org_id(), 1337))
+        .unwrap();
     let stored_id = session.put("initial body").send().await.unwrap().key;
 
     // Now we need to try to fetch the object with a different scope
-    let session = client.session(usecase.for_project(12345, 9999)).unwrap();
+    let session = client
+        .session(usecase.for_project(server.org_id(), 9999))
+        .unwrap();
     let response = session.get(&stored_id).send().await.unwrap();
     assert!(response.is_none());
 }
@@ -429,7 +453,9 @@ async fn stores_with_origin() {
         .build()
         .unwrap();
     let usecase = Usecase::from_static("usecase");
-    let session = client.session(usecase.for_organization(12345)).unwrap();
+    let session = client
+        .session(usecase.for_organization(server.org_id()))
+        .unwrap();
 
     let stored_id = session
         .put("hello with origin")
@@ -453,7 +479,9 @@ async fn stores_without_origin() {
         .build()
         .unwrap();
     let usecase = Usecase::from_static("usecase");
-    let session = client.session(usecase.for_organization(12345)).unwrap();
+    let session = client
+        .session(usecase.for_organization(server.org_id()))
+        .unwrap();
 
     let stored_id = session
         .put("hello without origin")
@@ -478,7 +506,9 @@ async fn fails_with_insufficient_auth_token_perms() {
         .build()
         .unwrap();
     let usecase = Usecase::from_static("usecase");
-    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+    let session = client
+        .session(usecase.for_project(server.org_id(), 1337))
+        .unwrap();
 
     let put_result = session.put("initial body").send().await;
     println!("{put_result:?}");
@@ -578,14 +608,16 @@ async fn create_token_without_provider() {
 async fn stores_with_static_token() {
     let server = test_server().await;
 
-    let token = sign_static_token("usecase", &[("org", "12345")]);
+    let token = sign_static_token("usecase", &[("org", &server.org_id().to_string())]);
 
     let client = Client::builder(server.url("/"))
         .token(token)
         .build()
         .unwrap();
     let usecase = Usecase::from_static("usecase");
-    let session = client.session(usecase.for_organization(12345)).unwrap();
+    let session = client
+        .session(usecase.for_organization(server.org_id()))
+        .unwrap();
 
     let body = "hello with static token!";
     let stored_id = session.put(body).compress(None).send().await.unwrap().key;
@@ -604,7 +636,9 @@ async fn batch_operations() {
         .build()
         .unwrap();
     let usecase = Usecase::from_static("usecase");
-    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+    let session = client
+        .session(usecase.for_project(server.org_id(), 1337))
+        .unwrap();
 
     // First batch: 4 PUT operations
     // key-2 uses default compression (zstd), others are uncompressed
@@ -721,7 +755,9 @@ async fn batch_insert_without_key() {
         .build()
         .unwrap();
     let usecase = Usecase::from_static("usecase");
-    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+    let session = client
+        .session(usecase.for_project(server.org_id(), 1337))
+        .unwrap();
 
     // Insert without specifying a key — the server should generate one
     let results: Vec<_> = session
@@ -763,7 +799,9 @@ async fn batch_partial_failures() {
         .build()
         .unwrap();
     let usecase = Usecase::from_static("usecase");
-    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+    let session = client
+        .session(usecase.for_project(server.org_id(), 1337))
+        .unwrap();
 
     let results: Vec<_> = session
         .many()
@@ -839,7 +877,9 @@ async fn batch_put_files() {
         .build()
         .unwrap();
     let usecase = Usecase::from_static("usecase");
-    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+    let session = client
+        .session(usecase.for_project(server.org_id(), 1337))
+        .unwrap();
 
     let dir = tempfile::tempdir().unwrap();
 
@@ -908,7 +948,7 @@ async fn put_path_does_not_exhaust_file_descriptors() {
         .build()
         .unwrap();
     let session = client
-        .session(Usecase::from_static("usecase").for_project(12345, 1337))
+        .session(Usecase::from_static("usecase").for_project(server.org_id(), 1337))
         .unwrap();
 
     let dir = tempfile::tempdir().unwrap();
@@ -934,7 +974,9 @@ async fn put_file_with_compression() {
         .build()
         .unwrap();
     let usecase = Usecase::from_static("usecase");
-    let session = client.session(usecase.for_organization(12345)).unwrap();
+    let session = client
+        .session(usecase.for_organization(server.org_id()))
+        .unwrap();
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("compressed.txt");
@@ -985,7 +1027,9 @@ async fn head_returns_metadata() {
         .build()
         .unwrap();
     let usecase = Usecase::from_static("usecase");
-    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+    let session = client
+        .session(usecase.for_project(server.org_id(), 1337))
+        .unwrap();
 
     let stored_id = session
         .put("hello head!")
@@ -1014,7 +1058,9 @@ async fn round_trips_expiration_policy_beyond_a_year() {
         .build()
         .unwrap();
     let usecase = Usecase::from_static("usecase");
-    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+    let session = client
+        .session(usecase.for_project(server.org_id(), 1337))
+        .unwrap();
 
     // Serializes as "400d 1h 18m 31s"
     let ttl = Duration::from_secs(400 * 86400 + 4711);
@@ -1119,7 +1165,9 @@ async fn batch_head_operations() {
         .build()
         .unwrap();
     let usecase = Usecase::from_static("usecase");
-    let session = client.session(usecase.for_project(12345, 1337)).unwrap();
+    let session = client
+        .session(usecase.for_project(server.org_id(), 1337))
+        .unwrap();
 
     session
         .many()

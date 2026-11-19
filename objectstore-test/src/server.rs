@@ -57,6 +57,7 @@ pub const TEST_EDDSA_PUBKEY: &str = include_str!("../config/ed25519.public.pem")
 pub struct TestServer {
     handle: tokio::task::JoinHandle<()>,
     socket: SocketAddr,
+    org_id: u64,
     _tempdir: Option<TempDir>,
 }
 
@@ -76,6 +77,15 @@ impl TestServer {
     /// Returns the IP address on which the server is listening.
     pub fn ip(&self) -> IpAddr {
         self.socket.ip()
+    }
+
+    /// Returns an organization ID that is unique to this server.
+    ///
+    /// Backends such as the Bigtable emulator are shared with concurrently running tests and keep
+    /// their data across runs. Scoping objects to this organization keeps tests from reading or
+    /// overwriting each other's objects, even when they use the same keys.
+    pub fn org_id(&self) -> u64 {
+        self.org_id
     }
 
     /// Returns the port on which the server is listening.
@@ -201,6 +211,8 @@ impl TestServerBuilder {
         TestServer {
             handle,
             socket,
+            // Stay within the integer range that JSON numbers represent exactly.
+            org_id: rand::random_range(1..1 << 53),
             _tempdir: tempdir,
         }
     }

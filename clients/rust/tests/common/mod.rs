@@ -49,5 +49,7 @@ pub fn test_session(server: &TestServer) -> Session {
         .build()
         .unwrap();
     let usecase = Usecase::from_static("usecase");
-    client.session(usecase.for_organization(12345)).unwrap()
+    client
+        .session(usecase.for_organization(server.org_id()))
+        .unwrap()
 }
