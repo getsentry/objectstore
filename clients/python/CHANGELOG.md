@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.1
+
+### New Features
+
+- Send Content-Length for uploads of known size by @jan-auer in [#751](https://github.com/getsentry/objectstore/pull/751)
+- Custom metadata keys are now lowercased and validated: `put()` raises `ValueError` for a key that is empty or uses characters other than `a-z`, `0-9` and `_ - | ~ % $ # + . :`. by @jan-auer in [#789](https://github.com/getsentry/objectstore/pull/789)
+
+### Bug Fixes
+
+- Uploads from a stream with a declared length no longer hang when the stream ends early, for example because the file shrank during the upload; they now fail immediately with `UploadBodyTruncated` by @jan-auer in [#758](https://github.com/getsentry/objectstore/pull/758)
+
 ## 0.3.0
 
 ### Breaking Changes
