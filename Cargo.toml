@@ -49,7 +49,7 @@ bytes = "1.12.0"
 bytesize = "2.4.0"
 chrono = "0.4.45"
 console = "0.16.3"
-ed25519-dalek = { version = "2.2.0" }
+ed25519-dalek = { version = "3.0.0" }
 elegant-departure = "0.3.2"
 figment = "0.10.19"
 flate2 = "1.1.9"
@@ -65,7 +65,7 @@ humantime-serde = "1.1.1"
 indicatif = "0.18.4"
 infer = { version = "0.22.0", default-features = false }
 insta = "1.48.0"
-jsonwebtoken = { version = "11.1.0", features = ["rust_crypto"] }
+jsonwebtoken = { version = "12.0.0", features = ["rust_crypto"] }
 lru = "0.19.0"
 mediatype = "0.23.0"
 metrics = "0.24.6"
