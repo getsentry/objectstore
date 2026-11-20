@@ -32,6 +32,11 @@ changes, and adds the author and a link to the PR.
    `Fixes FS-123`, following the rules below. It replaces the title in every
    changelog the PR is listed in.
 
+   Craft reads the section up to the next `##` or `###` heading. If the tool
+   that opens or edits your PR appends text to the description, such as an
+   attribution or a footer, end the section with an `### Footer`
+   heading. Otherwise, that text becomes part of the changelog entry.
+
 ## Writing the Entry
 
 - Write one top-level bullet, about a line long. Put relevant details in
