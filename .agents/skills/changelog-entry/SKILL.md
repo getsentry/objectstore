@@ -34,7 +34,7 @@ changes, and adds the author and a link to the PR.
 
    Craft reads the section up to the next `##` or `###` heading. If the tool
    that opens or edits your PR appends text to the description, such as an
-   attribution or a footer, end the section with an `### Attribution`
+   attribution or a footer, end the section with an `### Footer`
    heading. Otherwise, that text becomes part of the changelog entry.
 
 ## Writing the Entry
