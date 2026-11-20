@@ -68,6 +68,7 @@ use objectstore_service::backend::local_fs::FileSystemConfig;
 #[cfg(feature = "storage-cogs")]
 use objectstore_service::change_stream::CostTrackerConfig;
 use objectstore_service::encryption::Cipher;
+use objectstore_service::garbage_collector::GarbageCollectorConfig;
 use objectstore_types::auth::Permission;
 use secrecy::{CloneableSecret, SecretBox, SerializableSecret, zeroize::Zeroize};
 use serde::{Deserialize, Serialize};
@@ -550,6 +551,43 @@ pub struct Config {
     #[serde(default)]
     pub storage_cogs: Option<CostTrackerConfig>,
 
+    /// Garbage collector configuration, keyed by `role:backend-type`.
+    ///
+    /// Selects the backend of each storage role's expiration index, which records, per
+    /// object, the deadline at which that object becomes eligible for deletion. The index is
+    /// kept in sync on the write path and read back by a separate cleanup process to find
+    /// expired objects, so it must be configured with the same lifetime as the storage
+    /// backend: an index that is lost or reset leaves objects behind with nothing scheduling
+    /// their deletion.
+    ///
+    /// The role is `storage` for a single backend, or `storage.high_volume` and
+    /// `storage.long_term` for tiered storage. The suffix after `:` matches the storage
+    /// backend's `type` tag (`filesystem`, `s3compatible`, `gcs`, `bigtable`). Keys
+    /// containing `:` must be quoted in YAML.
+    ///
+    /// The default is empty: no expiration index is configured. If any index is configured,
+    /// every backend without reliable native expiration must have one, and an entry cannot
+    /// coexist with `storage_cogs` on the same backend; startup fails otherwise.
+    ///
+    /// # Environment Variables
+    ///
+    /// Map keys follow the `OS__GARBAGE_COLLECTOR__` prefix, for example
+    /// `OS__GARBAGE_COLLECTOR__STORAGE:S3COMPATIBLE__TYPE=sqlite`. Keys containing `.` and
+    /// `:` are valid but may need quoting in a shell.
+    ///
+    /// # Example
+    ///
+    /// ```yaml
+    /// garbage_collector:
+    ///   "storage.long_term:s3compatible":
+    ///     type: sqlite
+    ///     path: /data/objectstore.db
+    /// ```
+    ///
+    /// See [`GarbageCollectorConfig`] for the available backends and their fields.
+    #[serde(default)]
+    pub garbage_collector: BTreeMap<String, GarbageCollectorConfig>,
+
     /// Configuration of the internal task runtime.
     ///
     /// Controls the thread pool size and behavior of the async runtime powering the server.
@@ -858,6 +896,7 @@ impl Default for Config {
 
             #[cfg(feature = "storage-cogs")]
             storage_cogs: None,
+            garbage_collector: BTreeMap::new(),
             runtime: Runtime::default(),
             logging: LoggingConfig::default(),
             sentry: Sentry::default(),
@@ -1200,6 +1239,68 @@ mod tests {
                 config.storage_cogs.as_ref().expect("kafka transport");
             assert_eq!(kafka.topic, "my-topic");
             assert_eq!(kafka.bootstrap_servers, ["kafka:9092"]);
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn garbage_collector_via_yaml_is_keyed_by_role_and_type() {
+        let mut tempfile = tempfile::NamedTempFile::new().unwrap();
+        tempfile
+            .write_all(
+                br#"
+            storage:
+                type: s3compatible
+                endpoint: http://localhost:8888
+                bucket: whatever
+            garbage_collector:
+                "storage:s3compatible":
+                    type: sqlite
+                    path: /tmp/gc.db
+                "storage.long_term:gcs":
+                    type: sqlite
+                    path: /tmp/gc-lt.db
+            "#,
+            )
+            .unwrap();
+
+        figment::Jail::expect_with(|_jail| {
+            let config = Config::load(Some(tempfile.path())).unwrap();
+            assert_eq!(config.garbage_collector.len(), 2);
+
+            let GarbageCollectorConfig::Sqlite(storage) = config
+                .garbage_collector
+                .get("storage:s3compatible")
+                .expect("sqlite garbage collector");
+            assert_eq!(storage.path, "/tmp/gc.db");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn garbage_collector_via_env_is_keyed_by_role_and_type() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("OS__STORAGE__TYPE", "s3compatible");
+            jail.set_env("OS__STORAGE__ENDPOINT", "http://localhost:8888");
+            jail.set_env("OS__STORAGE__BUCKET", "whatever");
+            jail.set_env(
+                "OS__GARBAGE_COLLECTOR__STORAGE:S3COMPATIBLE__TYPE",
+                "sqlite",
+            );
+            jail.set_env(
+                "OS__GARBAGE_COLLECTOR__STORAGE:S3COMPATIBLE__PATH",
+                "/tmp/gc.db",
+            );
+
+            let config = Config::load(None).unwrap();
+
+            let GarbageCollectorConfig::Sqlite(storage) = config
+                .garbage_collector
+                .get("storage:s3compatible")
+                .expect("sqlite garbage collector");
+            assert_eq!(storage.path, "/tmp/gc.db");
 
             Ok(())
         });

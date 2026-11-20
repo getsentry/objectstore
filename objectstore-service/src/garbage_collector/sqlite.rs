@@ -12,7 +12,6 @@ use crate::id::ObjectId;
 
 /// Configuration for [`SqliteGarbageCollector`].
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
-#[allow(dead_code)]
 pub struct SqliteGarbageCollectorConfig {
     /// Path to the SQLite database file, created if it does not exist.
     pub path: String,
@@ -32,7 +31,6 @@ pub struct SqliteGarbageCollector {
     pool: SqlitePool,
 }
 
-#[allow(dead_code)]
 impl SqliteGarbageCollector {
     /// Opens (creating if needed) the database at [`config.path`](SqliteGarbageCollectorConfig::path)
     /// in WAL mode and runs the schema migrations.

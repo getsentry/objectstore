@@ -214,8 +214,14 @@ Not every backend can tell whether a delete removed anything. Some backends may
 return a 204 whether the object existed or not. Those backends will report extra
 `delete` messages on their change stream.
 
-Automatic garbage collection is invisible to the change stream. Downstream
-consumers of the stream need to consider the `expires_at` field on messages.
+Garbage collection performed by the storage system is invisible to the change
+stream. Downstream consumers of the stream need to consider the `expires_at`
+field on messages.
+
+Backends without reliable native expiry can also publish to a garbage-collector
+index through [`GcChangeStream`](change_stream::gc::GcChangeStream). The service
+wires one collector stream per backend role, keyed by `role:backend-type`, and a
+backend is never given both a garbage-collector stream and storage COGS.
 
 ## `ChangeStream` implementation guidance
 
@@ -270,9 +276,15 @@ is streamed end-to-end.
 
 Expiration policies are part of the built-in object metadata and can carry
 special semantics. Backends use their underlying system's native expiry
-capabilities. For example, BigTable uses garbage collection policies, and GCS
-uses object lifecycle management. The service does not perform active garbage
-collection.
+capabilities where they are reliable. For example, BigTable uses garbage
+collection policies and GCS uses object lifecycle management.
+
+Backends without reliable native expiry, such as S3-compatible storage and the
+local filesystem, can publish their expiration deadlines to a garbage-collector
+index instead. The service writes the index on the request path; a separate
+cleanup process reads it and deletes expired objects from the matching backend.
+The index is configured per backend role, and a backend cannot use both the
+garbage collector and storage COGS.
 
 Backend reads are side-effect-free. After a successful GET or HEAD of a TTI
 object, the service may schedule a best-effort background deadline extension.

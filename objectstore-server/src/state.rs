@@ -3,15 +3,18 @@
 //! [`Services`] is constructed once during startup by [`Services::spawn`] and then shared
 //! across all request handlers as [`ServiceState`] (an `Arc<Services>`).
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use futures_util::Stream;
-use objectstore_service::change_stream::ChangeStreamFactory;
+use objectstore_service::change_stream::{ChangeStream, ChangeStreamFactory, GcChangeStream};
 use objectstore_service::concurrency::ConcurrencyLimiter;
 use objectstore_service::encryption::Cipher;
+use objectstore_service::garbage_collector::sqlite::SqliteGarbageCollector;
+use objectstore_service::garbage_collector::{GarbageCollectorConfig, GcStorage};
 use objectstore_service::id::ObjectContext;
 use objectstore_service::{StorageService, backend};
 use tokio::runtime::Handle;
@@ -82,7 +85,9 @@ impl Services {
                 cipher
             }
         };
-        let backend = backend::from_config(config.storage.clone(), &streams).await?;
+        let garbage_collectors = build_gc_streams(&config.garbage_collector).await?;
+        let backend =
+            backend::from_config(config.storage.clone(), &streams, &garbage_collectors).await?;
         let concurrency = ConcurrencyLimiter::new(config.service.max_concurrency)
             .with_queue(config.service.concurrency_queue)
             .with_timeout(config.service.concurrency_timeout)
@@ -135,6 +140,31 @@ impl Services {
     pub fn record_bandwidth(&self, context: &ObjectContext, bytes: u64) {
         self.rate_limiter.record_bandwidth(context, bytes);
     }
+}
+
+/// Builds one garbage-collector stream per configured backend role.
+///
+/// Fails if any configured index cannot be opened. An empty configuration disables garbage
+/// collection; [`backend::from_config`] warns when a backend without native expiration is
+/// left without an index.
+async fn build_gc_streams(
+    config: &BTreeMap<String, GarbageCollectorConfig>,
+) -> Result<BTreeMap<String, Arc<dyn ChangeStream>>> {
+    let mut streams = BTreeMap::new();
+
+    for (key, config) in config {
+        let storage: Arc<dyn GcStorage> = match config {
+            GarbageCollectorConfig::Sqlite(config) => Arc::new(
+                SqliteGarbageCollector::new(config)
+                    .await
+                    .with_context(|| format!("failed to open garbage collector for {key}"))?,
+            ),
+        };
+        let stream: Arc<dyn ChangeStream> = Arc::new(GcChangeStream { storage });
+        streams.insert(key.clone(), stream);
+    }
+
+    Ok(streams)
 }
 
 /// Periodically captures and reports jemalloc stats.
@@ -207,7 +237,25 @@ async fn track_runtime_metrics(interval: Duration) {
 
 #[cfg(test)]
 mod tests {
+    use objectstore_service::garbage_collector::sqlite::SqliteGarbageCollectorConfig;
+
     use super::*;
+
+    #[tokio::test]
+    async fn garbage_collector_streams_are_built_for_configured_roles() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = BTreeMap::from([(
+            "storage:s3compatible".to_owned(),
+            GarbageCollectorConfig::Sqlite(SqliteGarbageCollectorConfig {
+                path: dir.path().join("gc.db").to_string_lossy().into_owned(),
+            }),
+        )]);
+
+        let streams = build_gc_streams(&config).await.unwrap();
+
+        assert_eq!(streams.len(), 1);
+        assert!(streams.contains_key("storage:s3compatible"));
+    }
 
     #[tokio::test]
     async fn enforce_without_keys_fails_startup() {

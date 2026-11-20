@@ -4,8 +4,13 @@
 //! the service describes where those records go with a [`CostTrackerConfig`], shared by
 //! every backend. [`ChangeStreamFactory`] pairs the two into a [`ChangeStream`].
 //!
-//! Behind the `storage-cogs` feature. Without it every backend gets a [`NoopStream`] and
-//! the transport is left out of the binary.
+//! Backends without reliable native expiration can instead publish to a garbage-collector
+//! index through [`GcChangeStream`]. A backend receives at most one of cost tracking and
+//! garbage collection; service startup rejects a configuration that enables both.
+//!
+//! Cost tracking is behind the `storage-cogs` feature. Without it every backend gets a
+//! [`NoopStream`] unless a garbage-collector stream is configured, and the transport is left
+//! out of the binary.
 
 use std::fmt;
 use std::sync::Arc;
@@ -27,6 +32,7 @@ pub use cost_tracker::CostTrackerStream;
 pub use factory::ChangeStreamFactory;
 #[cfg(feature = "storage-cogs")]
 pub use factory::CostTrackerConfig;
+pub use gc::GcChangeStream;
 
 #[cfg(all(test, feature = "storage-cogs"))]
 pub(crate) use factory::dummy_factory;
