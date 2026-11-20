@@ -247,6 +247,39 @@ impl fmt::Display for AsStoragePath<'_> {
     }
 }
 
+/// Serializes an [`ObjectId`] as its storage path string.
+///
+/// `ObjectId` does not implement `Serialize` or `Deserialize` itself. Use this module on a field
+/// to encode it with [`ObjectId::as_storage_path`] and decode it with
+/// [`ObjectId::from_storage_path`]:
+///
+/// ```ignore
+/// #[derive(Serialize, Deserialize)]
+/// struct Example {
+///     #[serde(with = "crate::id::serde_storage_path")]
+///     id: ObjectId,
+/// }
+/// ```
+///
+/// Deserialization fails if the string is not a valid storage path.
+pub(crate) mod serde_storage_path {
+    use serde::{Deserialize, Deserializer, Serializer, de};
+
+    use super::ObjectId;
+
+    /// Serializes `id` as the string form of [`ObjectId::as_storage_path`].
+    pub fn serialize<S: Serializer>(id: &ObjectId, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(&id.as_storage_path())
+    }
+
+    /// Deserializes an [`ObjectId`] from a storage path string.
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<ObjectId, D::Error> {
+        let path = String::deserialize(deserializer)?;
+        ObjectId::from_storage_path(&path)
+            .ok_or_else(|| de::Error::custom("invalid object storage path"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
