@@ -96,7 +96,7 @@ pub const DEFAULT_CONTENT_TYPE: &str = "application/octet-stream";
 /// TTI values above 4 days the debounce stays at 24 hours (the historical
 /// constant); shorter TTI values get a proportionally smaller window so that
 /// bumps are not silently suppressed.
-const MAX_TTI_DEBOUNCE: Duration = Duration::from_secs(24 * 60 * 60);
+const MAX_TTI_DEBOUNCE: Duration = Duration::from_hours(24);
 
 /// An application-specific JSON request for updating object metadata.
 ///
