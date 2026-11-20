@@ -8,6 +8,7 @@ license-file = "../LICENSE.md"
 version = "0.3.2"
 edition = "2024"
 publish = true
+rust-version = "1.91"
 
 [dependencies]
 base64 = { workspace = true }
