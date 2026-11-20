@@ -152,7 +152,7 @@ dependencies = [
     { name = "packaging" },
     { name = "pyyaml" },
     { name = "sentry-devenv", version = "1.28.0", source = { registry = "https://pypi.devinfra.sentry.io/simple" }, marker = "python_full_version < '3.13'" },
-    { name = "sentry-devenv", version = "1.30.1", source = { registry = "https://pypi.devinfra.sentry.io/simple" }, marker = "python_full_version >= '3.13'" },
+    { name = "sentry-devenv", version = "1.40.0", source = { registry = "https://pypi.devinfra.sentry.io/simple" }, marker = "python_full_version >= '3.13'" },
     { name = "sentry-sdk" },
     { name = "supervisor" },
 ]
@@ -178,10 +178,10 @@ wheels = [
 
 [[package]]
 name = "filelock"
-version = "4.2.4"
+version = "4.2.7"
 source = { registry = "https://pypi.devinfra.sentry.io/simple" }
 wheels = [
-    { url = "https://pypi.devinfra.sentry.io/wheels/filelock-4.2.4-py3-none-any.whl", hash = "sha256:301241438c57936ef93f4243a94f2559022268bfcf9b375a9a72eb0f8db8358e" },
+    { url = "https://pypi.devinfra.sentry.io/wheels/filelock-4.2.7-py3-none-any.whl", hash = "sha256:d08972bbca2b8767ee552aff877b091dd111ffb1d22de7de885766ea7d719d5e" },
 ]
 
 [[package]]
@@ -301,10 +301,10 @@ wheels = [
 
 [[package]]
 name = "mypy-extensions"
-version = "1.1.0"
+version = "1.2.0"
 source = { registry = "https://pypi.devinfra.sentry.io/simple" }
 wheels = [
-    { url = "https://pypi.devinfra.sentry.io/wheels/mypy_extensions-1.1.0-py3-none-any.whl", hash = "sha256:1be4cccdb0f2482337c4743e60421de3a356cd97508abadd57d47403e94f5505" },
+    { url = "https://pypi.devinfra.sentry.io/wheels/mypy_extensions-1.2.0-py3-none-any.whl", hash = "sha256:993e7a20aa5671eb41a7132cf555af30062da99729601601b9a8382b11cae768" },
 ]
 
 [[package]]
@@ -392,10 +392,10 @@ wheels = [
 
 [[package]]
 name = "platformdirs"
-version = "4.13.5"
+version = "4.14.5"
 source = { registry = "https://pypi.devinfra.sentry.io/simple" }
 wheels = [
-    { url = "https://pypi.devinfra.sentry.io/wheels/platformdirs-4.13.5-py3-none-any.whl", hash = "sha256:53d3ec4280b815c1e0b02edad7f9ee8fda1ba9c0865dd9c2e6e63849ce82fc1e" },
+    { url = "https://pypi.devinfra.sentry.io/wheels/platformdirs-4.14.5-py3-none-any.whl", hash = "sha256:8e778c6fa421516f4d3369449f8df3b0e1b72c0e0005fe88e3ec772d0a14e750" },
 ]
 
 [[package]]
@@ -479,13 +479,13 @@ wheels = [
 
 [[package]]
 name = "python-discovery"
-version = "1.6.4"
+version = "1.9.2"
 source = { registry = "https://pypi.devinfra.sentry.io/simple" }
 dependencies = [
     { name = "filelock" },
 ]
 wheels = [
-    { url = "https://pypi.devinfra.sentry.io/wheels/python_discovery-1.6.4-py3-none-any.whl", hash = "sha256:530179cc51a1816d512b15635b3dc931295ae12efb183783ad31190a5d425d2b" },
+    { url = "https://pypi.devinfra.sentry.io/wheels/python_discovery-1.9.2-py3-none-any.whl", hash = "sha256:65857e689ba72aeb5517e68b7025430ed60372b78d037245e0bed3d41ae7ba65" },
 ]
 
 [[package]]
@@ -559,7 +559,7 @@ wheels = [
 
 [[package]]
 name = "sentry-devenv"
-version = "1.30.1"
+version = "1.40.0"
 source = { registry = "https://pypi.devinfra.sentry.io/simple" }
 resolution-markers = [
     "python_full_version >= '3.15'",
@@ -570,19 +570,19 @@ dependencies = [
     { name = "typing-extensions" },
 ]
 wheels = [
-    { url = "https://pypi.devinfra.sentry.io/wheels/sentry_devenv-1.30.1-py3-none-any.whl", hash = "sha256:99d56f11363f04d89763f6dda11fbd37c5f782e034321eb70b3eb2952c17bcce" },
+    { url = "https://pypi.devinfra.sentry.io/wheels/sentry_devenv-1.40.0-py3-none-any.whl", hash = "sha256:abca5b8aa7afba0fc4aebbe33aba16bffd708074edf58f48b8c07071f75a9b55" },
 ]
 
 [[package]]
 name = "sentry-sdk"
-version = "2.73.0"
+version = "2.75.0"
 source = { registry = "https://pypi.devinfra.sentry.io/simple" }
 dependencies = [
     { name = "certifi" },
     { name = "urllib3" },
 ]
 wheels = [
-    { url = "https://pypi.devinfra.sentry.io/wheels/sentry_sdk-2.73.0-py3-none-any.whl", hash = "sha256:0bcfa6928ea5adbb89591858b514d27adac27c7a3cccc31b20ed10e0b09eda9e" },
+    { url = "https://pypi.devinfra.sentry.io/wheels/sentry_sdk-2.75.0-py3-none-any.whl", hash = "sha256:9a10e97de2cbd42ad7e4a6e02a0d5af19de9811eb02445077d41ba14c08e170c" },
 ]
 
 [[package]]
