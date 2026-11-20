@@ -503,7 +503,10 @@ mod tests {
         let mode = Some(CompressionMode::Compress(Compression::Zstd));
 
         let encoded = collect(encode_body(body, mode).await.unwrap()).await;
-        assert_eq!(encoded, zstd_compress(b"hello world"));
+        assert_eq!(
+            zstd::decode_all(Cursor::new(encoded)).unwrap(),
+            b"hello world"
+        );
     }
 
     #[tokio::test]
