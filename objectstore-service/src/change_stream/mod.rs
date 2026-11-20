@@ -20,6 +20,7 @@ use crate::id::ObjectId;
 #[cfg(feature = "storage-cogs")]
 mod cost_tracker;
 mod factory;
+pub mod gc;
 
 #[cfg(feature = "storage-cogs")]
 pub use cost_tracker::CostTrackerStream;
