@@ -114,7 +114,10 @@ local deploy_primary(region) = [
             // k8s-deploy dispatches deployment workflows using GitHub App credentials.
             GITHUB_APP_ID: '{{SECRET:[devinfra-github][app_id]}}',
             GITHUB_APP_PRIVATE_KEY: '{{SECRET:[devinfra-github][private_key]}}',
-          },
+          } + (if region == 's4s2' then {
+                 ARGOCD_ONLY: 'true',
+                 ARGOCD_SERVICE: 'objectstore',
+               } else {}),
           tasks: [
             gocdtasks.script(importstr '../bash/deploy.sh'),
           ],
