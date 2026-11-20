@@ -13,7 +13,7 @@
 
 use std::num::NonZeroU64;
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+use serde::{Deserialize, Serialize};
 
 use crate::id::ObjectId;
 
@@ -31,29 +31,10 @@ pub type BackendToken = String;
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Session {
     /// The `ObjectID` this upload is tied to to.
-    #[serde(
-        serialize_with = "serialize_object_id",
-        deserialize_with = "deserialize_object_id"
-    )]
+    #[serde(with = "crate::id::serde_storage_path")]
     pub object_id: ObjectId,
     /// Total length of the upload in bytes.
     pub upload_length: NonZeroU64,
     /// Opaque session state belonging to the receiving backend.
     pub backend_token: BackendToken,
-}
-
-fn serialize_object_id<S>(id: &ObjectId, serializer: S) -> std::result::Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    serializer.collect_str(&id.as_storage_path())
-}
-
-fn deserialize_object_id<'de, D>(deserializer: D) -> std::result::Result<ObjectId, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let path = String::deserialize(deserializer)?;
-    ObjectId::from_storage_path(&path)
-        .ok_or_else(|| de::Error::custom("invalid object storage path"))
 }
