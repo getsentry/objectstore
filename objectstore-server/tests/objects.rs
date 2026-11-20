@@ -10,14 +10,16 @@ use objectstore_types::metadata::{ExpirationPolicy, Metadata};
 use reqwest::Url;
 
 async fn test_server() -> TestServer {
-    TestServer::with_config(Config {
-        auth: AuthZ {
-            enforce: false,
+    TestServer::tiered()
+        .config(Config {
+            auth: AuthZ {
+                enforce: false,
+                ..Default::default()
+            },
             ..Default::default()
-        },
-        ..Default::default()
-    })
-    .await
+        })
+        .build()
+        .await
 }
 
 #[tokio::test]

@@ -22,14 +22,16 @@ const OBJECT_PATH: &str = "/v1/objects/test/org=1/presign-key";
 const ONE_HOUR: Duration = Duration::from_secs(60 * 60);
 
 async fn test_server() -> TestServer {
-    TestServer::with_config(Config {
-        auth: AuthZ {
-            enforce: true,
+    TestServer::tiered()
+        .config(Config {
+            auth: AuthZ {
+                enforce: true,
+                ..Default::default()
+            },
             ..Default::default()
-        },
-        ..Default::default()
-    })
-    .await
+        })
+        .build()
+        .await
 }
 
 fn signing_key() -> SigningKey {

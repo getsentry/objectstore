@@ -241,10 +241,19 @@ reason, we do **not** provide default configuration variables in `.envrc`.
 cargo run -- -c objectstore-server/config/local.example.yaml run
 
 # Option 2: Environment variables
-export OS__STORAGE__TYPE=filesystem
-export OS__STORAGE__PATH=data
+export OS__STORAGE__TYPE=tiered
+export OS__STORAGE__HIGH_VOLUME__TYPE=bigtable
+export OS__STORAGE__HIGH_VOLUME__ENDPOINT=localhost:8086
+export OS__STORAGE__HIGH_VOLUME__PROJECT_ID=testing
+export OS__STORAGE__HIGH_VOLUME__INSTANCE_NAME=objectstore
+export OS__STORAGE__HIGH_VOLUME__TABLE_NAME=objectstore
+export OS__STORAGE__LONG_TERM__TYPE=filesystem
+export OS__STORAGE__LONG_TERM__PATH=data
 cargo run -- run
 ```
+
+The high-volume tier of tiered storage requires Bigtable. Start the
+emulator with `devservices up objectstore --mode=full` before running the server.
 
 You can copy and save additional config files next to the examples in
 `objectstore-server/config`. All other files are ignored by git.

@@ -479,12 +479,11 @@ mod tests {
     use objectstore_types::scope::{Scope, Scopes};
 
     use super::*;
-    use crate::backend::bigtable::{BigTableBackend, BigTableConfig};
     use crate::backend::changelog::NoopChangeLog;
     use crate::backend::common::{ExpiryTarget, HighVolumeBackend, PutResponse, TieredWrite};
     use crate::backend::gcs::{GcsBackend, GcsConfig};
     use crate::backend::in_memory::InMemoryBackend;
-    use crate::backend::testing::{Hooks, TestBackend};
+    use crate::backend::testing::{Hooks, TestBackend, in_memory_tiered_storage};
     use crate::backend::tiered::TieredStorage;
     use crate::change_stream::ChangeStreamFactory;
     use crate::resumable::BackendToken;
@@ -534,7 +533,7 @@ mod tests {
 
     fn make_service() -> StorageService {
         StorageService::new(
-            Box::new(InMemoryBackend::new("in-memory")),
+            Box::new(in_memory_tiered_storage()),
             Cipher::ephemeral().unwrap(),
         )
     }
@@ -591,17 +590,24 @@ mod tests {
             cogs: None,
         };
 
-        let backend = GcsBackend::new(config, &ChangeStreamFactory::default())
+        let long_term = GcsBackend::new(config, &ChangeStreamFactory::default())
             .await
             .unwrap();
+        let backend = TieredStorage::new(
+            Box::new(InMemoryBackend::new("in-memory-hv")),
+            Box::new(long_term),
+            Box::new(NoopChangeLog),
+        );
         let service = StorageService::new(Box::new(backend), Cipher::ephemeral().unwrap());
 
+        // Exceed the 1 MiB tiered threshold so the payload is stored in GCS.
+        let payload = vec![0xAB; 2 * 1024 * 1024];
         let key = service
             .insert_object(
                 make_context(),
                 Some("testing".into()),
                 Metadata::default(),
-                stream::single("oh hai!"),
+                stream::single(payload.clone()),
                 Timestamp::now(),
             )
             .await
@@ -614,20 +620,11 @@ mod tests {
             .unwrap();
         let file_contents: BytesMut = stream.try_collect().await.unwrap();
 
-        assert_eq!(file_contents.as_ref(), b"oh hai!");
+        assert_eq!(file_contents.as_ref(), payload.as_slice());
     }
 
     #[tokio::test]
     async fn tombstone_redirect_and_delete() {
-        let bigtable_config = BigTableConfig {
-            endpoint: Some("localhost:8086".into()),
-            project_id: "testing".into(),
-            instance_name: "objectstore".into(),
-            table_name: "objectstore".into(),
-            connections: None,
-            rpc_timeout: Duration::from_secs(2),
-            cogs: None,
-        };
         let gcs_config = GcsConfig {
             endpoint: Some("http://localhost:8087".into()),
             bucket: "test-bucket".into(),
@@ -635,11 +632,7 @@ mod tests {
             cogs: None,
         };
 
-        let high_volume = Box::new(
-            BigTableBackend::new(bigtable_config, &ChangeStreamFactory::default())
-                .await
-                .unwrap(),
-        );
+        let high_volume = Box::new(InMemoryBackend::new("in-memory-hv"));
         let long_term = Box::new(
             GcsBackend::new(gcs_config.clone(), &ChangeStreamFactory::default())
                 .await
@@ -654,7 +647,7 @@ mod tests {
             .unwrap();
 
         // Insert a >1 MiB object with a key.  This forces the long-term path:
-        // the real payload goes to GCS, and a redirect tombstone is written to BigTable.
+        // the real payload goes to GCS, and a redirect tombstone is written to high-volume storage.
         let payload_len = 2 * 1024 * 1024;
         let payload = vec![0xAB; payload_len]; // 2 MiB
         let id = service
@@ -683,7 +676,7 @@ mod tests {
             .await
             .unwrap();
 
-        // The tombstone in BigTable should be gone, so the service returns None.
+        // The tombstone should be gone, so the service returns None.
         let after_delete = service
             .get_object(id.clone(), Timestamp::now(), None)
             .await
@@ -1243,7 +1236,7 @@ mod tests {
 
     #[tokio::test]
     async fn tasks_limit_returns_configured_limit() {
-        let backend = Box::new(InMemoryBackend::new("cap"));
+        let backend = Box::new(in_memory_tiered_storage());
         let service = StorageService::new(backend, Cipher::ephemeral().unwrap())
             .with_concurrency(ConcurrencyLimiter::new(7));
         assert_eq!(service.tasks_limit(), 7);
@@ -1299,10 +1292,16 @@ mod tests {
 
     #[tokio::test]
     async fn resumable_round_trip() {
+        // Tiered storage declines resumable uploads at or below 1 MiB, so the first chunk
+        // alone exceeds that threshold.
+        let first = vec![b'a'; 1024 * 1024 + 1];
+        let first_len = first.len() as u64;
+        let total_len = first_len + 2;
+
         let service = make_service();
         let id = ObjectId::new(make_context(), "resumable".into());
         let created = service
-            .create_upload_session(id.clone(), Metadata::default(), 3)
+            .create_upload_session(id.clone(), Metadata::default(), total_len)
             .await
             .unwrap()
             .unwrap();
@@ -1310,21 +1309,27 @@ mod tests {
         let token = created.session;
         assert_eq!(
             service
-                .put_chunk(id.clone(), token.clone(), 0, 1, stream::single("a"))
+                .put_chunk(
+                    id.clone(),
+                    token.clone(),
+                    0,
+                    first_len,
+                    stream::single(first)
+                )
                 .await
                 .unwrap(),
-            UploadProgress::Incomplete { offset: 1 }
+            UploadProgress::Incomplete { offset: first_len }
         );
         assert_eq!(
             service
                 .upload_offset(id.clone(), token.clone())
                 .await
                 .unwrap(),
-            UploadProgress::Incomplete { offset: 1 }
+            UploadProgress::Incomplete { offset: first_len }
         );
         assert_eq!(
             service
-                .put_chunk(id.clone(), token, 1, 2, stream::single("bc"))
+                .put_chunk(id.clone(), token, first_len, 2, stream::single("bc"))
                 .await
                 .unwrap(),
             UploadProgress::Complete
@@ -1334,11 +1339,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(metadata.size, Some(3));
-        assert_eq!(
-            body.try_collect::<BytesMut>().await.unwrap().as_ref(),
-            b"abc"
-        );
+        assert_eq!(metadata.size, Some(total_len as usize));
+        let body = body.try_collect::<BytesMut>().await.unwrap();
+        assert_eq!(body.len() as u64, total_len);
+        assert!(body.ends_with(b"abc"));
     }
 
     #[tokio::test]

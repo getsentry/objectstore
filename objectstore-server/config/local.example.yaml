@@ -1,9 +1,18 @@
 # Use a port different from devservices
 http_addr: 0.0.0.0:8888
 
+# Requires the Bigtable emulator from devservices.
 storage:
-  type: filesystem
-  path: data
+  type: tiered
+  high_volume:
+    type: bigtable
+    endpoint: localhost:8086
+    project_id: testing
+    instance_name: objectstore
+    table_name: objectstore
+  long_term:
+    type: filesystem
+    path: data
 
 auth:
   enforce: false

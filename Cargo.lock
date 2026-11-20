@@ -2912,6 +2912,7 @@ dependencies = [
  "infer",
  "jsonwebtoken",
  "multer",
+ "objectstore-service",
  "objectstore-test",
  "objectstore-types",
  "rand 0.10.4",
@@ -3079,7 +3080,9 @@ version = "0.1.0"
 dependencies = [
  "objectstore-options",
  "objectstore-server",
+ "objectstore-service",
  "objectstore-types",
+ "rand 0.10.3",
  "tempfile",
  "tokio",
  "tracing-subscriber",

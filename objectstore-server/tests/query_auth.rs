@@ -14,14 +14,16 @@ use objectstore_test::server::{TEST_EDDSA_KID, TEST_EDDSA_PRIVKEY, TestServer};
 const OBJECT_PATH: &str = "/v1/objects/test/org=1/query-auth-key";
 
 async fn test_server() -> TestServer {
-    TestServer::with_config(Config {
-        auth: AuthZ {
-            enforce: true,
+    TestServer::tiered()
+        .config(Config {
+            auth: AuthZ {
+                enforce: true,
+                ..Default::default()
+            },
             ..Default::default()
-        },
-        ..Default::default()
-    })
-    .await
+        })
+        .build()
+        .await
 }
 
 /// Builds a JWT for `test`/`org=1` with the given permissions.

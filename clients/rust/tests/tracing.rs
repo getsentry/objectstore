@@ -66,14 +66,16 @@ fn data<'a>(span: &'a Span, key: &str) -> Option<&'a Value> {
 
 #[test]
 fn simple_operations() {
+    let mut org = 0;
     let spans = capture_spans(async {
         let server = test_server().await;
+        org = server.org_id();
         let client = Client::builder(server.url("/"))
             .token(test_token_generator())
             .build()
             .unwrap();
         let scope = Usecase::from_static("usecase")
-            .for_project(12345, 1337)
+            .for_project(org, 1337)
             .push("app_slug", "email_app");
         let session = client.session(scope).unwrap();
 
@@ -115,11 +117,13 @@ fn simple_operations() {
         );
         assert_eq!(
             data(span, "objectstore.scopes"),
-            Some(&Value::from("org=12345;project=1337;app_slug=email_app"))
+            Some(&Value::from(format!(
+                "org={org};project=1337;app_slug=email_app"
+            )))
         );
         assert_eq!(
             data(span, "objectstore.scopes.org"),
-            Some(&Value::from(12345))
+            Some(&Value::from(org))
         );
         assert_eq!(
             data(span, "objectstore.scopes.project"),
