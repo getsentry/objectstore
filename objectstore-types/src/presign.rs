@@ -35,10 +35,10 @@
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use ed25519_dalek::{Signature, Signer};
+use ed25519_dalek::{
+    Signature, Signer, SigningKey as DalekSigningKey, VerifyingKey as DalekVerifyingKey,
+};
 use http::Method;
-
-pub use ed25519_dalek::{SigningKey as DalekSigningKey, VerifyingKey as DalekVerifyingKey};
 
 /// Query parameter carrying the time at which the request was signed.
 pub const PARAM_TIMESTAMP: &str = "os_timestamp";
