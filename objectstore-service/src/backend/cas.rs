@@ -1,10 +1,26 @@
 //! Types for [`crate::backend::TieredStorage`]'s CAS protocol.
 //!
+//! [`ObjectRegistry`]: a trait defining the CAS protocol.
+//!
+//! [`HighVolumeAdapter`]: an implementation of `ObjectRegistry` that wraps an underlying
+//! [`crate::backend::common::HighVolumeBackend`] for compatibility.
+//!
 //! [`TimeBasedId`]: a Snowflake-like 64-bit unique ID that is ordered by creation time.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+
+use bytes::Bytes;
+
+use objectstore_types::metadata::Metadata;
+use objectstore_types::time::Timestamp;
+
+use crate::backend::common::{
+    ExpiryUpdate, HighVolumeBackend, TieredGet, TieredMetadata, TieredWrite, TieredUpdate, Tombstone, SetExpiryResponse,
+};
+use crate::error::{Error, ErrorKind, Result};
+use crate::id::ObjectId;
 
 /// Unix timestamp of the [`TimeBasedId`] epoch, 2026-01-01T00:00:00Z, in milliseconds.
 const EPOCH_UNIX_MILLIS: u64 = 1_767_225_600_000;
@@ -16,6 +32,320 @@ const TIMESTAMP_BITS: u32 = 43;
 
 const RANDOM_MASK: u64 = (1 << RANDOM_BITS) - 1;
 const TIMESTAMP_MAX: u64 = (1 << TIMESTAMP_BITS) - 1;
+
+pub struct Version {
+    pub generation: TimeBasedId,
+    pub metageneration: TimeBasedId,
+}
+
+pub enum ObservedVersion {
+    Legacy,
+    V(Version),
+}
+
+impl ObservedVersion {
+    pub fn increment_for_write(&self) -> Version {
+        match self {
+            Self::Legacy => Version {
+                metageneration: TimeBasedId::now(),
+                generation: TimeBasedId::now(),
+            },
+            Self::V(version) => Version {
+                metageneration: TimeBasedId::now(),
+                generation: TimeBasedId::after(&version.generation),
+            },
+        }
+    }
+
+    pub fn increment_for_update(&self) -> Version {
+        match self {
+            Self::Legacy => Version {
+                metageneration: TimeBasedId::now(),
+                generation: TimeBasedId::ZERO,
+            },
+            Self::V(version) => Version {
+                metageneration: TimeBasedId::after(&version.metageneration),
+                generation: version.generation,
+            },
+        }
+    }
+}
+
+pub enum ConsumedBy {
+    Finalize,
+    Cancel,
+}
+
+pub enum EntryPayload {
+    Inline(Metadata, Bytes),
+    Redirect(ObjectId),
+    DeletionMarker,
+    UploadSessionMarker,
+    UploadSessionConsumptionMarker(ConsumedBy),
+}
+
+pub type ExpirationTime = Timestamp;
+
+pub enum RegistryRead {
+    NotFound,
+    Entry(Option<ExpirationTime>, ObservedVersion, EntryPayload),
+}
+
+pub struct RegistryWrite {
+    expiry: Option<ExpirationTime>,
+    version: Version,
+    payload: EntryPayload,
+}
+
+pub enum Patch {
+    SetExpiry(ExpiryUpdate),
+}
+
+pub enum OperationResult {
+    Applied,
+    Rejected,
+    Unknown,
+}
+
+pub enum RegistryKey {
+    Object(ObjectId),
+    UploadSession(ObjectId),
+}
+
+impl RegistryKey {
+    pub fn id(&self) -> &ObjectId {
+        match self {
+            Self::Object(id) => id,
+            Self::UploadSession(id) => id,
+        }
+    }
+}
+
+pub trait ObjectRegistry {
+    async fn get_entry_meta(&self, key: &RegistryKey) -> Result<RegistryRead>;
+
+    async fn get_entry(&self, key: &RegistryKey) -> Result<RegistryRead>;
+
+    async fn compare_and_write(
+        &self,
+        key: &RegistryKey,
+        observed: &RegistryRead,
+        write: &RegistryWrite,
+    ) -> Result<OperationResult>;
+
+    async fn compare_and_update(
+        &self,
+        key: &RegistryKey,
+        observed: &RegistryRead,
+        patch: &Patch,
+    ) -> Result<OperationResult>;
+
+    async fn blind_compare_and_write(
+        &self,
+        key: &RegistryKey,
+        write: &RegistryWrite,
+    ) -> Result<OperationResult>;
+}
+
+pub struct HighVolumeAdapter {
+    inner: Box<dyn HighVolumeBackend>,
+}
+
+impl HighVolumeAdapter {
+    pub fn new(inner: Box<dyn HighVolumeBackend>) -> Self {
+        Self { inner }
+    }
+}
+
+impl From<TieredMetadata> for RegistryRead {
+    fn from(item: TieredMetadata) -> RegistryRead {
+        match item {
+            TieredMetadata::NotFound => RegistryRead::NotFound,
+            TieredMetadata::Object(metadata) => RegistryRead::Entry(
+                metadata.time_expires,
+                ObservedVersion::Legacy,
+                EntryPayload::Inline(metadata, Bytes::new()),
+            ),
+            TieredMetadata::Tombstone(tombstone) => RegistryRead::Entry(
+                tombstone.time_expires,
+                ObservedVersion::Legacy,
+                EntryPayload::Redirect(tombstone.target),
+            ),
+        }
+    }
+}
+
+impl From<TieredGet> for RegistryRead {
+    fn from(item: TieredGet) -> RegistryRead {
+        match item {
+            TieredGet::NotFound => RegistryRead::NotFound,
+            TieredGet::Object(metadata, _, payload) => RegistryRead::Entry(
+                metadata.time_expires,
+                ObservedVersion::Legacy,
+                EntryPayload::Inline(metadata, payload),
+            ),
+            TieredGet::Tombstone(tombstone) => RegistryRead::Entry(
+                tombstone.time_expires,
+                ObservedVersion::Legacy,
+                EntryPayload::Redirect(tombstone.target),
+            ),
+        }
+    }
+}
+
+fn fake_upload_session_marker_expiry() -> Timestamp {
+    Timestamp::now() + Duration::from_hours(5 * 24)
+}
+
+impl ObjectRegistry for HighVolumeAdapter {
+    async fn get_entry_meta(&self, key: &RegistryKey) -> Result<RegistryRead> {
+        // TODO: thread this through the trait until I can remove it :(
+        let access_time = Timestamp::now();
+        Ok(match key {
+            RegistryKey::Object(id) => self
+                .inner
+                .get_tiered_metadata(id, access_time)
+                .await?
+                .into(),
+            RegistryKey::UploadSession(id) => {
+                if self.inner.has_upload_marker(id, access_time).await? {
+                    // TODO: Expose upload session marker expiry time from HV backend
+                    RegistryRead::Entry(
+                        Some(fake_upload_session_marker_expiry()),
+                        ObservedVersion::Legacy,
+                        EntryPayload::UploadSessionMarker,
+                    )
+                } else {
+                    RegistryRead::NotFound
+                }
+            }
+        })
+    }
+
+    async fn get_entry(&self, key: &RegistryKey) -> Result<RegistryRead> {
+        // TODO: thread this through the trait until I can remove it :(
+        let access_time = Timestamp::now();
+        Ok(match key {
+            // TODO content range
+            RegistryKey::Object(id) => self
+                .inner
+                .get_tiered_object(id, access_time, None)
+                .await?
+                .into(),
+            RegistryKey::UploadSession(_) => RegistryRead::NotFound,
+        })
+    }
+
+    async fn compare_and_write(
+        &self,
+        key: &RegistryKey,
+        observed: &RegistryRead,
+        write: &RegistryWrite,
+    ) -> Result<OperationResult> {
+        // TODO: thread this through the trait until I can remove it :(
+        let access_time = Timestamp::now();
+        let current_target = match observed {
+            RegistryRead::Entry(_, _, EntryPayload::Redirect(t)) => Some(t),
+            _ => None,
+        };
+        Ok(match write.payload {
+            EntryPayload::DeletionMarker | EntryPayload::UploadSessionConsumptionMarker(_) => {
+                return Err(Error::new(ErrorKind::Internal, "Not implemented"));
+            }
+            EntryPayload::UploadSessionMarker => {
+                // TODO eliminate unwrap
+                self.inner
+                    .create_upload_marker(key.id(), write.expiry.unwrap())
+                    .await
+                    .map(|_| OperationResult::Applied)?
+            }
+            EntryPayload::Inline(m, p) => {
+                let written = self
+                    .inner
+                    .compare_and_write(
+                        key.id(),
+                        current_target,
+                        TieredWrite::Object(m, p),
+                        access_time,
+                    )
+                    .await?;
+                if written {
+                    OperationResult::Applied
+                } else {
+                    OperationResult::Rejected
+                }
+            }
+            EntryPayload::Redirect(t) => {
+                let written = self
+                    .inner
+                    .compare_and_write(
+                        key.id(),
+                        current_target,
+                        TieredWrite::Tombstone(Tombstone {
+                            target: t,
+                            time_expires: write.expiry,
+                        }),
+                        access_time,
+                    )
+                    .await?;
+                if written {
+                    OperationResult::Applied
+                } else {
+                    OperationResult::Rejected
+                }
+            }
+        })
+    }
+
+    async fn compare_and_update(
+        &self,
+        key: &RegistryKey,
+        observed: &RegistryRead,
+        patch: &Patch,
+    ) -> Result<OperationResult> {
+        // TODO: thread this through the trait until I can remove it :(
+        let access_time = Timestamp::now();
+        let current_target = match observed {
+            RegistryRead::Entry(_, _, EntryPayload::Redirect(t)) => Some(t),
+            _ => None,
+        };
+        let tiered_update = match patch {
+            Patch::SetExpiry(expiry_update) => TieredUpdate::SetExpiry(*expiry_update),
+        };
+        let result = self.inner.compare_and_update(key.id(), current_target, tiered_update, access_time).await?;
+        Ok(match result {
+            // TODO handle the returned timestamp properly
+            SetExpiryResponse::Satisfied(_) => OperationResult::Applied,
+            _ => OperationResult::Rejected,
+        })
+    }
+
+    async fn blind_compare_and_write(
+        &self,
+        key: &RegistryKey,
+        write: &RegistryWrite,
+    ) -> Result<OperationResult> {
+        // TODO: thread this through the trait until I can remove it :(
+        let access_time = Timestamp::now();
+        Ok(match write.payload {
+            EntryPayload::Inline(m, p) => {
+                match self.inner.put_non_tombstone(key.id(), &m, p, access_time).await? {
+                    Some(_) => OperationResult::Rejected,
+                    None => OperationResult::Applied,
+                }
+            },
+            EntryPayload::DeletionMarker => {
+                match self.inner.delete_non_tombstone(key.id(), access_time).await? {
+                    Some(_) => OperationResult::Rejected,
+                    None => OperationResult::Applied,
+                }
+            },
+            _ => {
+                return Err(Error::new(ErrorKind::Internal, "Not implemented"));
+            }
+        })
+    }
+}
 
 /// A 64-bit, Snowflake-like identifier ordered by creation time.
 ///
