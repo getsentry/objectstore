@@ -1107,7 +1107,11 @@ impl HighVolumeBackend for BigTableBackend {
         Ok(())
     }
 
-    async fn has_upload_marker(&self, revision: &ObjectId, access_time: Timestamp) -> Result<bool> {
+    async fn get_upload_marker(
+        &self,
+        revision: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<Option<Timestamp>> {
         let request = v2::ReadRowsRequest {
             table_name: self.table_path.clone(),
             rows: Some(v2::RowSet {
@@ -1118,11 +1122,25 @@ impl HighVolumeBackend for BigTableBackend {
             rows_limit: 1,
             ..Default::default()
         };
-        let rows = retry("has_upload_marker", || async {
+        let rows = retry("get_upload_marker", || async {
             self.bigtable.client().read_rows(request.clone()).await
         })
         .await?;
-        Ok(!rows.is_empty())
+        let Some((_, cells)) = rows.into_iter().next() else {
+            return Ok(None);
+        };
+        // The marker is written to the GC family with its deadline as the cell timestamp.
+        let Some(cell) = cells.iter().find(|cell| cell.family_name == FAMILY_GC) else {
+            return Err(Error::new(
+                ErrorKind::CorruptData,
+                "upload marker is missing its GC cell",
+            ));
+        };
+        let time_expires = Timestamp::from_unix_micros(cell.timestamp_micros).context(
+            ErrorKind::CorruptData,
+            "decoding Bigtable upload marker expiration timestamp",
+        )?;
+        Ok(Some(time_expires))
     }
 
     async fn delete_upload_marker(
