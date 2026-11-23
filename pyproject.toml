@@ -6,6 +6,9 @@ requires-python = ">=3.11"
 [tool.uv]
 required-version = ">=0.9.18"
 
+[tool.uv.sources]
+prek = { index = "sfw" }
+
 [[tool.uv.index]]
 name = "sentry-pypi"
 url = "https://pypi.devinfra.sentry.io/simple"
@@ -30,7 +33,7 @@ dev = [
     "pytest-cov>=4.1.0",
     "mypy>=1.17.1",
     "ruff>=0.14.2",
-    "pre-commit>=4.2.0",
+    "prek>=0.5.10",
 ]
 docs = [
     "sphinx>=8.1.3",

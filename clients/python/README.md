@@ -268,11 +268,11 @@ The considerations for setting up the development environment that can be found 
 
 ### Pre-commit hook
 
-A configuration to set up a git pre-commit hook using [pre-commit](https://github.com/pre-commit/pre-commit) is available at the root of the repository.
+A configuration to set up a git pre-commit hook using [prek](https://prek.j178.dev/) is available at the root of the repository.
 
 To install it, run
 ```sh
-pre-commit install
+prek install
 ```
 
 The hook will automatically run some checks before every commit, including the linters and formatters we run in CI.
