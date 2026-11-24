@@ -46,9 +46,8 @@ const EMITTER_INTERVAL: Duration = Duration::from_secs(1);
 pub struct Stats {
     /// Number of execution permits currently held.
     pub in_use: u32,
-    /// Most execution permits held at once since [`ConcurrencyLimiter::run_emitter`] last
-    /// reported, or since the limiter was created. Unlike `in_use`, this captures bursts between
-    /// two reports.
+    /// Most execution permits held at once since the previous call to
+    /// [`ConcurrencyLimiter::stats`]. Unlike `in_use`, this captures bursts between two calls.
     pub in_use_peak: u32,
     /// Number of callers waiting in the queue for a permit.
     pub queued: u32,
@@ -291,17 +290,16 @@ impl ConcurrencyLimiter {
     }
 
     /// Returns a snapshot of the current counts.
+    ///
+    /// Each call restarts the peaks. [`run_emitter`](Self::run_emitter) calls this, so another
+    /// caller takes away from the peaks that the emitter reports.
     pub fn stats(&self) -> Stats {
-        self.snapshot(false)
-    }
-
-    fn snapshot(&self, restart_peaks: bool) -> Stats {
         // Each count is read right before its peak restarts there, so that a restarted peak
         // does not include permits that were released in between.
         let in_use = self.used_permits();
-        let in_use_peak = self.in_use_peak.read(in_use, restart_peaks);
+        let in_use_peak = self.in_use_peak.take(in_use);
         let bulk_in_use = self.used_bulk_permits();
-        let bulk_in_use_peak = self.bulk_in_use_peak.read(bulk_in_use, restart_peaks);
+        let bulk_in_use_peak = self.bulk_in_use_peak.take(bulk_in_use);
         Stats {
             in_use,
             in_use_peak,
@@ -313,8 +311,6 @@ impl ConcurrencyLimiter {
 
     /// Periodically calls `emit` with the current in-use and queued counts.
     ///
-    /// Each call restarts the peaks, so they cover the time since the previous call.
-    ///
     /// This future runs forever and is intended to be spawned as a background
     /// task alongside the service.
     pub async fn run_emitter<F, Fut>(&self, mut emit: F) -> !
@@ -325,7 +321,7 @@ impl ConcurrencyLimiter {
         let mut ticker = tokio::time::interval(EMITTER_INTERVAL);
         loop {
             ticker.tick().await;
-            emit(self.snapshot(true)).await;
+            emit(self.stats()).await;
         }
     }
 }
@@ -585,7 +581,7 @@ mod tests {
                 limiter.try_acquire().unwrap(),
             );
             // Lower the peak so that only the failed acquisition can raise it back to capacity.
-            assert_eq!(limiter.in_use_peak.read(1, true), 2);
+            assert_eq!(limiter.in_use_peak.take(1), 2);
             let mut waiting: std::pin::Pin<Box<dyn Future<Output = _>>> = match bulk {
                 false => Box::pin(limiter.acquire()),
                 true => Box::pin(limiter.acquire_bulk()),
@@ -605,7 +601,7 @@ mod tests {
             limiter.acquire_bulk().await.unwrap(),
         );
         // Lower the peak so that only the failed acquisition can raise it back to capacity.
-        assert_eq!(limiter.bulk_in_use_peak.read(1, true), 2);
+        assert_eq!(limiter.bulk_in_use_peak.take(1), 2);
         limiter.acquire_bulk().await.unwrap_err();
         drop(held);
 

@@ -70,8 +70,8 @@ impl Permit {
 pub struct LimiterStats {
     /// Permits currently in use.
     pub in_use: u32,
-    /// Most permits in use at once since [`Limiter::run_emitter`] last reported, or since the
-    /// limiter was created. Unlike `in_use`, this captures bursts between two reports.
+    /// Most permits in use at once since the previous call to [`Limiter::stats`]. Unlike
+    /// `in_use`, this captures bursts between two calls.
     pub in_use_peak: u32,
 }
 
@@ -102,16 +102,12 @@ impl Peak {
         permit
     }
 
-    /// Returns the highest number of permits in use since the mark was last restarted.
+    /// Returns the highest number of permits in use since the previous call.
     ///
-    /// `in_use` is the current number. With `restart`, the mark restarts there instead of at
-    /// zero, which keeps permits visible that stay held while nothing new is acquired.
-    pub(super) fn read(&self, in_use: u32, restart: bool) -> u32 {
-        let peak = match restart {
-            true => self.0.swap(in_use, Ordering::Relaxed),
-            false => self.0.load(Ordering::Relaxed),
-        };
-        peak.max(in_use)
+    /// The mark restarts at `in_use`, the current number, instead of at zero. This keeps
+    /// permits visible that stay held while nothing new is acquired.
+    pub(super) fn take(&self, in_use: u32) -> u32 {
+        self.0.swap(in_use, Ordering::Relaxed).max(in_use)
     }
 }
 
@@ -176,27 +172,24 @@ impl Limiter {
     }
 
     /// Returns the current and peak number of permits in use.
+    ///
+    /// Each call restarts the peak. [`run_emitter`](Self::run_emitter) calls this, so another
+    /// caller takes away from the peak that the emitter reports.
     pub fn stats(&self) -> LimiterStats {
-        self.snapshot(false)
-    }
-
-    fn snapshot(&self, restart_peak: bool) -> LimiterStats {
         let in_use = self.capacity - self.semaphore.available_permits() as u32;
         LimiterStats {
             in_use,
-            in_use_peak: self.peak.read(in_use, restart_peak),
+            in_use_peak: self.peak.take(in_use),
         }
     }
 
     /// Passes this limiter's stats to `emit` immediately and once per second thereafter.
-    ///
-    /// Each call restarts the peak, so it covers the time since the previous call.
     pub async fn run_emitter<F, Fut>(&self, emit: F) -> !
     where
         F: FnMut(LimiterStats) -> Fut,
         Fut: Future<Output = ()>,
     {
-        run_emitter(|| self.snapshot(true), emit).await
+        run_emitter(|| self.stats(), emit).await
     }
 }
 
@@ -214,8 +207,8 @@ pub enum Priority {
 pub struct PriorityLimiterStats {
     /// Permits currently in use.
     pub in_use: u32,
-    /// Most permits in use at once since [`PriorityLimiter::run_emitter`] last reported, or
-    /// since the limiter was created. Unlike `in_use`, this captures bursts between two reports.
+    /// Most permits in use at once since the previous call to [`PriorityLimiter::stats`].
+    /// Unlike `in_use`, this captures bursts between two calls.
     pub in_use_peak: u32,
     /// Normal-priority acquisitions waiting in the queue.
     pub waiting_normal: usize,
@@ -314,11 +307,10 @@ impl PriorityLimiter {
     }
 
     /// Returns a snapshot of permits in use and queued acquisitions.
+    ///
+    /// Each call restarts the peak. [`run_emitter`](Self::run_emitter) calls this, so another
+    /// caller takes away from the peak that the emitter reports.
     pub fn stats(&self) -> PriorityLimiterStats {
-        self.snapshot(false)
-    }
-
-    fn snapshot(&self, restart_peak: bool) -> PriorityLimiterStats {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let stats = PriorityLimiterStats {
             in_use: self.capacity - state.free,
@@ -326,23 +318,19 @@ impl PriorityLimiter {
             waiting_normal: state.normal_queue.len(),
             waiting_high: state.high_queue.len(),
         };
-        if restart_peak {
-            // Restarting at the current number instead of zero keeps permits visible that stay
-            // held while nothing new is acquired.
-            state.in_use_peak = stats.in_use;
-        }
+        // Restarting at the current number instead of zero keeps permits visible that stay held
+        // while nothing new is acquired.
+        state.in_use_peak = stats.in_use;
         stats
     }
 
     /// Passes this limiter's stats to `emit` immediately and once per second thereafter.
-    ///
-    /// Each call restarts the peak, so it covers the time since the previous call.
     pub async fn run_emitter<F, Fut>(&self, emit: F) -> !
     where
         F: FnMut(PriorityLimiterStats) -> Fut,
         Fut: Future<Output = ()>,
     {
-        run_emitter(|| self.snapshot(true), emit).await
+        run_emitter(|| self.stats(), emit).await
     }
 }
 
@@ -515,7 +503,7 @@ mod tests {
             limiter.acquire().await.unwrap(),
         );
         // Lower the peak so that only the failed acquisition can raise it back to capacity.
-        assert_eq!(limiter.peak.read(1, true), 2);
+        assert_eq!(limiter.peak.take(1), 2);
         limiter.acquire().await.unwrap_err();
         drop(held);
         assert_eq!(limiter.stats().in_use_peak, 2);
