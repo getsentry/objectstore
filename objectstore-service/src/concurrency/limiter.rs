@@ -3,8 +3,9 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::io;
-use std::mem::DropGuard;
+use std::mem::{self, DropGuard};
 use std::num::NonZeroU32;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::Poll;
 use std::time::Duration;
@@ -71,16 +72,41 @@ pub struct LimiterStats {
     pub in_use: u32,
 }
 
+/// High-water mark of the permits in use, for limiters that count them outside of a lock.
+///
+/// A periodic snapshot misses bursts that start and end between two snapshots, so limiters
+/// also [`observe`](Self::observe) their usage as permits are acquired.
+#[derive(Debug, Default)]
+pub(super) struct Peak(AtomicU32);
+
+impl Peak {
+    /// Raises the mark to `in_use` if that is higher.
+    pub(super) fn observe(&self, in_use: u32) {
+        self.0.fetch_max(in_use, Ordering::Relaxed);
+    }
+
+    /// Returns the highest count since the previous call and restarts the mark at `in_use`.
+    ///
+    /// Restarting at the current count instead of zero keeps permits visible that stay held
+    /// while nothing new is acquired.
+    pub(super) fn take(&self, in_use: u32) -> u32 {
+        self.0.swap(in_use, Ordering::Relaxed).max(in_use)
+    }
+}
+
 /// Shared interval loop for the metric emitters.
-async fn run_emitter<S, F, Fut>(mut snapshot: impl FnMut() -> S, mut emit: F) -> !
+///
+/// `sample` returns the stats and the peak permits in use since its previous call.
+async fn run_emitter<S, F, Fut>(mut sample: impl FnMut() -> (S, u32), mut emit: F) -> !
 where
-    F: FnMut(S) -> Fut,
+    F: FnMut(S, u32) -> Fut,
     Fut: Future<Output = ()>,
 {
     let mut ticker = tokio::time::interval(METRICS_EMITTER_INTERVAL);
     loop {
         ticker.tick().await;
-        emit(snapshot()).await;
+        let (stats, in_use_peak) = sample();
+        emit(stats, in_use_peak).await;
     }
 }
 
@@ -89,6 +115,7 @@ where
 pub struct Limiter {
     semaphore: Arc<Semaphore>,
     queue: Option<Arc<Semaphore>>,
+    peak: Arc<Peak>,
     capacity: u32,
     timeout: Duration,
 }
@@ -100,6 +127,7 @@ impl Limiter {
         Self {
             semaphore: Arc::new(Semaphore::new(capacity as usize)),
             queue: max_queue_size.map(|size| Arc::new(Semaphore::new(size as usize))),
+            peak: Arc::default(),
             capacity,
             timeout,
         }
@@ -111,8 +139,13 @@ impl Limiter {
     /// Dropping the future releases its queue slot and any assigned permit.
     pub async fn acquire(&self) -> Result<Permit> {
         if let Ok(permit) = self.semaphore.clone().try_acquire_owned() {
+            // A release between the acquisition and this read lowers the reading.
+            self.peak.observe(self.in_use());
             return Ok(Permit::semaphore(permit));
         }
+        // No permit was free. Recording that here makes every rejection and wait show up as a
+        // full limiter, whatever is released right after.
+        self.peak.observe(self.capacity);
         if self.timeout.is_zero() {
             return Err(ErrorKind::AtCapacity.into());
         }
@@ -129,20 +162,31 @@ impl Limiter {
         Ok(Permit::semaphore(permit))
     }
 
+    fn in_use(&self) -> u32 {
+        self.capacity - self.semaphore.available_permits() as u32
+    }
+
     /// Returns the current number of permits in use.
     pub fn stats(&self) -> LimiterStats {
         LimiterStats {
-            in_use: self.capacity - self.semaphore.available_permits() as u32,
+            in_use: self.in_use(),
         }
     }
 
     /// Passes this limiter's stats to `emit` immediately and once per second thereafter.
+    ///
+    /// The second argument is the highest number of permits in use since the previous call,
+    /// which captures bursts that the stats miss.
     pub async fn run_emitter<F, Fut>(&self, emit: F) -> !
     where
-        F: FnMut(LimiterStats) -> Fut,
+        F: FnMut(LimiterStats, u32) -> Fut,
         Fut: Future<Output = ()>,
     {
-        run_emitter(|| self.stats(), emit).await
+        let sample = || {
+            let stats = self.stats();
+            (stats, self.peak.take(stats.in_use))
+        };
+        run_emitter(sample, emit).await
     }
 }
 
@@ -199,6 +243,7 @@ impl PriorityLimiter {
             capacity: capacity.get(),
             state: Arc::new(Mutex::new(PriorityState {
                 free: capacity.get(),
+                peak_in_use: 0,
                 next_id: 0,
                 normal_queue: WaiterQueue::new(),
                 high_queue: WaiterQueue::new(),
@@ -221,6 +266,7 @@ impl PriorityLimiter {
             // A free permit implies that nobody is queued, so taking it overtakes no one.
             if state.free > 0 {
                 state.free -= 1;
+                state.peak_in_use = state.peak_in_use.max(self.capacity - state.free);
                 return Ok(Permit::priority(self.state.clone()));
             }
             if timeout == Some(Duration::ZERO) {
@@ -264,13 +310,23 @@ impl PriorityLimiter {
         }
     }
 
+    /// Returns the highest number of permits in use since the previous call.
+    fn take_peak(&self) -> u32 {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let in_use = self.capacity - state.free;
+        mem::replace(&mut state.peak_in_use, in_use)
+    }
+
     /// Passes this limiter's stats to `emit` immediately and once per second thereafter.
+    ///
+    /// The second argument is the highest number of permits in use since the previous call,
+    /// which captures bursts that the stats miss.
     pub async fn run_emitter<F, Fut>(&self, emit: F) -> !
     where
-        F: FnMut(PriorityLimiterStats) -> Fut,
+        F: FnMut(PriorityLimiterStats, u32) -> Fut,
         Fut: Future<Output = ()>,
     {
-        run_emitter(|| self.stats(), emit).await
+        run_emitter(|| (self.stats(), self.take_peak()), emit).await
     }
 }
 
@@ -283,6 +339,9 @@ type WaiterQueue = BTreeMap<u64, oneshot::Sender<Permit>>;
 #[derive(Debug)]
 struct PriorityState {
     free: u32,
+    /// Highest number of permits in use since the emitter last took it. Handing a slot to a
+    /// waiter keeps it in use, so only taking a free permit can raise this.
+    peak_in_use: u32,
     next_id: u64,
     normal_queue: WaiterQueue,
     high_queue: WaiterQueue,
@@ -341,11 +400,11 @@ mod tests {
         let simple_permit = simple.acquire().await.unwrap();
         let (priority_sender, mut priority_receiver) = tokio::sync::mpsc::unbounded_channel();
         let (simple_sender, mut simple_receiver) = tokio::sync::mpsc::unbounded_channel();
-        let priority_emitter = priority.run_emitter(|stats| {
+        let priority_emitter = priority.run_emitter(|stats, _| {
             priority_sender.send(stats).unwrap();
             std::future::ready(())
         });
-        let simple_emitter = simple.run_emitter(|stats| {
+        let simple_emitter = simple.run_emitter(|stats, _| {
             simple_sender.send(stats).unwrap();
             std::future::ready(())
         });
@@ -365,6 +424,68 @@ mod tests {
             PriorityLimiterStats::default()
         );
         assert_eq!(simple_receiver.try_recv().unwrap(), LimiterStats::default());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn emitter_reports_peak_usage_between_emissions() {
+        const CAPACITY: u32 = 3;
+        let capacity = NonZeroU32::new(CAPACITY).unwrap();
+        let priority = PriorityLimiter::new(capacity, TIMEOUT, TIMEOUT, None, None);
+        let simple = Limiter::new(capacity, Duration::ZERO, None);
+        let (priority_sender, mut priority_peaks) = tokio::sync::mpsc::unbounded_channel();
+        let (simple_sender, mut simple_peaks) = tokio::sync::mpsc::unbounded_channel();
+        let priority_emitter = priority.run_emitter(|stats, peak| {
+            priority_sender.send((stats.in_use, peak)).unwrap();
+            std::future::ready(())
+        });
+        let simple_emitter = simple.run_emitter(|stats, peak| {
+            simple_sender.send((stats.in_use, peak)).unwrap();
+            std::future::ready(())
+        });
+        tokio::pin!(priority_emitter, simple_emitter);
+        let mut emit = async |advance: Duration| {
+            tokio::time::advance(advance).await;
+            assert!(poll!(&mut priority_emitter).is_pending());
+            assert!(poll!(&mut simple_emitter).is_pending());
+            let priority = priority_peaks.try_recv().unwrap();
+            assert_eq!(priority, simple_peaks.try_recv().unwrap());
+            priority
+        };
+        assert_eq!(emit(Duration::ZERO).await, (0, 0));
+
+        // A burst that is over before the next emission is still reported.
+        let held = (
+            priority.acquire(Priority::Normal).await.unwrap(),
+            simple.acquire().await.unwrap(),
+        );
+        let burst = (
+            priority.acquire(Priority::Normal).await.unwrap(),
+            simple.acquire().await.unwrap(),
+        );
+        drop(burst);
+        assert_eq!(emit(METRICS_EMITTER_INTERVAL).await, (1, 2));
+
+        // Permits held throughout count even though nothing was acquired.
+        assert_eq!(emit(METRICS_EMITTER_INTERVAL).await, (1, 1));
+
+        // Permits released since the previous emission were in use at its start.
+        drop(held);
+        assert_eq!(emit(METRICS_EMITTER_INTERVAL).await, (0, 1));
+        assert_eq!(emit(METRICS_EMITTER_INTERVAL).await, (0, 0));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rejection_marks_the_limiter_as_full() {
+        let limiter = Limiter::new(NonZeroU32::new(2).unwrap(), Duration::ZERO, None);
+        let held = (
+            limiter.acquire().await.unwrap(),
+            limiter.acquire().await.unwrap(),
+        );
+        // Lower the peak so that only the failed acquisition can raise it back to capacity.
+        assert_eq!(limiter.peak.take(1), 2);
+        limiter.acquire().await.unwrap_err();
+        drop(held);
+        assert_eq!(limiter.peak.take(0), 2);
     }
 
     #[tokio::test(start_paused = true)]

@@ -9,6 +9,11 @@
 //! waiters on drop, allowing [`ConcurrencyLimiter::wait_all`] to resolve once
 //! all permits have been returned.
 //!
+//! Every limiter has a `run_emitter` method that reports its usage once per second. Since such
+//! snapshots miss shorter bursts, the emitters also report the peak permits in use since their
+//! previous report. A limiter that had no free permit for an acquisition always reports a peak
+//! equal to its capacity.
+//!
 //! [`run_metered`] runs an isolated task and waits for its result, while
 //! [`spawn_metered`] starts the same task without waiting. Both provide panic
 //! recovery and `service.task.*` metric emission.
@@ -25,6 +30,7 @@ use crate::error::{Error, ErrorKind, Panic, Result};
 
 mod limiter;
 
+use limiter::Peak;
 pub use limiter::{Limiter, LimiterStats, Permit, Priority, PriorityLimiter, PriorityLimiterStats};
 
 /// Interval for the periodic metrics emitter.
@@ -61,6 +67,7 @@ pub struct ConcurrencyLimiter {
     tasks: Arc<Semaphore>,
     queue: Arc<Semaphore>,
     bulk: Arc<Semaphore>,
+    in_use_peak: Arc<Peak>,
     tasks_total: u32,
     queue_total: u32,
     bulk_total: u32,
@@ -81,6 +88,7 @@ impl ConcurrencyLimiter {
             tasks: Arc::new(Semaphore::new(max as usize)),
             queue: Arc::new(Semaphore::new(0)),
             bulk: Arc::new(Semaphore::new(max as usize)),
+            in_use_peak: Arc::default(),
             tasks_total: max,
             queue_total: 0,
             bulk_total: max,
@@ -136,7 +144,7 @@ impl ConcurrencyLimiter {
         }
 
         // Fast path: Instantly grab a free permit without parking.
-        if let Ok(task_permit) = self.tasks.clone().try_acquire_owned() {
+        if let Some(task_permit) = self.try_acquire_task() {
             return Ok(ConcurrencyPermit {
                 task_permit: Some(task_permit),
                 bulk_permit: None,
@@ -169,11 +177,7 @@ impl ConcurrencyLimiter {
     ///
     /// Returns [`ErrorKind::AtCapacity`] when no permits are available.
     pub fn try_acquire(&self) -> Result<ConcurrencyPermit> {
-        let task_permit = self
-            .tasks
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| ErrorKind::AtCapacity)?;
+        let task_permit = self.try_acquire_task().ok_or(ErrorKind::AtCapacity)?;
 
         Ok(ConcurrencyPermit {
             task_permit: Some(task_permit),
@@ -196,12 +200,12 @@ impl ConcurrencyLimiter {
             return Err(ErrorKind::AtCapacity.into());
         }
 
-        let bulk_sem = self.bulk.clone();
-        let tasks_sem = self.tasks.clone();
-
-        let acquire = async move {
-            let bulk_permit = bulk_sem.acquire_owned().await?;
-            let task_permit = tasks_sem.acquire_owned().await?;
+        let acquire = async {
+            let bulk_permit = self.bulk.clone().acquire_owned().await?;
+            let task_permit = match self.try_acquire_task() {
+                Some(task_permit) => task_permit,
+                None => self.tasks.clone().acquire_owned().await?,
+            };
             Ok((task_permit, bulk_permit))
         };
 
@@ -215,6 +219,23 @@ impl ConcurrencyLimiter {
             bulk_permit: Some(bulk_permit),
             released: Arc::clone(&self.released),
         })
+    }
+
+    /// Takes a free execution permit without waiting, tracking the peak permits in use.
+    fn try_acquire_task(&self) -> Option<OwnedSemaphorePermit> {
+        match self.tasks.clone().try_acquire_owned() {
+            Ok(permit) => {
+                // A release between the acquisition and this read lowers the reading.
+                self.in_use_peak.observe(self.used_permits());
+                Some(permit)
+            }
+            Err(_) => {
+                // No permit was free. Recording that here makes every rejection and wait show
+                // up as a full limiter, whatever is released right after.
+                self.in_use_peak.observe(self.tasks_total);
+                None
+            }
+        }
     }
 
     /// Returns the number of permits currently available.
@@ -277,17 +298,21 @@ impl ConcurrencyLimiter {
 
     /// Periodically calls `emit` with the current in-use and queued counts.
     ///
+    /// The second argument is the highest number of execution permits held since the previous
+    /// call, which captures bursts that the stats miss.
+    ///
     /// This future runs forever and is intended to be spawned as a background
     /// task alongside the service.
     pub async fn run_emitter<F, Fut>(&self, mut emit: F) -> !
     where
-        F: FnMut(Stats) -> Fut,
+        F: FnMut(Stats, u32) -> Fut,
         Fut: Future<Output = ()>,
     {
         let mut ticker = tokio::time::interval(EMITTER_INTERVAL);
         loop {
             ticker.tick().await;
-            emit(self.stats()).await;
+            let stats = self.stats();
+            emit(stats, self.in_use_peak.take(stats.in_use)).await;
         }
     }
 }
@@ -490,7 +515,7 @@ mod tests {
         let in_use_clone = Arc::clone(&emitted_in_use);
         let queued_clone = Arc::clone(&emitted_queued);
 
-        let emitter = limiter.run_emitter(move |stats| {
+        let emitter = limiter.run_emitter(move |stats, _| {
             let in_use_ref = Arc::clone(&in_use_clone);
             let queued_ref = Arc::clone(&queued_clone);
             async move {
@@ -506,6 +531,57 @@ mod tests {
 
         assert_eq!(emitted_in_use.load(Ordering::Relaxed), 1);
         assert_eq!(emitted_queued.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn emitter_reports_peak_usage_between_emissions() {
+        let limiter = ConcurrencyLimiter::new(3).with_queue(1);
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let emitter = limiter.run_emitter(|stats, peak| {
+            sender.send((stats.in_use, peak)).unwrap();
+            std::future::ready(())
+        });
+        tokio::pin!(emitter);
+        let mut emit = async |advance: Duration| {
+            tokio::time::advance(advance).await;
+            assert!(futures::poll!(&mut emitter).is_pending());
+            receiver.try_recv().unwrap()
+        };
+        assert_eq!(emit(Duration::ZERO).await, (0, 0));
+
+        // A burst that is over before the next emission is still reported.
+        let held = limiter.acquire().await.unwrap();
+        drop(limiter.acquire_bulk().await.unwrap());
+        assert_eq!(emit(EMITTER_INTERVAL).await, (1, 2));
+
+        // Permits held throughout count even though nothing was acquired.
+        assert_eq!(emit(EMITTER_INTERVAL).await, (1, 1));
+
+        // Permits released since the previous emission were in use at its start.
+        drop(held);
+        assert_eq!(emit(EMITTER_INTERVAL).await, (0, 1));
+        assert_eq!(emit(EMITTER_INTERVAL).await, (0, 0));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn contention_marks_the_limiter_as_full() {
+        for bulk in [false, true] {
+            let limiter = ConcurrencyLimiter::new(2).with_queue(1);
+            let held = (
+                limiter.try_acquire().unwrap(),
+                limiter.try_acquire().unwrap(),
+            );
+            // Lower the peak so that only the failed acquisition can raise it back to capacity.
+            assert_eq!(limiter.in_use_peak.take(1), 2);
+            let mut waiting: std::pin::Pin<Box<dyn Future<Output = _>>> = match bulk {
+                false => Box::pin(limiter.acquire()),
+                true => Box::pin(limiter.acquire_bulk()),
+            };
+            assert!(futures::poll!(&mut waiting).is_pending());
+            drop(waiting);
+            drop(held);
+            assert_eq!(limiter.in_use_peak.take(0), 2);
+        }
     }
 
     #[tokio::test]
@@ -698,7 +774,7 @@ mod tests {
         let in_use_clone = Arc::clone(&emitted_in_use);
         let queued_clone = Arc::clone(&emitted_queued);
 
-        let emitter = limiter.run_emitter(move |stats| {
+        let emitter = limiter.run_emitter(move |stats, _| {
             let in_use_ref = Arc::clone(&in_use_clone);
             let queued_ref = Arc::clone(&queued_clone);
             async move {
