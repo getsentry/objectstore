@@ -57,7 +57,6 @@ def captured_spans() -> Generator[list[SpanJSON]]:
     sentry_sdk.init(
         dsn="http://public@localhost/1",
         traces_sample_rate=1.0,
-        trace_lifecycle="stream",
         before_send_span=capture,
         transport=_NoOpTransport,
     )
