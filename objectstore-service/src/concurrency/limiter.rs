@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::io;
-use std::mem::{self, DropGuard};
+use std::mem::DropGuard;
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -75,30 +75,43 @@ pub struct LimiterStats {
     pub in_use_peak: u32,
 }
 
-/// High-water mark of the permits in use, for limiters that count them outside of a lock.
+/// High-water mark of the permits in use of a semaphore.
 ///
 /// A periodic snapshot misses bursts that start and end between two snapshots, so limiters
-/// also [`observe`](Self::observe) their usage as permits are acquired.
+/// acquire free permits through [`try_acquire`](Self::try_acquire), which tracks their usage.
 #[derive(Debug, Default)]
 pub(super) struct Peak(AtomicU32);
 
 impl Peak {
-    /// Raises the mark to `in_use` if that is higher.
-    pub(super) fn observe(&self, in_use: u32) {
+    /// Takes a free permit from `semaphore` without waiting and raises the mark to the
+    /// resulting number of its `capacity` permits in use.
+    pub(super) fn try_acquire(
+        &self,
+        semaphore: &Arc<Semaphore>,
+        capacity: u32,
+    ) -> Option<OwnedSemaphorePermit> {
+        let permit = semaphore.clone().try_acquire_owned().ok();
+        let in_use = match permit {
+            // A release between the acquisition and this read lowers the reading.
+            Some(_) => capacity - semaphore.available_permits() as u32,
+            // No permit was free. Recording that here makes every rejection and wait show up
+            // as a full limiter, whatever is released right after.
+            None => capacity,
+        };
         self.0.fetch_max(in_use, Ordering::Relaxed);
+        permit
     }
 
-    /// Returns the highest count since the previous [`take`](Self::take).
-    pub(super) fn get(&self, in_use: u32) -> u32 {
-        self.0.load(Ordering::Relaxed).max(in_use)
-    }
-
-    /// Returns the highest count since the previous call and restarts the mark at `in_use`.
+    /// Returns the highest number of permits in use since the mark was last restarted.
     ///
-    /// Restarting at the current count instead of zero keeps permits visible that stay held
-    /// while nothing new is acquired.
-    pub(super) fn take(&self, in_use: u32) -> u32 {
-        self.0.swap(in_use, Ordering::Relaxed).max(in_use)
+    /// `in_use` is the current number. With `restart`, the mark restarts there instead of at
+    /// zero, which keeps permits visible that stay held while nothing new is acquired.
+    pub(super) fn read(&self, in_use: u32, restart: bool) -> u32 {
+        let peak = match restart {
+            true => self.0.swap(in_use, Ordering::Relaxed),
+            false => self.0.load(Ordering::Relaxed),
+        };
+        peak.max(in_use)
     }
 }
 
@@ -143,14 +156,9 @@ impl Limiter {
     /// Returns [`ErrorKind::AtCapacity`] when the queue is full or the wait times out.
     /// Dropping the future releases its queue slot and any assigned permit.
     pub async fn acquire(&self) -> Result<Permit> {
-        if let Ok(permit) = self.semaphore.clone().try_acquire_owned() {
-            // A release between the acquisition and this read lowers the reading.
-            self.peak.observe(self.in_use());
+        if let Some(permit) = self.peak.try_acquire(&self.semaphore, self.capacity) {
             return Ok(Permit::semaphore(permit));
         }
-        // No permit was free. Recording that here makes every rejection and wait show up as a
-        // full limiter, whatever is released right after.
-        self.peak.observe(self.capacity);
         if self.timeout.is_zero() {
             return Err(ErrorKind::AtCapacity.into());
         }
@@ -167,16 +175,16 @@ impl Limiter {
         Ok(Permit::semaphore(permit))
     }
 
-    fn in_use(&self) -> u32 {
-        self.capacity - self.semaphore.available_permits() as u32
-    }
-
     /// Returns the current and peak number of permits in use.
     pub fn stats(&self) -> LimiterStats {
-        let in_use = self.in_use();
+        self.snapshot(false)
+    }
+
+    fn snapshot(&self, restart_peak: bool) -> LimiterStats {
+        let in_use = self.capacity - self.semaphore.available_permits() as u32;
         LimiterStats {
             in_use,
-            in_use_peak: self.peak.get(in_use),
+            in_use_peak: self.peak.read(in_use, restart_peak),
         }
     }
 
@@ -188,14 +196,7 @@ impl Limiter {
         F: FnMut(LimiterStats) -> Fut,
         Fut: Future<Output = ()>,
     {
-        let snapshot = || {
-            let stats = self.stats();
-            LimiterStats {
-                in_use_peak: self.peak.take(stats.in_use),
-                ..stats
-            }
-        };
-        run_emitter(snapshot, emit).await
+        run_emitter(|| self.snapshot(true), emit).await
     }
 }
 
@@ -314,23 +315,23 @@ impl PriorityLimiter {
 
     /// Returns a snapshot of permits in use and queued acquisitions.
     pub fn stats(&self) -> PriorityLimiterStats {
-        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        PriorityLimiterStats {
+        self.snapshot(false)
+    }
+
+    fn snapshot(&self, restart_peak: bool) -> PriorityLimiterStats {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let stats = PriorityLimiterStats {
             in_use: self.capacity - state.free,
             in_use_peak: state.in_use_peak,
             waiting_normal: state.normal_queue.len(),
             waiting_high: state.high_queue.len(),
+        };
+        if restart_peak {
+            // Restarting at the current number instead of zero keeps permits visible that stay
+            // held while nothing new is acquired.
+            state.in_use_peak = stats.in_use;
         }
-    }
-
-    /// Returns the highest number of permits in use since the previous call.
-    ///
-    /// The next peak starts at the current number instead of zero, which keeps permits visible
-    /// that stay held while nothing new is acquired.
-    fn take_peak(&self) -> u32 {
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        let in_use = self.capacity - state.free;
-        mem::replace(&mut state.in_use_peak, in_use)
+        stats
     }
 
     /// Passes this limiter's stats to `emit` immediately and once per second thereafter.
@@ -341,11 +342,7 @@ impl PriorityLimiter {
         F: FnMut(PriorityLimiterStats) -> Fut,
         Fut: Future<Output = ()>,
     {
-        let snapshot = || PriorityLimiterStats {
-            in_use_peak: self.take_peak(),
-            ..self.stats()
-        };
-        run_emitter(snapshot, emit).await
+        run_emitter(|| self.snapshot(true), emit).await
     }
 }
 
@@ -518,10 +515,10 @@ mod tests {
             limiter.acquire().await.unwrap(),
         );
         // Lower the peak so that only the failed acquisition can raise it back to capacity.
-        assert_eq!(limiter.peak.take(1), 2);
+        assert_eq!(limiter.peak.read(1, true), 2);
         limiter.acquire().await.unwrap_err();
         drop(held);
-        assert_eq!(limiter.peak.take(0), 2);
+        assert_eq!(limiter.stats().in_use_peak, 2);
     }
 
     #[tokio::test(start_paused = true)]

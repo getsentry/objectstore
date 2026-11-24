@@ -173,6 +173,7 @@ impl StorageService {
     ///  - `service.concurrency.in_use_peak` (distribution): most tasks running at once since the
     ///    previous emission. Unlike the gauges, which only keep the last value of each flush
     ///    interval, its `max` over any period is the true peak.
+    ///  - `service.concurrency.bulk_in_use_peak` (distribution): the same for bulk tasks
     ///  - `service.concurrency.queued`: currently queued tasks
     ///  - `service.concurrency.bulk_in_use`: currently running bulk tasks
     ///  - `service.expiry_renewal.queued`: expiry renewals waiting for the background worker
@@ -194,6 +195,9 @@ impl StorageService {
                     objectstore_metrics::gauge!("service.concurrency.queued" = stats.queued);
                     objectstore_metrics::gauge!(
                         "service.concurrency.bulk_in_use" = stats.bulk_in_use
+                    );
+                    objectstore_metrics::record!(
+                        "service.concurrency.bulk_in_use_peak" = stats.bulk_in_use_peak
                     );
                 })
                 .await;
