@@ -40,6 +40,9 @@ from objectstore_client.metadata import Compression, TimeToLive
 from objectstore_client.scope import Scope
 
 TEST_EDDSA_KID: str = "test_kid"
+# The server's Bigtable emulator keeps objects across test runs. A fresh
+# organization per run keeps tests from reading objects left by earlier runs.
+ORG: int = random.randrange(1, 2**53)
 TEST_EDDSA_PRIVKEY_PATH: str = (
     os.path.dirname(os.path.realpath(__file__)) + "/ed25519.private.pem"
 )
@@ -139,8 +142,15 @@ class Server:
         env = {
             **os.environ,
             "OS__HTTP_ADDR": addr,
-            "OS__STORAGE__TYPE": "filesystem",
-            "OS__STORAGE__PATH": self._tempdir,
+            # Requires the Bigtable emulator from devservices.
+            "OS__STORAGE__TYPE": "tiered",
+            "OS__STORAGE__HIGH_VOLUME__TYPE": "bigtable",
+            "OS__STORAGE__HIGH_VOLUME__ENDPOINT": "localhost:8086",
+            "OS__STORAGE__HIGH_VOLUME__PROJECT_ID": "testing",
+            "OS__STORAGE__HIGH_VOLUME__INSTANCE_NAME": "objectstore",
+            "OS__STORAGE__HIGH_VOLUME__TABLE_NAME": "objectstore",
+            "OS__STORAGE__LONG_TERM__TYPE": "filesystem",
+            "OS__STORAGE__LONG_TERM__PATH": self._tempdir,
             "OS__LOG__LEVEL": "trace",
             "OS__AUTH__ENFORCE": "true",
             "OS__AUTH__KEYS": env_key_map,
@@ -180,7 +190,7 @@ def test_full_cycle(server_url: str) -> None:
         expiration_policy=TimeToLive(timedelta(days=1)),
     )
 
-    session = client.session(test_usecase, org=42, project=1337)
+    session = client.session(test_usecase, org=ORG, project=1337)
 
     object_key = session.put(b"test data")
     assert object_key is not None
@@ -205,7 +215,7 @@ def test_full_cycle(server_url: str) -> None:
 def test_resumable_upload(server_url: str) -> None:
     session = Client(server_url, token=TestTokenGenerator.get()).session(
         Usecase("test-usecase", expiration_policy=TimeToLive(timedelta(days=1))),
-        org=42,
+        org=ORG,
         project=1337,
     )
     padding = b"x" * RESUMABLE_PADDING
@@ -252,7 +262,7 @@ def test_resumable_upload(server_url: str) -> None:
 
 def test_resumable_upload_precompressed(server_url: str) -> None:
     session = Client(server_url, token=TestTokenGenerator.get()).session(
-        Usecase("test-usecase", compression="none"), org=42, project=1337
+        Usecase("test-usecase", compression="none"), org=ORG, project=1337
     )
     payload = incompressible(RESUMABLE_PADDING + 6)
     compressed = zstandard.ZstdCompressor().compress(payload)
@@ -275,7 +285,7 @@ def test_resumable_upload_precompressed(server_url: str) -> None:
 
 def test_resumable_upload_cancel(server_url: str) -> None:
     session = Client(server_url, token=TestTokenGenerator.get()).session(
-        Usecase("test-usecase"), org=42, project=1337
+        Usecase("test-usecase"), org=ORG, project=1337
     )
     upload = session._create_upload(RESUMABLE_PADDING + 6)
     assert upload is not None
@@ -297,7 +307,7 @@ def test_head(server_url: str) -> None:
         expiration_policy=TimeToLive(timedelta(days=1)),
     )
 
-    session = client.session(test_usecase, org=42, project=1337)
+    session = client.session(test_usecase, org=ORG, project=1337)
 
     payload = b"test data"
     object_key = session.put(payload, origin="203.0.113.42", compress="none")
@@ -324,7 +334,7 @@ def test_full_cycle_with_origin(server_url: str) -> None:
         expiration_policy=TimeToLive(timedelta(days=1)),
     )
 
-    session = client.session(test_usecase, org=42, project=1337)
+    session = client.session(test_usecase, org=ORG, project=1337)
 
     object_key = session.put(b"test data", origin="203.0.113.42", filename="report.pdf")
     assert object_key is not None
@@ -346,7 +356,7 @@ def test_full_cycle_with_unicode_metadata(server_url: str) -> None:
         expiration_policy=TimeToLive(timedelta(days=1)),
     )
 
-    session = client.session(test_usecase, org=42, project=1337)
+    session = client.session(test_usecase, org=ORG, project=1337)
 
     object_key = session.put(
         b"test data",
@@ -385,7 +395,7 @@ def test_round_trips_expiration_policy_beyond_a_year(server_url: str) -> None:
         expiration_policy=TimeToLive(ttl),
     )
 
-    session = client.session(test_usecase, org=42, project=1337)
+    session = client.session(test_usecase, org=ORG, project=1337)
 
     object_key = session.put(b"test data")
 
@@ -402,7 +412,7 @@ def test_round_trips_expiration_policy_beyond_a_year(server_url: str) -> None:
 def test_extend_expiry(server_url: str) -> None:
     client = Client(server_url, token=TestTokenGenerator.get())
     policy = TimeToLive(timedelta(days=1))
-    session = client.session(Usecase("test-usecase", expiration_policy=policy), org=42)
+    session = client.session(Usecase("test-usecase", expiration_policy=policy), org=ORG)
     key = session.put(b"payload")
 
     session.extend_expiry(key, from_creation=timedelta(days=3))
@@ -420,7 +430,7 @@ def test_extend_expiry(server_url: str) -> None:
 
 def test_extend_expiry_missing_object(server_url: str) -> None:
     client = Client(server_url, token=TestTokenGenerator.get())
-    session = client.session(Usecase("test-usecase"), org=42)
+    session = client.session(Usecase("test-usecase"), org=ORG)
     with pytest.raises(ObjectNotFound) as error:
         session.extend_expiry("missing", from_now=timedelta(days=1))
     assert error.value.status == 404
@@ -428,7 +438,7 @@ def test_extend_expiry_missing_object(server_url: str) -> None:
 
 def test_extend_expiry_non_expiring_object(server_url: str) -> None:
     client = Client(server_url, token=TestTokenGenerator.get())
-    session = client.session(Usecase("test-usecase"), org=42)
+    session = client.session(Usecase("test-usecase"), org=ORG)
     key = session.put(b"payload")
     with pytest.raises(ExpiryExtensionRejected) as error:
         session.extend_expiry(key, from_now=timedelta(days=1))
@@ -473,7 +483,7 @@ def test_precompressed_is_stored_verbatim(server_url: str) -> None:
         token=TestTokenGenerator.get(),
     )
     test_usecase = Usecase("test-usecase")
-    session = client.session(test_usecase, org=42, project=1337)
+    session = client.session(test_usecase, org=ORG, project=1337)
 
     data = b"test data"
     compressed_data = zstandard.ZstdCompressor().compress(data)
@@ -496,7 +506,7 @@ def test_precompressed_is_stored_verbatim(server_url: str) -> None:
 def test_full_cycle_gzip(server_url: str) -> None:
     client = Client(server_url, token=TestTokenGenerator.get())
     session = client.session(
-        Usecase("test-usecase", compression="gzip"), org=42, project=1337
+        Usecase("test-usecase", compression="gzip"), org=ORG, project=1337
     )
 
     object_key = session.put(b"test data" * 100)
@@ -521,7 +531,7 @@ def test_full_cycle_gzip(server_url: str) -> None:
 
 def test_precompressed_gzip(server_url: str) -> None:
     client = Client(server_url, token=TestTokenGenerator.get())
-    session = client.session(Usecase("test-usecase"), org=42, project=1337)
+    session = client.session(Usecase("test-usecase"), org=ORG, project=1337)
 
     compressed = gzip.compress(b"test data")
     object_key = session.put(compressed, precompressed="gzip")
@@ -538,7 +548,7 @@ def test_precompressed_gzip(server_url: str) -> None:
 
 def test_unsupported_compression(server_url: str) -> None:
     client = Client(server_url, token=TestTokenGenerator.get())
-    session = client.session(Usecase("test-usecase"), org=42, project=1337)
+    session = client.session(Usecase("test-usecase"), org=ORG, project=1337)
 
     with pytest.raises(ValueError, match="Invalid compression"):
         session.put(b"test data", compress=cast(Compression, "lz4"))
@@ -550,7 +560,7 @@ def test_unsupported_compression(server_url: str) -> None:
 
 def test_precompressed_rejects_conflicting_arguments(server_url: str) -> None:
     client = Client(server_url, token=TestTokenGenerator.get())
-    session = client.session(Usecase("test-usecase"), org=42, project=1337)
+    session = client.session(Usecase("test-usecase"), org=ORG, project=1337)
 
     with pytest.raises(ValueError):
         session.put(b"test data", compress="zstd", precompressed="zstd")
@@ -572,7 +582,7 @@ def test_full_cycle_structured_key(server_url: str) -> None:
         expiration_policy=TimeToLive(timedelta(days=1)),
     )
 
-    session = client.session(test_usecase, org=42, project=1337)
+    session = client.session(test_usecase, org=ORG, project=1337)
     object_key = session.put(b"test data", key="1/shard-0.json")
     assert object_key == "1/shard-0.json"
 
@@ -592,17 +602,19 @@ def test_not_found_with_different_scope(server_url: str) -> None:
     )
 
     # First create an object with one scope
-    session = client.session(test_usecase, org=42, project=1337)
+    session = client.session(test_usecase, org=ORG, project=1337)
     object_key = session.put(b"test data")
 
     # Now make sure we can't fetch it
-    session = client.session(test_usecase, org=42, project=9999)
+    session = client.session(test_usecase, org=ORG, project=9999)
     assert session.get(object_key) is None
 
 
 def test_full_cycle_with_static_token(server_url: str) -> None:
     token_generator = TestTokenGenerator.get()
-    token = token_generator.token_for_scope("test-usecase", Scope(org=42, project=1337))
+    token = token_generator.token_for_scope(
+        "test-usecase", Scope(org=ORG, project=1337)
+    )
 
     client = Client(server_url, token=token)
     test_usecase = Usecase(
@@ -610,7 +622,7 @@ def test_full_cycle_with_static_token(server_url: str) -> None:
         expiration_policy=TimeToLive(timedelta(days=1)),
     )
 
-    session = client.session(test_usecase, org=42, project=1337)
+    session = client.session(test_usecase, org=ORG, project=1337)
 
     object_key = session.put(b"static token data")
     assert object_key is not None
@@ -631,7 +643,7 @@ def test_fails_with_insufficient_auth_perms(server_url: str) -> None:
         expiration_policy=TimeToLive(timedelta(days=1)),
     )
 
-    session = client.session(test_usecase, org=42, project=1337)
+    session = client.session(test_usecase, org=ORG, project=1337)
 
     with pytest.raises(RequestError) as exc_info:
         _object_key = session.put(b"test data")
@@ -657,9 +669,7 @@ def test_read_timeout() -> None:
         expiration_policy=TimeToLive(timedelta(days=1)),
     )
 
-    session = client.session(
-        test_usecase, org=12345, project=1337, app_slug="email_app"
-    )
+    session = client.session(test_usecase, org=ORG, project=1337, app_slug="email_app")
 
     with pytest.raises(urllib3.exceptions.MaxRetryError):
         session.get("foo")
@@ -682,9 +692,7 @@ def test_connect_timeout() -> None:
         expiration_policy=TimeToLive(timedelta(days=1)),
     )
 
-    session = client.session(
-        test_usecase, org=12345, project=1337, app_slug="email_app"
-    )
+    session = client.session(test_usecase, org=ORG, project=1337, app_slug="email_app")
 
     with pytest.raises(urllib3.exceptions.MaxRetryError):
         session.get("foo")
@@ -719,7 +727,7 @@ def _presign_session(server_url: str) -> Session:
         compression="none",
         expiration_policy=TimeToLive(timedelta(days=1)),
     )
-    return client.session(usecase, org=42, project=1337)
+    return client.session(usecase, org=ORG, project=1337)
 
 
 def test_presigned_get_succeeds(server_url: str) -> None:
@@ -764,11 +772,11 @@ def test_presigned_case_insensitive_method(server_url: str) -> None:
 def test_presigned_requires_token_generator(server_url: str) -> None:
     # A static token string cannot sign pre-signed URLs.
     token = TestTokenGenerator.get().token_for_scope(
-        "test-usecase", Scope(org=42, project=1337)
+        "test-usecase", Scope(org=ORG, project=1337)
     )
     client = Client(server_url, token=token)
     usecase = Usecase("test-usecase")
-    session = client.session(usecase, org=42, project=1337)
+    session = client.session(usecase, org=ORG, project=1337)
 
     with pytest.raises(ValueError, match="no token generator"):
         session.presigned_object_url("GET", "whatever", duration=timedelta(hours=1))
@@ -880,7 +888,7 @@ def test_jwt_response_options_remain_editable(server_url: str) -> None:
 
 def test_inline_preserves_stored_mime_type_and_compression(server_url: str) -> None:
     session = Client(server_url, token=TestTokenGenerator.get()).session(
-        Usecase("test-usecase", compression="zstd"), org=42, project=1337
+        Usecase("test-usecase", compression="zstd"), org=ORG, project=1337
     )
     payload = b'<svg xmlns="http://www.w3.org/2000/svg"><script>example</script></svg>'
     session.put(payload, key="svg-options", content_type="image/svg+xml")
@@ -933,10 +941,10 @@ def test_object_url_without_token_is_unauthorized(server_url: str) -> None:
 def test_object_url_read_only_token_requires_token_generator(server_url: str) -> None:
     # A static token string cannot mint a re-scoped read-only token.
     token = TestTokenGenerator.get().token_for_scope(
-        "test-usecase", Scope(org=42, project=1337)
+        "test-usecase", Scope(org=ORG, project=1337)
     )
     client = Client(server_url, token=token)
-    session = client.session(Usecase("test-usecase"), org=42, project=1337)
+    session = client.session(Usecase("test-usecase"), org=ORG, project=1337)
 
     with pytest.raises(ValueError, match="no token generator"):
         session.object_url("whatever", token_validity=timedelta(minutes=5))
@@ -983,7 +991,7 @@ def test_automatic_resumable_upload(
             expiration_policy=TimeToLive(timedelta(days=1)),
             resumable_threshold_bytes=threshold,
         ),
-        org=42,
+        org=ORG,
     )
     # Stays above the tiered storage threshold even when compressed.
     contents = incompressible(RESUMABLE_PADDING + 1)

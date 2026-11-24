@@ -255,7 +255,6 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use axum::routing::{get, post};
     use objectstore_service::StorageService;
-    use objectstore_service::backend::in_memory::InMemoryBackend;
     use objectstore_service::encryption::Cipher;
     use tower::ServiceExt;
 
@@ -264,11 +263,12 @@ mod tests {
     use crate::killswitches::{Killswitch, Killswitches};
     use crate::rate_limits::{RateLimiter, RateLimits, ThroughputLimits};
     use crate::state::{ServiceState, Services};
+    use crate::testing;
     use crate::web::RequestCounter;
 
     async fn test_state(config: Config) -> ServiceState {
         let service = StorageService::new(
-            Box::new(InMemoryBackend::new("in-memory")),
+            Box::new(testing::tiered_storage()),
             Cipher::ephemeral().unwrap(),
         );
         let key_directory = Arc::new(PublicKeyDirectory::from_config(&config.auth).await.unwrap());

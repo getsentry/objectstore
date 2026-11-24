@@ -1,5 +1,8 @@
 //! Exposes an in-process test server for use in integration tests.
 //!
+//! The server always stores objects in [`TieredStorage`]. [`TestServer::tiered`] returns a
+//! [`TestServerBuilder`] to replace either tier or to customize the rest of the configuration.
+//!
 //! ```
 //! use objectstore_test::server::TestServer;
 //!
@@ -14,9 +17,15 @@
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr, TcpListener};
 
-use objectstore_server::config::{AuthZVerificationKey, Config, StorageConfig};
+use objectstore_server::config::{AuthZVerificationKey, Config};
 use objectstore_server::state::Services;
 use objectstore_server::web::App;
+use objectstore_service::backend::changelog::NoopChangeLog;
+use objectstore_service::backend::common::{Backend, HighVolumeBackend};
+use objectstore_service::backend::in_memory::InMemoryBackend;
+use objectstore_service::backend::local_fs::{FileSystemConfig, LocalFsBackend};
+use objectstore_service::backend::tiered::TieredStorage;
+use objectstore_service::change_stream::ChangeStreamFactory;
 use objectstore_types::auth::Permission;
 use tempfile::TempDir;
 
@@ -42,63 +51,41 @@ pub const TEST_EDDSA_PUBKEY: &str = include_str!("../config/ed25519.public.pem")
 
 /// An in-process test server for use in integration tests.
 ///
-/// This server runs the full objectstore service using a temporary directory for storage, which is
-/// deleted when the server is dropped. It listens on a random available port on localhost.
+/// This server runs the full objectstore service on [`TieredStorage`] and listens on a random
+/// available port on localhost. See [`TestServerBuilder`] for the default backends.
 #[derive(Debug)]
 pub struct TestServer {
     handle: tokio::task::JoinHandle<()>,
     socket: SocketAddr,
-    _tempdirs: Vec<TempDir>,
+    org_id: u64,
+    _tempdir: Option<TempDir>,
 }
 
 impl TestServer {
-    /// Spawns a new test server with the given configuration.
-    ///
-    /// Unless overridden to a different kind of backend, any filesystem storage backends will use
-    /// temporary directories.
-    pub async fn with_config(mut config: Config) -> Self {
-        let addr = SocketAddr::from(([127, 0, 0, 1], 0));
-        let listener = TcpListener::bind(addr).unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let socket = listener.local_addr().unwrap();
-
-        config.logging.level = "trace".parse().unwrap();
-        crate::tracing::init();
-
-        let mut tempdirs = Vec::new();
-        replace_fs_paths(&mut config.storage, &mut tempdirs);
-
-        config.auth.keys = BTreeMap::from([(
-            TEST_EDDSA_KID.into(),
-            AuthZVerificationKey {
-                max_permissions: Permission::rwd(),
-                key_files: vec![TEST_EDDSA_PUBKEY_PATH.into()],
-            },
-        )]);
-
-        let state = Services::spawn(config).await.unwrap();
-        let app = App::new(state);
-
-        let handle = tokio::spawn(async move {
-            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
-            app.serve(listener).await.unwrap();
-        });
-
-        Self {
-            handle,
-            socket,
-            _tempdirs: tempdirs,
-        }
+    /// Returns a builder for a test server on [`TieredStorage`].
+    pub fn tiered() -> TestServerBuilder {
+        TestServerBuilder::default()
     }
 
-    /// Spawns a new test server with default configuration.
+    /// Spawns a new test server with the default backends and configuration.
+    ///
+    /// Equivalent to `TestServer::tiered().build().await`.
     pub async fn new() -> Self {
-        Self::with_config(Config::default()).await
+        Self::tiered().build().await
     }
 
     /// Returns the IP address on which the server is listening.
     pub fn ip(&self) -> IpAddr {
         self.socket.ip()
+    }
+
+    /// Returns an organization ID that is unique to this server.
+    ///
+    /// Backends such as the Bigtable emulator are shared with concurrently running tests and keep
+    /// their data across runs. Scoping objects to this organization keeps tests from reading or
+    /// overwriting each other's objects, even when they use the same keys.
+    pub fn org_id(&self) -> u64 {
+        self.org_id
     }
 
     /// Returns the port on which the server is listening.
@@ -121,19 +108,112 @@ impl Drop for TestServer {
     }
 }
 
-/// Recursively replaces filesystem backend paths with temporary directories.
+/// Builder for a [`TestServer`] on [`TieredStorage`], returned by [`TestServer::tiered`].
 ///
-/// For `FileSystem` variants, a new temp dir is created and its path is substituted.
-/// For `Tiered` variants, both sub-backends are processed recursively.
-/// Other backend types are left unchanged.
-fn replace_fs_paths(config: &mut StorageConfig, tempdirs: &mut Vec<TempDir>) {
-    match config {
-        StorageConfig::FileSystem(c) => {
+/// By default, the high-volume tier is an [`InMemoryBackend`] and the long-term tier is a
+/// [`LocalFsBackend`] in a temporary directory, which is deleted when the server is dropped.
+///
+/// ```
+/// use objectstore_test::server::{TestServer, config};
+///
+/// #[tokio::main]
+/// async fn main() {
+///     let server = TestServer::tiered()
+///         .config(config::Config {
+///             auth: config::AuthZ {
+///                 enforce: false,
+///                 ..Default::default()
+///             },
+///             ..Default::default()
+///         })
+///         .build()
+///         .await;
+///     let url = server.url("/health");
+/// }
+/// ```
+#[derive(Debug, Default)]
+pub struct TestServerBuilder {
+    high_volume: Option<Box<dyn HighVolumeBackend>>,
+    long_term: Option<Box<dyn Backend>>,
+    config: Config,
+}
+
+impl TestServerBuilder {
+    /// Replaces the default [`InMemoryBackend`] in the high-volume tier.
+    pub fn high_volume(mut self, backend: Box<dyn HighVolumeBackend>) -> Self {
+        self.high_volume = Some(backend);
+        self
+    }
+
+    /// Replaces the default [`LocalFsBackend`] in the long-term tier.
+    pub fn long_term(mut self, backend: Box<dyn Backend>) -> Self {
+        self.long_term = Some(backend);
+        self
+    }
+
+    /// Sets the server configuration, except for storage.
+    ///
+    /// The `storage` section of `config` is ignored, since the backends are set on this builder.
+    /// The log level and auth keys are always overridden for tests.
+    pub fn config(mut self, config: Config) -> Self {
+        self.config = config;
+        self
+    }
+
+    /// Spawns the test server.
+    pub async fn build(self) -> TestServer {
+        let Self {
+            high_volume,
+            long_term,
+            mut config,
+        } = self;
+
+        let addr = SocketAddr::from(([127, 0, 0, 1], 0));
+        let listener = TcpListener::bind(addr).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let socket = listener.local_addr().unwrap();
+
+        config.logging.level = "trace".parse().unwrap();
+        crate::tracing::init();
+
+        config.auth.keys = BTreeMap::from([(
+            TEST_EDDSA_KID.into(),
+            AuthZVerificationKey {
+                max_permissions: Permission::rwd(),
+                key_files: vec![TEST_EDDSA_PUBKEY_PATH.into()],
+            },
+        )]);
+
+        let high_volume =
+            high_volume.unwrap_or_else(|| Box::new(InMemoryBackend::new("in-memory")));
+        let mut tempdir = None;
+        let long_term = long_term.unwrap_or_else(|| {
             let dir = tempfile::tempdir().unwrap();
-            c.path = dir.path().into();
-            tempdirs.push(dir);
+            let config = FileSystemConfig {
+                path: dir.path().into(),
+                cogs: None,
+            };
+            tempdir = Some(dir);
+            Box::new(LocalFsBackend::new(config, &ChangeStreamFactory::default()))
+        });
+        let backend = TieredStorage::new(high_volume, long_term, Box::new(NoopChangeLog));
+
+        let state = Services::spawn_with_backend(config, Box::new(backend))
+            .await
+            .unwrap();
+        let app = App::new(state);
+
+        let handle = tokio::spawn(async move {
+            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+            app.serve(listener).await.unwrap();
+        });
+
+        TestServer {
+            handle,
+            socket,
+            // Stay within the integer range that JSON numbers represent exactly.
+            org_id: rand::random_range(1..1 << 53),
+            _tempdir: tempdir,
         }
-        StorageConfig::Tiered(c) => replace_fs_paths(&mut c.long_term, tempdirs),
-        StorageConfig::S3Compatible(_) | StorageConfig::Gcs(_) | StorageConfig::BigTable(_) => {}
     }
 }

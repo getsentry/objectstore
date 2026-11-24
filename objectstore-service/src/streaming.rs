@@ -372,7 +372,7 @@ mod tests {
     use super::*;
     use crate::backend::common::{ExpiryUpdate, PutResponse, SetExpiryResponse};
     use crate::backend::in_memory::InMemoryBackend;
-    use crate::backend::testing::{Hooks, TestBackend};
+    use crate::backend::testing::{Hooks, TestBackend, in_memory_tiered_storage};
     use crate::concurrency::ConcurrencyLimiter;
     use crate::encryption::Cipher;
     use crate::error::{Error, ErrorKind};
@@ -388,7 +388,7 @@ mod tests {
 
     fn make_service_with_limit(limit: u32) -> StorageService {
         StorageService::new(
-            Box::new(InMemoryBackend::new("in-memory")),
+            Box::new(in_memory_tiered_storage()),
             Cipher::ephemeral().unwrap(),
         )
         .with_concurrency(ConcurrencyLimiter::new(limit))
@@ -682,7 +682,7 @@ mod tests {
         // Bulk budget = 1 (100% of max=1). Hold the permit via a normal
         // acquire; the bulk op should wait and eventually time out.
         let service = StorageService::new(
-            Box::new(InMemoryBackend::new("in-memory")),
+            Box::new(in_memory_tiered_storage()),
             Cipher::ephemeral().unwrap(),
         )
         .with_concurrency(

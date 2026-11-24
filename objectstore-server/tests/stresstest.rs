@@ -30,8 +30,18 @@ async fn test_basic() {
     let mut cmd = Command::new(OBJECTSTORE_EXE);
     cmd.arg("run")
         .env("OS__HTTP_ADDR", &addr)
-        .env("OS__STORAGE__TYPE", "filesystem")
-        .env("OS__STORAGE__PATH", tempdir.path().display().to_string())
+        // Requires the Bigtable emulator from devservices.
+        .env("OS__STORAGE__TYPE", "tiered")
+        .env("OS__STORAGE__HIGH_VOLUME__TYPE", "bigtable")
+        .env("OS__STORAGE__HIGH_VOLUME__ENDPOINT", "localhost:8086")
+        .env("OS__STORAGE__HIGH_VOLUME__PROJECT_ID", "testing")
+        .env("OS__STORAGE__HIGH_VOLUME__INSTANCE_NAME", "objectstore")
+        .env("OS__STORAGE__HIGH_VOLUME__TABLE_NAME", "objectstore")
+        .env("OS__STORAGE__LONG_TERM__TYPE", "filesystem")
+        .env(
+            "OS__STORAGE__LONG_TERM__PATH",
+            tempdir.path().display().to_string(),
+        )
         .env("OS__LOGGING__LEVEL", "warn")
         .env("OS__AUTH__ENFORCE", "false");
     if let Ok(statsd_host) = std::env::var("STATSD_HOST") {

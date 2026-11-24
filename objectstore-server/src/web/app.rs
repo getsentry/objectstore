@@ -98,14 +98,14 @@ impl App {
 mod tests {
     use axum::body::{Body, to_bytes};
     use axum::http::StatusCode;
-    use objectstore_service::backend::local_fs::FileSystemConfig;
     use sentry::protocol::{Context, EnvelopeItem, TraceContext, Transaction};
     use tower::ServiceExt;
     use tracing_subscriber::prelude::*;
 
     use super::*;
-    use crate::config::{AuthZ, Config, StorageConfig};
+    use crate::config::{AuthZ, Config};
     use crate::state::Services;
+    use crate::testing;
 
     fn trace<'a>(transaction: &'a Transaction<'_>) -> &'a TraceContext {
         let Some(Context::Trace(trace)) = transaction.contexts.get("trace") else {
@@ -128,21 +128,26 @@ mod tests {
             .set_default();
         let trace_id = "11111111111111111111111111111111";
         let caller_span = "aaaaaaaaaaaaaaaa";
+        // Tiered storage spawns a recovery task that is a root span of its own. Let it finish
+        // before capturing, so that only the request's transactions are captured.
+        let backend = runtime.block_on(async {
+            let backend = testing::tiered_storage();
+            tokio::task::yield_now().await;
+            backend
+        });
         let envelopes = sentry::test::with_captured_envelopes_options(
             || {
                 runtime.block_on(async {
-                    let directory = tempfile::tempdir().unwrap();
-                    let state = Services::spawn(Config {
-                        storage: StorageConfig::FileSystem(FileSystemConfig {
-                            path: directory.path().into(),
-                            cogs: None,
-                        }),
-                        auth: AuthZ {
-                            enforce: false,
+                    let state = Services::spawn_with_backend(
+                        Config {
+                            auth: AuthZ {
+                                enforce: false,
+                                ..Default::default()
+                            },
                             ..Default::default()
                         },
-                        ..Default::default()
-                    })
+                        Box::new(backend),
+                    )
                     .await
                     .unwrap();
                     let request = Request::builder()

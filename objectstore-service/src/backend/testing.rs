@@ -46,16 +46,29 @@ use objectstore_types::time::Timestamp;
 use objectstore_types::range::ByteRange;
 use objectstore_types::resumable::UploadProgress;
 
+use crate::backend::changelog::NoopChangeLog;
 use crate::backend::common::{
     Backend, DeleteResponse, ExpiryUpdate, GetResponse, HighVolumeBackend, MetadataResponse,
     PutResponse, SetExpiryResponse, TieredGet, TieredMetadata, TieredUpdate, TieredWrite,
     Tombstone,
 };
 use crate::backend::in_memory::InMemoryBackend;
+use crate::backend::tiered::TieredStorage;
 use crate::error::Result;
 use crate::id::ObjectId;
 use crate::resumable::{BackendToken, Session};
 use crate::stream::ClientStream;
+
+/// Creates a [`TieredStorage`] with an [`InMemoryBackend`] in both tiers.
+///
+/// Must be called within a Tokio runtime, since [`TieredStorage::new`] spawns a recovery task.
+pub(crate) fn in_memory_tiered_storage() -> TieredStorage {
+    TieredStorage::new(
+        Box::new(InMemoryBackend::new("in-memory-hv")),
+        Box::new(InMemoryBackend::new("in-memory-lt")),
+        Box::new(NoopChangeLog),
+    )
+}
 
 /// Hooks for [`TestBackend`].
 ///

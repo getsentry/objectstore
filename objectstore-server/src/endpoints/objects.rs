@@ -371,7 +371,6 @@ mod tests {
 
     use objectstore_service::StorageService;
     use objectstore_service::backend::common::Backend;
-    use objectstore_service::backend::in_memory::InMemoryBackend;
     use objectstore_service::concurrency::ConcurrencyLimiter;
     use objectstore_service::encryption::Cipher;
     use objectstore_service::id::ObjectContext;
@@ -385,13 +384,14 @@ mod tests {
     use crate::config::Config;
     use crate::rate_limits::RateLimiter;
     use crate::state::Services;
+    use crate::testing;
     use crate::web::RequestCounter;
 
     fn test_state() -> State<ServiceState> {
         State(Arc::new(Services {
             config: Config::default(),
             service: StorageService::new(
-                Box::new(InMemoryBackend::new("state")),
+                Box::new(testing::tiered_storage()),
                 Cipher::ephemeral().unwrap(),
             ),
             key_directory: Arc::new(PublicKeyDirectory {
@@ -428,7 +428,7 @@ mod tests {
             (Some(Metadata::default()), StatusCode::CONFLICT),
         ] {
             let storage = StorageService::new(
-                Box::new(InMemoryBackend::new("in-memory")),
+                Box::new(testing::tiered_storage()),
                 Cipher::ephemeral().unwrap(),
             );
             let id = object_id("expiry-outcome");
@@ -474,7 +474,7 @@ mod tests {
     #[tokio::test]
     async fn creation_relative_extension_without_creation_time_is_rejected() {
         let storage = StorageService::new(
-            Box::new(InMemoryBackend::new("in-memory")),
+            Box::new(testing::tiered_storage()),
             Cipher::ephemeral().unwrap(),
         );
         let service = AuthAwareService::new(storage.clone(), AuthContext::Disabled, true);
@@ -518,7 +518,7 @@ mod tests {
     #[tokio::test]
     async fn every_anchor_uses_one_set_expiry_operation() {
         let storage = StorageService::new(
-            Box::new(InMemoryBackend::new("in-memory")),
+            Box::new(testing::tiered_storage()),
             Cipher::ephemeral().unwrap(),
         );
         let access_time = Timestamp::now();
@@ -588,7 +588,7 @@ mod tests {
 
     #[tokio::test]
     async fn expiry_extension_preserves_service_errors() {
-        let backend = InMemoryBackend::new("in-memory");
+        let backend = testing::tiered_storage();
         let access_time = Timestamp::now();
         let id = object_id("service-error");
         backend

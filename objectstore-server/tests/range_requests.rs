@@ -5,14 +5,16 @@ use objectstore_server::config::{AuthZ, Config};
 use objectstore_test::server::TestServer;
 
 async fn setup() -> (TestServer, String) {
-    let server = TestServer::with_config(Config {
-        auth: AuthZ {
-            enforce: false,
+    let server = TestServer::tiered()
+        .config(Config {
+            auth: AuthZ {
+                enforce: false,
+                ..Default::default()
+            },
             ..Default::default()
-        },
-        ..Default::default()
-    })
-    .await;
+        })
+        .build()
+        .await;
 
     let client = reqwest::Client::new();
     let payload = "Hello, Range Requests!"; // 22 bytes

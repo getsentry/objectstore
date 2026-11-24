@@ -30,11 +30,13 @@ fn assert_no_retry(response: &reqwest::Response) {
 async fn test_web_concurrency_limit() -> Result<()> {
     // Setting max_requests = 0 means every non-exempt request is rejected immediately
     // with 503, giving us a fully deterministic test without needing concurrent requests.
-    let server = TestServer::with_config(Config {
-        http: Http { max_requests: 0 },
-        ..Default::default()
-    })
-    .await;
+    let server = TestServer::tiered()
+        .config(Config {
+            http: Http { max_requests: 0 },
+            ..Default::default()
+        })
+        .build()
+        .await;
 
     let client = reqwest::Client::new();
 
@@ -68,18 +70,20 @@ async fn test_web_concurrency_limit() -> Result<()> {
 #[tokio::test]
 async fn test_service_concurrency_limit() -> Result<()> {
     // With max_concurrency = 0, every operation fails to acquire a service permit.
-    let server = TestServer::with_config(Config {
-        service: Service {
-            max_concurrency: 0,
+    let server = TestServer::tiered()
+        .config(Config {
+            service: Service {
+                max_concurrency: 0,
+                ..Default::default()
+            },
+            auth: AuthZ {
+                enforce: false,
+                ..Default::default()
+            },
             ..Default::default()
-        },
-        auth: AuthZ {
-            enforce: false,
-            ..Default::default()
-        },
-        ..Default::default()
-    })
-    .await;
+        })
+        .build()
+        .await;
 
     let response = reqwest::Client::new()
         .get(server.url("/v1/objects/test/org=1/key"))
@@ -94,19 +98,21 @@ async fn test_service_concurrency_limit() -> Result<()> {
 
 #[tokio::test]
 async fn test_killswitches() -> Result<()> {
-    let server = TestServer::with_config(Config {
-        killswitches: Killswitches::new(vec![Killswitch {
-            usecase: Some("blocked".parse().unwrap()),
-            scopes: BTreeMap::from_iter([("org".to_string(), "42".to_string())]),
-            service: Some("test-*".to_string()),
-        }]),
-        auth: AuthZ {
-            enforce: false,
+    let server = TestServer::tiered()
+        .config(Config {
+            killswitches: Killswitches::new(vec![Killswitch {
+                usecase: Some("blocked".parse().unwrap()),
+                scopes: BTreeMap::from_iter([("org".to_string(), "42".to_string())]),
+                service: Some("test-*".to_string()),
+            }]),
+            auth: AuthZ {
+                enforce: false,
+                ..Default::default()
+            },
             ..Default::default()
-        },
-        ..Default::default()
-    })
-    .await;
+        })
+        .build()
+        .await;
 
     let client = reqwest::Client::new();
 
@@ -140,22 +146,24 @@ async fn test_killswitches() -> Result<()> {
 
 #[tokio::test]
 async fn test_throughput_global_rps_limit() -> Result<()> {
-    let server = TestServer::with_config(Config {
-        auth: AuthZ {
-            enforce: false,
-            ..Default::default()
-        },
-        rate_limits: RateLimits {
-            throughput: ThroughputLimits {
-                global_rps: Some(2),
-                burst: 1,
+    let server = TestServer::tiered()
+        .config(Config {
+            auth: AuthZ {
+                enforce: false,
+                ..Default::default()
+            },
+            rate_limits: RateLimits {
+                throughput: ThroughputLimits {
+                    global_rps: Some(2),
+                    burst: 1,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             ..Default::default()
-        },
-        ..Default::default()
-    })
-    .await;
+        })
+        .build()
+        .await;
 
     let client = reqwest::Client::new();
 
@@ -192,23 +200,25 @@ async fn test_throughput_global_rps_limit() -> Result<()> {
 
 #[tokio::test]
 async fn test_throughput_usecase_pct_limit() -> Result<()> {
-    let server = TestServer::with_config(Config {
-        auth: AuthZ {
-            enforce: false,
-            ..Default::default()
-        },
-        rate_limits: RateLimits {
-            throughput: ThroughputLimits {
-                global_rps: Some(100),
-                burst: 0,
-                usecase_pct: Some(2),
+    let server = TestServer::tiered()
+        .config(Config {
+            auth: AuthZ {
+                enforce: false,
+                ..Default::default()
+            },
+            rate_limits: RateLimits {
+                throughput: ThroughputLimits {
+                    global_rps: Some(100),
+                    burst: 0,
+                    usecase_pct: Some(2),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             ..Default::default()
-        },
-        ..Default::default()
-    })
-    .await;
+        })
+        .build()
+        .await;
 
     let client = reqwest::Client::new();
 
@@ -250,23 +260,25 @@ async fn test_throughput_usecase_pct_limit() -> Result<()> {
 
 #[tokio::test]
 async fn test_throughput_scope_pct_limit() -> Result<()> {
-    let server = TestServer::with_config(Config {
-        auth: AuthZ {
-            enforce: false,
-            ..Default::default()
-        },
-        rate_limits: RateLimits {
-            throughput: ThroughputLimits {
-                global_rps: Some(100),
-                burst: 0,
-                scope_pct: Some(2),
+    let server = TestServer::tiered()
+        .config(Config {
+            auth: AuthZ {
+                enforce: false,
+                ..Default::default()
+            },
+            rate_limits: RateLimits {
+                throughput: ThroughputLimits {
+                    global_rps: Some(100),
+                    burst: 0,
+                    scope_pct: Some(2),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             ..Default::default()
-        },
-        ..Default::default()
-    })
-    .await;
+        })
+        .build()
+        .await;
 
     let client = reqwest::Client::new();
 
@@ -308,28 +320,30 @@ async fn test_throughput_scope_pct_limit() -> Result<()> {
 
 #[tokio::test]
 async fn test_throughput_rule() -> Result<()> {
-    let server = TestServer::with_config(Config {
-        auth: AuthZ {
-            enforce: false,
-            ..Default::default()
-        },
-        rate_limits: RateLimits {
-            throughput: ThroughputLimits {
-                global_rps: None,
-                burst: 0,
-                rules: vec![ThroughputRule {
-                    usecase: Some("restricted".parse().unwrap()),
-                    scopes: vec![("org".to_string(), "42".to_string())],
-                    rps: Some(1),
-                    pct: None,
-                }],
+    let server = TestServer::tiered()
+        .config(Config {
+            auth: AuthZ {
+                enforce: false,
+                ..Default::default()
+            },
+            rate_limits: RateLimits {
+                throughput: ThroughputLimits {
+                    global_rps: None,
+                    burst: 0,
+                    rules: vec![ThroughputRule {
+                        usecase: Some("restricted".parse().unwrap()),
+                        scopes: vec![("org".to_string(), "42".to_string())],
+                        rps: Some(1),
+                        pct: None,
+                    }],
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             ..Default::default()
-        },
-        ..Default::default()
-    })
-    .await;
+        })
+        .build()
+        .await;
 
     let client = reqwest::Client::new();
 
@@ -379,22 +393,24 @@ async fn test_throughput_rule() -> Result<()> {
 #[tokio::test]
 async fn test_bandwidth_global_bps_limit() -> Result<()> {
     // 100 bps with 0 burst: 100 bytes creates 1s of debt → immediate rejection.
-    let server = TestServer::with_config(Config {
-        auth: AuthZ {
-            enforce: false,
-            ..Default::default()
-        },
-        rate_limits: RateLimits {
-            bandwidth: BandwidthLimits {
-                global_bps: Some(100),
-                burst_ms: 0,
+    let server = TestServer::tiered()
+        .config(Config {
+            auth: AuthZ {
+                enforce: false,
+                ..Default::default()
+            },
+            rate_limits: RateLimits {
+                bandwidth: BandwidthLimits {
+                    global_bps: Some(100),
+                    burst_ms: 0,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             ..Default::default()
-        },
-        ..Default::default()
-    })
-    .await;
+        })
+        .build()
+        .await;
 
     let client = reqwest::Client::new();
     let payload = vec![0xABu8; 100];
@@ -434,22 +450,24 @@ async fn test_bandwidth_burst_tolerance() -> Result<()> {
     // 10 bps with 10s burst → burst budget = exactly one 100-byte upload.
     // The rate is deliberately slow so that each upload creates 10s of debt: the third
     // request stays rejected for a full 10s, independent of CI scheduling delays.
-    let server = TestServer::with_config(Config {
-        auth: AuthZ {
-            enforce: false,
-            ..Default::default()
-        },
-        rate_limits: RateLimits {
-            bandwidth: BandwidthLimits {
-                global_bps: Some(10),
-                burst_ms: 10_000,
+    let server = TestServer::tiered()
+        .config(Config {
+            auth: AuthZ {
+                enforce: false,
+                ..Default::default()
+            },
+            rate_limits: RateLimits {
+                bandwidth: BandwidthLimits {
+                    global_bps: Some(10),
+                    burst_ms: 10_000,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             ..Default::default()
-        },
-        ..Default::default()
-    })
-    .await;
+        })
+        .build()
+        .await;
 
     let client = reqwest::Client::new();
     let payload = vec![0xABu8; 100];
@@ -484,23 +502,25 @@ async fn test_bandwidth_burst_tolerance() -> Result<()> {
 #[tokio::test]
 async fn test_bandwidth_report_only() -> Result<()> {
     // With report_only, requests succeed even when debt exceeds burst tolerance.
-    let server = TestServer::with_config(Config {
-        auth: AuthZ {
-            enforce: false,
-            ..Default::default()
-        },
-        rate_limits: RateLimits {
-            bandwidth: BandwidthLimits {
-                global_bps: Some(100),
-                burst_ms: 0,
-                report_only: true,
+    let server = TestServer::tiered()
+        .config(Config {
+            auth: AuthZ {
+                enforce: false,
+                ..Default::default()
+            },
+            rate_limits: RateLimits {
+                bandwidth: BandwidthLimits {
+                    global_bps: Some(100),
+                    burst_ms: 0,
+                    report_only: true,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             ..Default::default()
-        },
-        ..Default::default()
-    })
-    .await;
+        })
+        .build()
+        .await;
 
     let client = reqwest::Client::new();
     let payload = vec![0xABu8; 100];
@@ -538,23 +558,25 @@ async fn test_bandwidth_usecase_pct_limit() -> Result<()> {
     // 10_000 bps global, 1% per usecase = 100 bps per usecase.
     // burst_ms=100 absorbs global debt (100/10000 = 0.01s) but the
     // per-usecase debt (100/100 = 1s) exceeds it → usecase rejects.
-    let server = TestServer::with_config(Config {
-        auth: AuthZ {
-            enforce: false,
-            ..Default::default()
-        },
-        rate_limits: RateLimits {
-            bandwidth: BandwidthLimits {
-                global_bps: Some(10_000),
-                burst_ms: 100,
-                usecase_pct: Some(1),
+    let server = TestServer::tiered()
+        .config(Config {
+            auth: AuthZ {
+                enforce: false,
+                ..Default::default()
+            },
+            rate_limits: RateLimits {
+                bandwidth: BandwidthLimits {
+                    global_bps: Some(10_000),
+                    burst_ms: 100,
+                    usecase_pct: Some(1),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             ..Default::default()
-        },
-        ..Default::default()
-    })
-    .await;
+        })
+        .build()
+        .await;
 
     let client = reqwest::Client::new();
     let payload = vec![0xABu8; 100];
@@ -600,23 +622,25 @@ async fn test_bandwidth_usecase_pct_limit() -> Result<()> {
 async fn test_bandwidth_scope_pct_limit() -> Result<()> {
     // 10_000 bps global, 1% per scope = 100 bps per scope.
     // burst_ms=100 absorbs global debt but per-scope debt exceeds it.
-    let server = TestServer::with_config(Config {
-        auth: AuthZ {
-            enforce: false,
-            ..Default::default()
-        },
-        rate_limits: RateLimits {
-            bandwidth: BandwidthLimits {
-                global_bps: Some(10_000),
-                burst_ms: 100,
-                scope_pct: Some(1),
+    let server = TestServer::tiered()
+        .config(Config {
+            auth: AuthZ {
+                enforce: false,
+                ..Default::default()
+            },
+            rate_limits: RateLimits {
+                bandwidth: BandwidthLimits {
+                    global_bps: Some(10_000),
+                    burst_ms: 100,
+                    scope_pct: Some(1),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             ..Default::default()
-        },
-        ..Default::default()
-    })
-    .await;
+        })
+        .build()
+        .await;
 
     let client = reqwest::Client::new();
     let payload = vec![0xABu8; 100];
@@ -719,19 +743,21 @@ async fn test_batch_admission_rejections_return_per_op_errors() -> Result<()> {
     ];
 
     for (service, throughput, status, detail) in cases {
-        let server = TestServer::with_config(Config {
-            service,
-            rate_limits: RateLimits {
-                throughput,
+        let server = TestServer::tiered()
+            .config(Config {
+                service,
+                rate_limits: RateLimits {
+                    throughput,
+                    ..Default::default()
+                },
+                auth: AuthZ {
+                    enforce: false,
+                    ..Default::default()
+                },
                 ..Default::default()
-            },
-            auth: AuthZ {
-                enforce: false,
-                ..Default::default()
-            },
-            ..Default::default()
-        })
-        .await;
+            })
+            .build()
+            .await;
 
         // The request-level check consumes the sole throughput token, so the
         // operation is rejected inside the multipart response. With concurrency
@@ -762,49 +788,51 @@ async fn test_batch_admission_rejections_return_per_op_errors() -> Result<()> {
 
 #[tokio::test]
 async fn test_usecase_expiration_policy() -> Result<()> {
-    let server = TestServer::with_config(Config {
-        auth: AuthZ {
-            enforce: false,
+    let server = TestServer::tiered()
+        .config(Config {
+            auth: AuthZ {
+                enforce: false,
+                ..Default::default()
+            },
+            usecases: UseCases(HashMap::from([
+                (
+                    "attachments".parse().unwrap(),
+                    UseCaseConfig {
+                        expiration: ExpirationConfig {
+                            manual: PolicyConfig { allowed: false },
+                            ttl: PolicyConfig { allowed: true },
+                            max: Some(Duration::from_hours(90 * 24)),
+                            tti: PolicyConfig { allowed: false },
+                        },
+                    },
+                ),
+                (
+                    "debug-files".parse().unwrap(),
+                    UseCaseConfig {
+                        expiration: ExpirationConfig {
+                            manual: PolicyConfig { allowed: false },
+                            ttl: PolicyConfig { allowed: false },
+                            tti: PolicyConfig { allowed: true },
+                            max: Some(Duration::from_hours(90 * 24)),
+                        },
+                    },
+                ),
+                (
+                    "avatars".parse().unwrap(),
+                    UseCaseConfig {
+                        expiration: ExpirationConfig {
+                            manual: PolicyConfig { allowed: true },
+                            max: None,
+                            ttl: PolicyConfig { allowed: false },
+                            tti: PolicyConfig { allowed: false },
+                        },
+                    },
+                ),
+            ])),
             ..Default::default()
-        },
-        usecases: UseCases(HashMap::from([
-            (
-                "attachments".parse().unwrap(),
-                UseCaseConfig {
-                    expiration: ExpirationConfig {
-                        manual: PolicyConfig { allowed: false },
-                        ttl: PolicyConfig { allowed: true },
-                        max: Some(Duration::from_hours(90 * 24)),
-                        tti: PolicyConfig { allowed: false },
-                    },
-                },
-            ),
-            (
-                "debug-files".parse().unwrap(),
-                UseCaseConfig {
-                    expiration: ExpirationConfig {
-                        manual: PolicyConfig { allowed: false },
-                        ttl: PolicyConfig { allowed: false },
-                        tti: PolicyConfig { allowed: true },
-                        max: Some(Duration::from_hours(90 * 24)),
-                    },
-                },
-            ),
-            (
-                "avatars".parse().unwrap(),
-                UseCaseConfig {
-                    expiration: ExpirationConfig {
-                        manual: PolicyConfig { allowed: true },
-                        max: None,
-                        ttl: PolicyConfig { allowed: false },
-                        tti: PolicyConfig { allowed: false },
-                    },
-                },
-            ),
-        ])),
-        ..Default::default()
-    })
-    .await;
+        })
+        .build()
+        .await;
 
     let client = reqwest::Client::new();
 
@@ -927,25 +955,27 @@ async fn test_usecase_expiration_policy() -> Result<()> {
 
 #[tokio::test]
 async fn test_keda() -> Result<()> {
-    let server = TestServer::with_config(Config {
-        rate_limits: RateLimits {
-            throughput: ThroughputLimits {
-                global_rps: Some(1000),
+    let server = TestServer::tiered()
+        .config(Config {
+            rate_limits: RateLimits {
+                throughput: ThroughputLimits {
+                    global_rps: Some(1000),
+                    ..Default::default()
+                },
+                bandwidth: BandwidthLimits {
+                    global_bps: Some(10_000_000),
+                    ..Default::default()
+                },
+            },
+            http: Http { max_requests: 0 },
+            auth: AuthZ {
+                enforce: false,
                 ..Default::default()
             },
-            bandwidth: BandwidthLimits {
-                global_bps: Some(10_000_000),
-                ..Default::default()
-            },
-        },
-        http: Http { max_requests: 0 },
-        auth: AuthZ {
-            enforce: false,
             ..Default::default()
-        },
-        ..Default::default()
-    })
-    .await;
+        })
+        .build()
+        .await;
 
     let client = reqwest::Client::new();
 
