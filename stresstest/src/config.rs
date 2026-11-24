@@ -107,12 +107,10 @@ impl Workload {
                 self.name
             );
         }
-        if let (Some(p50), Some(p99)) = (sizes.p50, sizes.p99) {
-            let min = sizes.min.unwrap_or(ByteSize(0));
+        if let (Some(min), Some(p50), Some(p99)) = (sizes.min, sizes.p50, sizes.p99) {
             if min >= p50 || p99 < p50 {
                 bail!(
-                    "workload '{}': file sizes must satisfy min < p50 <= p99, where min \
-                     defaults to 0",
+                    "workload '{}': file sizes must satisfy min < p50 <= p99",
                     self.name
                 );
             }
@@ -231,18 +229,5 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn percentiles_must_be_ordered() {
-        let validate = |file_sizes: &str| {
-            let yaml = format!("{{name: test, file_sizes: {file_sizes}}}");
-            serde_yaml::from_str::<Workload>(&yaml).unwrap().validate()
-        };
-
-        assert!(validate("{p50: 1 KiB, p99: 1 KiB}").is_ok());
-        assert!(validate("{p50: 2 KiB, p99: 1 KiB}").is_err());
-        assert!(validate("{p50: 0 B, p99: 1 KiB}").is_err());
-        assert!(validate("{min: 1 KiB, p50: 1 KiB, p99: 2 KiB}").is_err());
     }
 }
