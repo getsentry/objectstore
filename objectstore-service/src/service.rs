@@ -186,9 +186,11 @@ impl StorageService {
 
         tokio::spawn(async move {
             concurrency
-                .run_emitter(|stats, in_use_peak| async move {
+                .run_emitter(|stats| async move {
                     objectstore_metrics::gauge!("service.concurrency.in_use" = stats.in_use);
-                    objectstore_metrics::record!("service.concurrency.in_use_peak" = in_use_peak);
+                    objectstore_metrics::record!(
+                        "service.concurrency.in_use_peak" = stats.in_use_peak
+                    );
                     objectstore_metrics::gauge!("service.concurrency.queued" = stats.queued);
                     objectstore_metrics::gauge!(
                         "service.concurrency.bulk_in_use" = stats.bulk_in_use

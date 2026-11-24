@@ -9,10 +9,10 @@
 //! waiters on drop, allowing [`ConcurrencyLimiter::wait_all`] to resolve once
 //! all permits have been returned.
 //!
-//! Every limiter has a `run_emitter` method that reports its usage once per second. Since such
-//! snapshots miss shorter bursts, the emitters also report the peak permits in use since their
-//! previous report. A limiter that had no free permit for an acquisition always reports a peak
-//! equal to its capacity.
+//! Every limiter has a `run_emitter` method that reports its stats once per second. Since the
+//! permits in use at that moment miss shorter bursts, the stats also contain the peak permits
+//! in use since the previous report. A limiter that had no free permit for an acquisition
+//! always reports a peak equal to its capacity.
 //!
 //! [`run_metered`] runs an isolated task and waits for its result, while
 //! [`spawn_metered`] starts the same task without waiting. Both provide panic
@@ -45,6 +45,10 @@ const EMITTER_INTERVAL: Duration = Duration::from_secs(1);
 pub struct Stats {
     /// Number of execution permits currently held.
     pub in_use: u32,
+    /// Most execution permits held at once since [`ConcurrencyLimiter::run_emitter`] last
+    /// reported, or since the limiter was created. Unlike `in_use`, this captures bursts between
+    /// two reports.
+    pub in_use_peak: u32,
     /// Number of callers waiting in the queue for a permit.
     pub queued: u32,
     /// Number of bulk operations currently in flight.
@@ -289,8 +293,10 @@ impl ConcurrencyLimiter {
 
     /// Returns a snapshot of the current counts.
     pub fn stats(&self) -> Stats {
+        let in_use = self.used_permits();
         Stats {
-            in_use: self.used_permits(),
+            in_use,
+            in_use_peak: self.in_use_peak.get(in_use),
             queued: self.queued_permits(),
             bulk_in_use: self.used_bulk_permits(),
         }
@@ -298,21 +304,25 @@ impl ConcurrencyLimiter {
 
     /// Periodically calls `emit` with the current in-use and queued counts.
     ///
-    /// The second argument is the highest number of execution permits held since the previous
-    /// call, which captures bursts that the stats miss.
+    /// Each call restarts the peak, so it covers the time since the previous call.
     ///
     /// This future runs forever and is intended to be spawned as a background
     /// task alongside the service.
     pub async fn run_emitter<F, Fut>(&self, mut emit: F) -> !
     where
-        F: FnMut(Stats, u32) -> Fut,
+        F: FnMut(Stats) -> Fut,
         Fut: Future<Output = ()>,
     {
         let mut ticker = tokio::time::interval(EMITTER_INTERVAL);
         loop {
             ticker.tick().await;
             let stats = self.stats();
-            emit(stats, self.in_use_peak.take(stats.in_use)).await;
+            let in_use_peak = self.in_use_peak.take(stats.in_use);
+            emit(Stats {
+                in_use_peak,
+                ..stats
+            })
+            .await;
         }
     }
 }
@@ -515,7 +525,7 @@ mod tests {
         let in_use_clone = Arc::clone(&emitted_in_use);
         let queued_clone = Arc::clone(&emitted_queued);
 
-        let emitter = limiter.run_emitter(move |stats, _| {
+        let emitter = limiter.run_emitter(move |stats| {
             let in_use_ref = Arc::clone(&in_use_clone);
             let queued_ref = Arc::clone(&queued_clone);
             async move {
@@ -537,8 +547,8 @@ mod tests {
     async fn emitter_reports_peak_usage_between_emissions() {
         let limiter = ConcurrencyLimiter::new(3).with_queue(1);
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let emitter = limiter.run_emitter(|stats, peak| {
-            sender.send((stats.in_use, peak)).unwrap();
+        let emitter = limiter.run_emitter(|stats| {
+            sender.send((stats.in_use, stats.in_use_peak)).unwrap();
             std::future::ready(())
         });
         tokio::pin!(emitter);
@@ -774,7 +784,7 @@ mod tests {
         let in_use_clone = Arc::clone(&emitted_in_use);
         let queued_clone = Arc::clone(&emitted_queued);
 
-        let emitter = limiter.run_emitter(move |stats, _| {
+        let emitter = limiter.run_emitter(move |stats| {
             let in_use_ref = Arc::clone(&in_use_clone);
             let queued_ref = Arc::clone(&queued_clone);
             async move {

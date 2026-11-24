@@ -20,7 +20,7 @@
     ```python
     # Before
     client = Client(url, token=SecretKey(kid, secret_key, expiry_seconds=300))
-    
+
     # After
     key = SecretKey(kid, secret_key)
     client = Client(url, token=TokenGenerator(key, expiry_seconds=300))

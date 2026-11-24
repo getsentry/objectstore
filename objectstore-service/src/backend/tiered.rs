@@ -335,13 +335,13 @@ impl TieredStorage {
         let emitter = high_volume.clone();
         tokio::spawn(async move {
             emitter
-                .run_emitter(|stats, in_use_peak| async move {
+                .run_emitter(|stats| async move {
                     objectstore_metrics::gauge!(
                         "tiered.concurrency.in_use" = stats.in_use,
                         tier = "high-volume"
                     );
                     objectstore_metrics::record!(
-                        "tiered.concurrency.in_use_peak" = in_use_peak,
+                        "tiered.concurrency.in_use_peak" = stats.in_use_peak,
                         tier = "high-volume"
                     );
                     objectstore_metrics::gauge!(
@@ -360,13 +360,13 @@ impl TieredStorage {
         let emitter = long_term.clone();
         tokio::spawn(async move {
             emitter
-                .run_emitter(|stats, in_use_peak| async move {
+                .run_emitter(|stats| async move {
                     objectstore_metrics::gauge!(
                         "tiered.concurrency.in_use" = stats.in_use,
                         tier = "long-term"
                     );
                     objectstore_metrics::record!(
-                        "tiered.concurrency.in_use_peak" = in_use_peak,
+                        "tiered.concurrency.in_use_peak" = stats.in_use_peak,
                         tier = "long-term"
                     );
                 })
