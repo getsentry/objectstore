@@ -21,7 +21,6 @@
 
 use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use futures_util::FutureExt;
@@ -31,6 +30,8 @@ use tokio::sync::{AcquireError, Notify, OwnedSemaphorePermit, Semaphore};
 use crate::error::{Error, ErrorKind, Panic, Result};
 
 mod limiter;
+
+use limiter::Peak;
 
 pub use limiter::{Limiter, LimiterStats, Permit, Priority, PriorityLimiter, PriorityLimiterStats};
 
@@ -73,8 +74,8 @@ pub struct ConcurrencyLimiter {
     tasks: Arc<Semaphore>,
     queue: Arc<Semaphore>,
     bulk: Arc<Semaphore>,
-    in_use_peak: Arc<AtomicU32>,
-    bulk_in_use_peak: Arc<AtomicU32>,
+    in_use_peak: Arc<Peak>,
+    bulk_in_use_peak: Arc<Peak>,
     tasks_total: u32,
     queue_total: u32,
     bulk_total: u32,
@@ -153,8 +154,7 @@ impl ConcurrencyLimiter {
 
         // Fast path: Instantly grab a free permit without parking.
         if let Ok(task_permit) = self.tasks.clone().try_acquire_owned() {
-            self.in_use_peak
-                .fetch_max(self.used_permits(), Ordering::Relaxed);
+            self.in_use_peak.record(self.used_permits());
             return Ok(ConcurrencyPermit {
                 task_permit: Some(task_permit),
                 bulk_permit: None,
@@ -163,8 +163,7 @@ impl ConcurrencyLimiter {
         }
         // No permit was free, so the limiter is full. Recording that here makes every wait and
         // rejection visible, whatever is released right after.
-        self.in_use_peak
-            .fetch_max(self.tasks_total, Ordering::Relaxed);
+        self.in_use_peak.record(self.tasks_total);
 
         // Slow path: acquire a temporary queue ticket to bound concurrent
         // waiters. Released in this scope when the permit is constructed.
@@ -192,12 +191,10 @@ impl ConcurrencyLimiter {
     /// Returns [`ErrorKind::AtCapacity`] when no permits are available.
     pub fn try_acquire(&self) -> Result<ConcurrencyPermit> {
         let Ok(task_permit) = self.tasks.clone().try_acquire_owned() else {
-            self.in_use_peak
-                .fetch_max(self.tasks_total, Ordering::Relaxed);
+            self.in_use_peak.record(self.tasks_total);
             return Err(ErrorKind::AtCapacity.into());
         };
-        self.in_use_peak
-            .fetch_max(self.used_permits(), Ordering::Relaxed);
+        self.in_use_peak.record(self.used_permits());
 
         Ok(ConcurrencyPermit {
             task_permit: Some(task_permit),
@@ -223,17 +220,13 @@ impl ConcurrencyLimiter {
         let acquire = async {
             // The peaks are also raised before each wait, which shows a full budget or limiter
             // even when the wait then times out.
-            self.bulk_in_use_peak
-                .fetch_max(self.used_bulk_permits(), Ordering::Relaxed);
+            self.bulk_in_use_peak.record(self.used_bulk_permits());
             let bulk_permit = self.bulk.clone().acquire_owned().await?;
-            self.bulk_in_use_peak
-                .fetch_max(self.used_bulk_permits(), Ordering::Relaxed);
+            self.bulk_in_use_peak.record(self.used_bulk_permits());
 
-            self.in_use_peak
-                .fetch_max(self.used_permits(), Ordering::Relaxed);
+            self.in_use_peak.record(self.used_permits());
             let task_permit = self.tasks.clone().acquire_owned().await?;
-            self.in_use_peak
-                .fetch_max(self.used_permits(), Ordering::Relaxed);
+            self.in_use_peak.record(self.used_permits());
             Ok((task_permit, bulk_permit))
         };
 
@@ -303,19 +296,18 @@ impl ConcurrencyLimiter {
     /// Each call restarts the peaks. [`run_emitter`](Self::run_emitter) calls this, so another
     /// caller takes away from the peaks that the emitter reports.
     pub fn stats(&self) -> Stats {
-        // Each peak restarts at the current count instead of zero, which keeps permits visible
-        // that stay held while nothing new is acquired. The count is read right before, so
-        // that the restarted peak does not include permits released in between.
+        // Each count is read right before its peak restarts, so that the restarted peak does not
+        // include permits released in between.
         let in_use = self.used_permits();
-        let in_use_peak = self.in_use_peak.swap(in_use, Ordering::Relaxed);
+        let in_use_peak = self.in_use_peak.restart(in_use);
         let bulk_in_use = self.used_bulk_permits();
-        let bulk_in_use_peak = self.bulk_in_use_peak.swap(bulk_in_use, Ordering::Relaxed);
+        let bulk_in_use_peak = self.bulk_in_use_peak.restart(bulk_in_use);
         Stats {
             in_use,
-            in_use_peak: in_use_peak.max(in_use),
+            in_use_peak,
             queued: self.queued_permits(),
             bulk_in_use,
-            bulk_in_use_peak: bulk_in_use_peak.max(bulk_in_use),
+            bulk_in_use_peak,
         }
     }
 
@@ -591,7 +583,7 @@ mod tests {
                 limiter.try_acquire().unwrap(),
             );
             // Lower the peak so that only the failed acquisition can raise it back to capacity.
-            assert_eq!(limiter.in_use_peak.swap(1, Ordering::Relaxed), 2);
+            assert_eq!(limiter.in_use_peak.restart(1), 2);
             let mut waiting: std::pin::Pin<Box<dyn Future<Output = _>>> = match bulk {
                 false => Box::pin(limiter.acquire()),
                 true => Box::pin(limiter.acquire_bulk()),
@@ -611,7 +603,7 @@ mod tests {
             limiter.acquire_bulk().await.unwrap(),
         );
         // Lower the peak so that only the failed acquisition can raise it back to capacity.
-        assert_eq!(limiter.bulk_in_use_peak.swap(1, Ordering::Relaxed), 2);
+        assert_eq!(limiter.bulk_in_use_peak.restart(1), 2);
         limiter.acquire_bulk().await.unwrap_err();
         drop(held);
 

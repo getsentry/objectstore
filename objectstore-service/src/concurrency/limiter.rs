@@ -75,6 +75,25 @@ pub struct LimiterStats {
     pub in_use_peak: u32,
 }
 
+/// Most permits in use at once since the last [`restart`](Self::restart).
+#[derive(Debug, Default)]
+pub(super) struct Peak(AtomicU32);
+
+impl Peak {
+    /// Raises the peak to `in_use` if it is higher.
+    pub(super) fn record(&self, in_use: u32) {
+        self.0.fetch_max(in_use, Ordering::Relaxed);
+    }
+
+    /// Returns the peak and restarts it at `in_use`.
+    ///
+    /// Restarting at the current number instead of zero keeps permits visible that stay held while
+    /// nothing new is acquired.
+    pub(super) fn restart(&self, in_use: u32) -> u32 {
+        self.0.swap(in_use, Ordering::Relaxed).max(in_use)
+    }
+}
+
 /// Shared interval loop for the metric emitters.
 async fn run_emitter<S, F, Fut>(mut snapshot: impl FnMut() -> S, mut emit: F) -> !
 where
@@ -93,7 +112,7 @@ where
 pub struct Limiter {
     semaphore: Arc<Semaphore>,
     queue: Option<Arc<Semaphore>>,
-    in_use_peak: Arc<AtomicU32>,
+    in_use_peak: Arc<Peak>,
     capacity: u32,
     timeout: Duration,
 }
@@ -117,12 +136,12 @@ impl Limiter {
     /// Dropping the future releases its queue slot and any assigned permit.
     pub async fn acquire(&self) -> Result<Permit> {
         if let Ok(permit) = self.semaphore.clone().try_acquire_owned() {
-            self.in_use_peak.fetch_max(self.in_use(), Ordering::Relaxed);
+            self.in_use_peak.record(self.in_use());
             return Ok(Permit::semaphore(permit));
         }
         // No permit was free, so the limiter is full. Recording that here makes every wait and
         // rejection visible, whatever is released right after.
-        self.in_use_peak.fetch_max(self.capacity, Ordering::Relaxed);
+        self.in_use_peak.record(self.capacity);
         if self.timeout.is_zero() {
             return Err(ErrorKind::AtCapacity.into());
         }
@@ -145,12 +164,9 @@ impl Limiter {
     /// caller takes away from the peak that the emitter reports.
     pub fn stats(&self) -> LimiterStats {
         let in_use = self.in_use();
-        // Restarting at the current number instead of zero keeps permits visible that stay held
-        // while nothing new is acquired.
-        let in_use_peak = self.in_use_peak.swap(in_use, Ordering::Relaxed);
         LimiterStats {
             in_use,
-            in_use_peak: in_use_peak.max(in_use),
+            in_use_peak: self.in_use_peak.restart(in_use),
         }
     }
 
@@ -475,7 +491,7 @@ mod tests {
             limiter.acquire().await.unwrap(),
         );
         // Lower the peak so that only the failed acquisition can raise it back to capacity.
-        assert_eq!(limiter.in_use_peak.swap(1, Ordering::Relaxed), 2);
+        assert_eq!(limiter.in_use_peak.restart(1), 2);
         limiter.acquire().await.unwrap_err();
         drop(held);
         assert_eq!(limiter.stats().in_use_peak, 2);
