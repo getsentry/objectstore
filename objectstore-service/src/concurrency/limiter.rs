@@ -75,46 +75,6 @@ pub struct LimiterStats {
     pub in_use_peak: u32,
 }
 
-/// High-water mark of the permits in use of a semaphore.
-///
-/// A periodic snapshot misses bursts that start and end between two snapshots, so limiters
-/// acquire free permits through [`try_acquire_tracked`], which raises the mark.
-#[derive(Debug, Default)]
-pub(super) struct Peak(AtomicU32);
-
-impl Peak {
-    /// Raises the mark to `in_use` if that is higher.
-    fn observe(&self, in_use: u32) {
-        self.0.fetch_max(in_use, Ordering::Relaxed);
-    }
-
-    /// Returns the highest number of permits in use since the previous call.
-    ///
-    /// The mark restarts at `in_use`, the current number, instead of at zero. This keeps
-    /// permits visible that stay held while nothing new is acquired.
-    pub(super) fn take(&self, in_use: u32) -> u32 {
-        self.0.swap(in_use, Ordering::Relaxed).max(in_use)
-    }
-}
-
-/// Takes a free permit from `semaphore` without waiting and raises `peak` to the resulting
-/// number of its `capacity` permits in use.
-pub(super) fn try_acquire_tracked(
-    semaphore: &Arc<Semaphore>,
-    capacity: u32,
-    peak: &Peak,
-) -> Option<OwnedSemaphorePermit> {
-    let permit = semaphore.clone().try_acquire_owned().ok();
-    peak.observe(match permit {
-        // A release between the acquisition and this read lowers the reading.
-        Some(_) => capacity - semaphore.available_permits() as u32,
-        // No permit was free. Recording that here makes every rejection and wait show up as a
-        // full limiter, whatever is released right after.
-        None => capacity,
-    });
-    permit
-}
-
 /// Shared interval loop for the metric emitters.
 async fn run_emitter<S, F, Fut>(mut snapshot: impl FnMut() -> S, mut emit: F) -> !
 where
@@ -133,7 +93,7 @@ where
 pub struct Limiter {
     semaphore: Arc<Semaphore>,
     queue: Option<Arc<Semaphore>>,
-    peak: Arc<Peak>,
+    in_use_peak: Arc<AtomicU32>,
     capacity: u32,
     timeout: Duration,
 }
@@ -145,7 +105,7 @@ impl Limiter {
         Self {
             semaphore: Arc::new(Semaphore::new(capacity as usize)),
             queue: max_queue_size.map(|size| Arc::new(Semaphore::new(size as usize))),
-            peak: Arc::default(),
+            in_use_peak: Arc::default(),
             capacity,
             timeout,
         }
@@ -156,9 +116,13 @@ impl Limiter {
     /// Returns [`ErrorKind::AtCapacity`] when the queue is full or the wait times out.
     /// Dropping the future releases its queue slot and any assigned permit.
     pub async fn acquire(&self) -> Result<Permit> {
-        if let Some(permit) = try_acquire_tracked(&self.semaphore, self.capacity, &self.peak) {
+        if let Ok(permit) = self.semaphore.clone().try_acquire_owned() {
+            self.in_use_peak.fetch_max(self.in_use(), Ordering::Relaxed);
             return Ok(Permit::semaphore(permit));
         }
+        // No permit was free, so the limiter is full. Recording that here makes every wait and
+        // rejection visible, whatever is released right after.
+        self.in_use_peak.fetch_max(self.capacity, Ordering::Relaxed);
         if self.timeout.is_zero() {
             return Err(ErrorKind::AtCapacity.into());
         }
@@ -180,11 +144,18 @@ impl Limiter {
     /// Each call restarts the peak. [`run_emitter`](Self::run_emitter) calls this, so another
     /// caller takes away from the peak that the emitter reports.
     pub fn stats(&self) -> LimiterStats {
-        let in_use = self.capacity - self.semaphore.available_permits() as u32;
+        let in_use = self.in_use();
+        // Restarting at the current number instead of zero keeps permits visible that stay held
+        // while nothing new is acquired.
+        let in_use_peak = self.in_use_peak.swap(in_use, Ordering::Relaxed);
         LimiterStats {
             in_use,
-            in_use_peak: self.peak.take(in_use),
+            in_use_peak: in_use_peak.max(in_use),
         }
+    }
+
+    fn in_use(&self) -> u32 {
+        self.capacity - self.semaphore.available_permits() as u32
     }
 
     /// Passes this limiter's stats to `emit` immediately and once per second thereafter.
@@ -504,7 +475,7 @@ mod tests {
             limiter.acquire().await.unwrap(),
         );
         // Lower the peak so that only the failed acquisition can raise it back to capacity.
-        assert_eq!(limiter.peak.take(1), 2);
+        assert_eq!(limiter.in_use_peak.swap(1, Ordering::Relaxed), 2);
         limiter.acquire().await.unwrap_err();
         drop(held);
         assert_eq!(limiter.stats().in_use_peak, 2);
