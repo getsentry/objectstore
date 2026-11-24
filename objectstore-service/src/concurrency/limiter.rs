@@ -78,28 +78,14 @@ pub struct LimiterStats {
 /// High-water mark of the permits in use of a semaphore.
 ///
 /// A periodic snapshot misses bursts that start and end between two snapshots, so limiters
-/// acquire free permits through [`try_acquire`](Self::try_acquire), which tracks their usage.
+/// acquire free permits through [`try_acquire_tracked`], which raises the mark.
 #[derive(Debug, Default)]
 pub(super) struct Peak(AtomicU32);
 
 impl Peak {
-    /// Takes a free permit from `semaphore` without waiting and raises the mark to the
-    /// resulting number of its `capacity` permits in use.
-    pub(super) fn try_acquire(
-        &self,
-        semaphore: &Arc<Semaphore>,
-        capacity: u32,
-    ) -> Option<OwnedSemaphorePermit> {
-        let permit = semaphore.clone().try_acquire_owned().ok();
-        let in_use = match permit {
-            // A release between the acquisition and this read lowers the reading.
-            Some(_) => capacity - semaphore.available_permits() as u32,
-            // No permit was free. Recording that here makes every rejection and wait show up
-            // as a full limiter, whatever is released right after.
-            None => capacity,
-        };
+    /// Raises the mark to `in_use` if that is higher.
+    fn observe(&self, in_use: u32) {
         self.0.fetch_max(in_use, Ordering::Relaxed);
-        permit
     }
 
     /// Returns the highest number of permits in use since the previous call.
@@ -109,6 +95,24 @@ impl Peak {
     pub(super) fn take(&self, in_use: u32) -> u32 {
         self.0.swap(in_use, Ordering::Relaxed).max(in_use)
     }
+}
+
+/// Takes a free permit from `semaphore` without waiting and raises `peak` to the resulting
+/// number of its `capacity` permits in use.
+pub(super) fn try_acquire_tracked(
+    semaphore: &Arc<Semaphore>,
+    capacity: u32,
+    peak: &Peak,
+) -> Option<OwnedSemaphorePermit> {
+    let permit = semaphore.clone().try_acquire_owned().ok();
+    peak.observe(match permit {
+        // A release between the acquisition and this read lowers the reading.
+        Some(_) => capacity - semaphore.available_permits() as u32,
+        // No permit was free. Recording that here makes every rejection and wait show up as a
+        // full limiter, whatever is released right after.
+        None => capacity,
+    });
+    permit
 }
 
 /// Shared interval loop for the metric emitters.
@@ -152,7 +156,7 @@ impl Limiter {
     /// Returns [`ErrorKind::AtCapacity`] when the queue is full or the wait times out.
     /// Dropping the future releases its queue slot and any assigned permit.
     pub async fn acquire(&self) -> Result<Permit> {
-        if let Some(permit) = self.peak.try_acquire(&self.semaphore, self.capacity) {
+        if let Some(permit) = try_acquire_tracked(&self.semaphore, self.capacity, &self.peak) {
             return Ok(Permit::semaphore(permit));
         }
         if self.timeout.is_zero() {
@@ -396,15 +400,6 @@ mod tests {
 
     const TIMEOUT: Duration = Duration::from_secs(1);
 
-    /// Stats of a limiter with nothing in use or waiting, after at most `in_use_peak` permits
-    /// were in use at once.
-    fn idle(in_use_peak: u32) -> PriorityLimiterStats {
-        PriorityLimiterStats {
-            in_use_peak,
-            ..Default::default()
-        }
-    }
-
     #[tokio::test(start_paused = true)]
     async fn emitter_reports_current_limiter_usage() {
         let priority = PriorityLimiter::new(NonZeroU32::MIN, TIMEOUT, TIMEOUT, None, None);
@@ -433,7 +428,13 @@ mod tests {
         assert!(poll!(&mut priority_emitter).is_pending());
         assert!(poll!(&mut simple_emitter).is_pending());
         // Both permits were still in use when the previous emission restarted the peak.
-        assert_eq!(priority_receiver.try_recv().unwrap(), idle(1));
+        assert_eq!(
+            priority_receiver.try_recv().unwrap(),
+            PriorityLimiterStats {
+                in_use_peak: 1,
+                ..Default::default()
+            }
+        );
         assert_eq!(
             simple_receiver.try_recv().unwrap(),
             LimiterStats {
@@ -682,7 +683,13 @@ mod tests {
         assert!(poll!(&mut newcomer).is_pending());
         drop(normal2.await.unwrap());
         drop(newcomer.await.unwrap());
-        assert_eq!(limiter.stats(), idle(1));
+        assert_eq!(
+            limiter.stats(),
+            PriorityLimiterStats {
+                in_use_peak: 1,
+                ..Default::default()
+            }
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -712,7 +719,13 @@ mod tests {
         for waiter in &mut waiters {
             assert!(poll!(waiter).is_ready());
         }
-        assert_eq!(limiter.stats(), idle(3));
+        assert_eq!(
+            limiter.stats(),
+            PriorityLimiterStats {
+                in_use_peak: 3,
+                ..Default::default()
+            }
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -763,7 +776,13 @@ mod tests {
             drop(other);
             drop(held);
             drop(next.await.unwrap());
-            assert_eq!(limiter.stats(), idle(1));
+            assert_eq!(
+                limiter.stats(),
+                PriorityLimiterStats {
+                    in_use_peak: 1,
+                    ..Default::default()
+                }
+            );
         }
     }
 
@@ -780,7 +799,13 @@ mod tests {
         drop(held);
         drop(cancelled);
         drop(next.await.unwrap());
-        assert_eq!(limiter.stats(), idle(1));
+        assert_eq!(
+            limiter.stats(),
+            PriorityLimiterStats {
+                in_use_peak: 1,
+                ..Default::default()
+            }
+        );
         // Both normal queue slots must be available after cancellation and completion.
         let held = limiter.acquire(Priority::Normal).await.unwrap();
         let mut first = Box::pin(limiter.acquire(Priority::Normal));
@@ -853,7 +878,13 @@ mod tests {
             assert!(poll!(&mut retry).is_pending());
             drop(held);
             drop(retry.await.unwrap());
-            assert_eq!(limiter.stats(), idle(1));
+            assert_eq!(
+                limiter.stats(),
+                PriorityLimiterStats {
+                    in_use_peak: 1,
+                    ..Default::default()
+                }
+            );
         }
     }
 
@@ -900,7 +931,13 @@ mod tests {
 
         let stats = limiter.stats();
         assert!(stats.in_use_peak <= CAPACITY);
-        assert_eq!(stats, idle(stats.in_use_peak));
+        assert_eq!(
+            stats,
+            PriorityLimiterStats {
+                in_use_peak: stats.in_use_peak,
+                ..Default::default()
+            }
+        );
         let mut permits = Vec::new();
         for _ in 0..CAPACITY {
             permits.push(limiter.acquire(Priority::Normal).await.unwrap());

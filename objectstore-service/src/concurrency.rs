@@ -31,8 +31,8 @@ use crate::error::{Error, ErrorKind, Panic, Result};
 
 mod limiter;
 
-use limiter::Peak;
 pub use limiter::{Limiter, LimiterStats, Permit, Priority, PriorityLimiter, PriorityLimiterStats};
+use limiter::{Peak, try_acquire_tracked};
 
 /// Interval for the periodic metrics emitter.
 const EMITTER_INTERVAL: Duration = Duration::from_secs(1);
@@ -152,7 +152,8 @@ impl ConcurrencyLimiter {
         }
 
         // Fast path: Instantly grab a free permit without parking.
-        if let Some(task_permit) = self.try_acquire_task() {
+        let free_permit = try_acquire_tracked(&self.tasks, self.tasks_total, &self.in_use_peak);
+        if let Some(task_permit) = free_permit {
             return Ok(ConcurrencyPermit {
                 task_permit: Some(task_permit),
                 bulk_permit: None,
@@ -185,7 +186,8 @@ impl ConcurrencyLimiter {
     ///
     /// Returns [`ErrorKind::AtCapacity`] when no permits are available.
     pub fn try_acquire(&self) -> Result<ConcurrencyPermit> {
-        let task_permit = self.try_acquire_task().ok_or(ErrorKind::AtCapacity)?;
+        let task_permit = try_acquire_tracked(&self.tasks, self.tasks_total, &self.in_use_peak)
+            .ok_or(ErrorKind::AtCapacity)?;
 
         Ok(ConcurrencyPermit {
             task_permit: Some(task_permit),
@@ -209,14 +211,14 @@ impl ConcurrencyLimiter {
         }
 
         let acquire = async {
-            let free_bulk_permit = self
-                .bulk_in_use_peak
-                .try_acquire(&self.bulk, self.bulk_total);
-            let bulk_permit = match free_bulk_permit {
+            let free_permit =
+                try_acquire_tracked(&self.bulk, self.bulk_total, &self.bulk_in_use_peak);
+            let bulk_permit = match free_permit {
                 Some(bulk_permit) => bulk_permit,
                 None => self.bulk.clone().acquire_owned().await?,
             };
-            let task_permit = match self.try_acquire_task() {
+            let free_permit = try_acquire_tracked(&self.tasks, self.tasks_total, &self.in_use_peak);
+            let task_permit = match free_permit {
                 Some(task_permit) => task_permit,
                 None => self.tasks.clone().acquire_owned().await?,
             };
@@ -233,11 +235,6 @@ impl ConcurrencyLimiter {
             bulk_permit: Some(bulk_permit),
             released: Arc::clone(&self.released),
         })
-    }
-
-    /// Takes a free execution permit without waiting, tracking the peak permits in use.
-    fn try_acquire_task(&self) -> Option<OwnedSemaphorePermit> {
-        self.in_use_peak.try_acquire(&self.tasks, self.tasks_total)
     }
 
     /// Returns the number of permits currently available.
