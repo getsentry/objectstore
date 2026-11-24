@@ -10,6 +10,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+humantime-serde = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-dogstatsd = { workspace = true }
 objectstore-log = { workspace = true }

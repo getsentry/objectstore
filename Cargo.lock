@@ -2962,6 +2962,7 @@ dependencies = [
 name = "objectstore-metrics"
 version = "0.1.0"
 dependencies = [
+ "humantime-serde",
  "metrics",
  "metrics-exporter-dogstatsd",
  "objectstore-log",

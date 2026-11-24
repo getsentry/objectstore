@@ -200,6 +200,7 @@ pub enum Error {
 /// - `OS__METRICS__ADDR` — StatsD address (e.g. `127.0.0.1:8125` or `unixgram:///tmp/statsd.sock`)
 /// - `OS__METRICS__PREFIX` — global metric name prefix
 /// - `OS__METRICS__BUFFER_SIZE` — maximum payload length in bytes
+/// - `OS__METRICS__FLUSH_INTERVAL` — exporter flush interval (e.g. `1s`)
 /// - `OS__METRICS__TAGS__KEY=value` — per-key global tags
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct MetricsConfig {
@@ -250,6 +251,13 @@ pub struct MetricsConfig {
     /// `OS__METRICS__BUFFER_SIZE`
     pub buffer_size: Option<usize>,
 
+    /// Interval between exporter flushes. Defaults to ten seconds.
+    ///
+    /// Shorter intervals retain more frequent gauge snapshots but increase export overhead.
+    /// Must be greater than zero. Set with `OS__METRICS__FLUSH_INTERVAL`.
+    #[serde(default = "default_flush_interval", with = "humantime_serde")]
+    pub flush_interval: std::time::Duration,
+
     /// Global tags applied to all metrics.
     ///
     /// Key-value pairs attached to every emitted metric. Useful for identifying
@@ -281,12 +289,17 @@ fn default_prefix() -> String {
     "objectstore".to_owned()
 }
 
+fn default_flush_interval() -> std::time::Duration {
+    std::time::Duration::from_secs(10)
+}
+
 impl Default for MetricsConfig {
     fn default() -> Self {
         Self {
             addr: None,
             prefix: "objectstore".to_owned(),
             buffer_size: None,
+            flush_interval: default_flush_interval(),
             tags: BTreeMap::new(),
         }
     }
@@ -300,6 +313,14 @@ pub fn init(config: &MetricsConfig) -> Result<(), Error> {
     let Some(ref addr) = config.addr else {
         return Ok(());
     };
+    if config.flush_interval.is_zero() {
+        return Err(
+            metrics_exporter_dogstatsd::BuildError::InvalidConfiguration {
+                reason: "metrics flush interval must be greater than zero".to_owned(),
+            }
+            .into(),
+        );
+    }
 
     objectstore_log::info!("reporting metrics to statsd at {addr}");
 
@@ -313,6 +334,7 @@ pub fn init(config: &MetricsConfig) -> Result<(), Error> {
         .with_remote_address(addr)?
         .with_telemetry(true)
         .with_aggregation_mode(AggregationMode::Aggressive)
+        .with_flush_interval(config.flush_interval)
         .send_histograms_as_distributions(true)
         .with_histogram_sampling(true)
         .set_global_prefix(&config.prefix)
