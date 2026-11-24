@@ -185,14 +185,24 @@ impl WorkloadBuilder {
     pub fn build(self) -> Workload {
         let rng = SmallRng::seed_from_u64(self.seed);
 
-        // Inspired by <https://stats.stackexchange.com/a/649432>
-        // Fit the distribution above the floor so shifting the samples preserves p50 and p99.
-        let p50 = (self.p50_size - self.min_size) as f64;
-        let p99 = (self.p99_size - self.min_size) as f64;
-        let mu = p50.ln();
-        let sigma = (p99.ln() - mu) / 2.3263;
+        let sizes = match self.size_buckets {
+            Some(buckets) => SizeDistribution::Buckets(buckets),
+            None => {
+                // Inspired by <https://stats.stackexchange.com/a/649432>
+                // Fit the distribution above the floor so shifting the samples preserves p50 and
+                // p99.
+                let p50 = (self.p50_size - self.min_size) as f64;
+                let p99 = (self.p99_size - self.min_size) as f64;
+                let mu = p50.ln();
+                let sigma = (p99.ln() - mu) / 2.3263;
 
-        let size_distribution = LogNormal::new(mu, sigma).unwrap();
+                SizeDistribution::LogNormal {
+                    distribution: LogNormal::new(mu, sigma).unwrap(),
+                    min: self.min_size,
+                    max: self.max_size,
+                }
+            }
+        };
         let action_distribution =
             WeightedIndex::new([self.write_weight, self.read_weight, self.delete_weight]).unwrap();
 
@@ -203,10 +213,7 @@ impl WorkloadBuilder {
             mode: self.mode,
 
             rng,
-            size_distribution,
-            min_size: self.min_size,
-            max_size: self.max_size,
-            size_buckets: self.size_buckets,
+            sizes,
             action_distribution,
 
             start_time: None,
@@ -224,6 +231,19 @@ struct Totals {
     deletes: usize,
 }
 
+/// How a [`Workload`] generates payload sizes for the `write` action.
+#[derive(Debug)]
+enum SizeDistribution {
+    /// A lognormal distribution, with `min` added to each sampled size and capped at `max`.
+    LogNormal {
+        distribution: LogNormal<f64>,
+        min: u64,
+        max: Option<u64>,
+    },
+    /// A histogram of size buckets.
+    Buckets(SizeBuckets),
+}
+
 /// Specification of a stresstest that can be run against a remote storage service.
 #[derive(Debug)]
 pub struct Workload {
@@ -238,14 +258,8 @@ pub struct Workload {
 
     /// The RNG driving all our distributions.
     rng: SmallRng,
-    /// A distribution that generates payload sizes for the `write` action.
-    size_distribution: LogNormal<f64>,
-    /// Minimum payload size in bytes, added to each sampled size.
-    min_size: u64,
-    /// Optional maximum payload size in bytes.
-    max_size: Option<u64>,
-    /// Size buckets that generate payload sizes instead of `size_distribution`, if configured.
-    size_buckets: Option<SizeBuckets>,
+    /// The distribution that generates payload sizes for the `write` action.
+    sizes: SizeDistribution,
     /// A distribution that generates actions, such as write/read/delete.
     action_distribution: WeightedIndex<usize>,
 
@@ -280,17 +294,17 @@ impl Workload {
 
     fn get_payload(&self, seed: u64) -> Payload {
         let mut rng = SmallRng::seed_from_u64(seed);
-        if let Some(buckets) = &self.size_buckets {
-            let len = buckets.sample(&mut rng);
-            return Payload { len, rng };
-        }
-
-        let mut len =
-            (self.size_distribution.sample(&mut rng) as u64).saturating_add(self.min_size);
-
-        if let Some(max) = self.max_size {
-            len = len.min(max);
-        }
+        let len = match &self.sizes {
+            SizeDistribution::Buckets(buckets) => buckets.sample(&mut rng),
+            SizeDistribution::LogNormal {
+                distribution,
+                min,
+                max,
+            } => {
+                let len = (distribution.sample(&mut rng) as u64).saturating_add(*min);
+                max.map_or(len, |max| len.min(max))
+            }
+        };
 
         Payload { len, rng }
     }
@@ -501,6 +515,18 @@ mod tests {
             let share = at_or_below as f64 / SAMPLES as f64;
             assert!((share - count / 100.0).abs() < 0.01, "{bound}: {share}");
         }
+    }
+
+    #[test]
+    fn size_buckets_replace_percentile_settings() {
+        // These settings cannot be fitted to a lognormal distribution, and buckets ignore them.
+        let workload = Workload::builder("test")
+            .size_distribution(100, 10)
+            .min_size(1024)
+            .size_buckets(SizeBuckets::new(vec![(64, 1.0)]).unwrap())
+            .build();
+
+        assert!((33..=64).contains(&workload.get_payload(0).len));
     }
 
     #[test]
