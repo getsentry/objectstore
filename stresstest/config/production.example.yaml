@@ -1,0 +1,182 @@
+# Replays the object sizes of the production usecases.
+#
+# The `buckets` of each workload approximate the cumulative size histogram of
+# `objectstore.put.size` in Datadog. The counts are rounded and scaled to one
+# million objects, so they are close to production but are not the real data.
+# See "Size buckets" in the README for their meaning and for how to pull the
+# real histogram of a usecase.
+
+remote: http://localhost:18888
+
+duration: 5s
+
+workloads:
+  # The write rates roughly follow the ratio between usecases, rounded. The last
+  # four usecases see far fewer writes than this and are set to the minimum rate.
+  - name: attachments
+    mode: fixed-rate
+    organizations: 1000
+    actions:
+      writes: 100
+      reads: 0
+      deletes: 0
+    file_sizes:
+      buckets:
+        64 B: 16000
+        128 B: 32000
+        256 B: 73000
+        512 B: 150000
+        1 KiB: 240000
+        2 KiB: 350000
+        4 KiB: 460000
+        8 KiB: 560000
+        16 KiB: 630000
+        32 KiB: 700000
+        64 KiB: 800000
+        128 KiB: 900000
+        256 KiB: 948000
+        512 KiB: 977000
+        1 MiB: 990000
+        2 MiB: 995400
+        4 MiB: 997000
+        8 MiB: 998500
+        16 MiB: 999310
+        32 MiB: 999890
+        64 MiB: 999956
+        128 MiB: 999990
+        256 MiB: 999998
+        512 MiB: 999999
+        1 GiB: 1000000
+  - name: debug_files
+    mode: fixed-rate
+    organizations: 1000
+    actions:
+      writes: 5
+      reads: 0
+      deletes: 0
+    file_sizes:
+      buckets:
+        64 B: 1
+        128 B: 20
+        256 B: 290
+        512 B: 12000
+        1 KiB: 22000
+        2 KiB: 40000
+        4 KiB: 65000
+        8 KiB: 100000
+        16 KiB: 170000
+        32 KiB: 300000
+        64 KiB: 390000
+        128 KiB: 470000
+        256 KiB: 550000
+        512 KiB: 620000
+        1 MiB: 720000
+        2 MiB: 790000
+        4 MiB: 850000
+        8 MiB: 890000
+        16 MiB: 939000
+        32 MiB: 963000
+        64 MiB: 981000
+        128 MiB: 990300
+        256 MiB: 995500
+        512 MiB: 998100
+        1 GiB: 999820
+        2 GiB: 999982
+        4 GiB: 1000000
+  - name: preprod
+    mode: fixed-rate
+    organizations: 1000
+    actions:
+      writes: 1
+      reads: 0
+      deletes: 0
+    file_sizes:
+      buckets:
+        64 B: 420
+        128 B: 420
+        256 B: 1000
+        512 B: 4000
+        1 KiB: 4400
+        2 KiB: 7200
+        4 KiB: 15000
+        8 KiB: 52000
+        16 KiB: 110000
+        32 KiB: 270000
+        64 KiB: 410000
+        128 KiB: 640000
+        256 KiB: 790000
+        512 KiB: 860000
+        1 MiB: 890000
+        2 MiB: 932000
+        4 MiB: 978000
+        8 MiB: 995200
+        16 MiB: 1000000
+  - name: preprod_size
+    mode: fixed-rate
+    organizations: 1000
+    actions:
+      writes: 1
+      reads: 0
+      deletes: 0
+    file_sizes:
+      buckets:
+        128 B: 42000
+        256 B: 79000
+        512 B: 190000
+        1 KiB: 390000
+        2 KiB: 460000
+        4 KiB: 600000
+        8 KiB: 700000
+        16 KiB: 902000
+        32 KiB: 989000
+        64 KiB: 1000000
+  - name: preprod_snapshots
+    mode: fixed-rate
+    organizations: 1000
+    actions:
+      writes: 1
+      reads: 0
+      deletes: 0
+    file_sizes:
+      buckets:
+        64 B: 120
+        128 B: 280000
+        256 B: 360000
+        512 B: 400000
+        1 KiB: 460000
+        2 KiB: 620000
+        4 KiB: 710000
+        8 KiB: 770000
+        16 KiB: 810000
+        32 KiB: 840000
+        64 KiB: 880000
+        128 KiB: 903000
+        256 KiB: 929000
+        512 KiB: 953000
+        1 MiB: 988000
+        2 MiB: 990000
+        4 MiB: 996300
+        8 MiB: 998700
+        16 MiB: 999984
+        32 MiB: 999984
+        64 MiB: 999999
+        128 MiB: 1000000
+  - name: profile_attachments
+    mode: fixed-rate
+    organizations: 1000
+    actions:
+      writes: 1
+      reads: 0
+      deletes: 0
+    file_sizes:
+      buckets:
+        4 KiB: 200
+        8 KiB: 1200
+        16 KiB: 52000
+        32 KiB: 100000
+        64 KiB: 120000
+        128 KiB: 150000
+        256 KiB: 220000
+        512 KiB: 350000
+        1 MiB: 890000
+        2 MiB: 1000000

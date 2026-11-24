@@ -5,6 +5,7 @@ use std::thread::available_parallelism;
 use std::time::Instant;
 use std::{fmt, io, task};
 
+use anyhow::ensure;
 use objectstore_client::Usecase;
 use rand::rngs::SmallRng;
 use rand::{Rng, RngExt, SeedableRng};
@@ -35,6 +36,76 @@ pub enum WorkloadMode {
     Batch,
 }
 
+/// Object sizes as a histogram of size buckets.
+///
+/// Each bucket is the largest object size it holds, in bytes, with the number of objects at or
+/// below that size. A bucket holds the sizes above the previous bucket's size, and the first
+/// bucket starts at half its own size. Counts are cumulative and only their ratio to the last
+/// count matters, so absolute counts, shares and percentages are equivalent.
+///
+/// Sampling picks a bucket with a probability proportional to the objects it adds over the
+/// previous bucket, then draws a size log-uniformly within that bucket. Buckets that add no
+/// objects are never picked.
+///
+/// ```
+/// # use stresstest::workload::SizeBuckets;
+/// // Half of the objects are in (512, 1024] bytes, the other half in (1024, 2048] bytes.
+/// let buckets = SizeBuckets::new(vec![(1024, 50.0), (2048, 100.0)]).unwrap();
+/// ```
+#[derive(Debug, Clone)]
+pub struct SizeBuckets(Vec<(u64, f64)>);
+
+impl SizeBuckets {
+    /// Creates size buckets from `(size, cumulative count)` pairs.
+    ///
+    /// # Errors
+    ///
+    /// Fails unless sizes are positive and strictly increasing, counts do not decrease, and the
+    /// last count is greater than zero.
+    pub fn new(buckets: Vec<(u64, f64)>) -> anyhow::Result<Self> {
+        let (mut last_size, mut last_count) = (0, 0.0);
+        for &(size, count) in &buckets {
+            ensure!(
+                size > last_size,
+                "bucket sizes must be positive and strictly increasing, \
+                 but {size} bytes follows {last_size} bytes"
+            );
+            ensure!(
+                count >= last_count && count.is_finite(),
+                "bucket counts are cumulative and must not decrease, \
+                 but {count} at {size} bytes follows {last_count}"
+            );
+            (last_size, last_count) = (size, count);
+        }
+        ensure!(last_count > 0.0, "the last bucket count must be positive");
+
+        Ok(Self(buckets))
+    }
+}
+
+impl Distribution<u64> for SizeBuckets {
+    fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> u64 {
+        let buckets = &self.0;
+        let total = buckets[buckets.len() - 1].1;
+
+        // The rank of the sampled object in `(0, total]`, which falls into the first bucket with
+        // at least that many objects.
+        let rank = (1.0 - rng.random::<f64>()) * total;
+        let index = buckets.partition_point(|&(_, count)| count < rank);
+
+        let (size, count) = buckets[index];
+        let (lower_size, lower_count) = match index {
+            0 => (size as f64 / 2.0, 0.0),
+            _ => (buckets[index - 1].0 as f64, buckets[index - 1].1),
+        };
+
+        // Spread the bucket's ranks log-uniformly over `(lower_size, size]`.
+        let position = (rank - lower_count) / (count - lower_count);
+        let sampled = lower_size * (size as f64 / lower_size).powf(position);
+        (sampled.ceil() as u64).min(size)
+    }
+}
+
 /// A builder for creating a [`Workload`].
 #[derive(Debug)]
 pub struct WorkloadBuilder {
@@ -48,6 +119,7 @@ pub struct WorkloadBuilder {
     p99_size: u64,
     min_size: u64,
     max_size: Option<u64>,
+    size_buckets: Option<SizeBuckets>,
 
     write_weight: usize,
     read_weight: usize,
@@ -92,6 +164,15 @@ impl WorkloadBuilder {
         self
     }
 
+    /// Draws file sizes for the `write` action from a histogram of size buckets.
+    ///
+    /// This replaces the distribution set by [`size_distribution`](Self::size_distribution),
+    /// including the minimum and maximum payload size.
+    pub fn size_buckets(mut self, buckets: SizeBuckets) -> Self {
+        self.size_buckets = Some(buckets);
+        self
+    }
+
     /// The ratio between writes, reads and deletes.
     pub fn action_weights(mut self, writes: usize, reads: usize, deletes: usize) -> Self {
         self.write_weight = writes;
@@ -125,6 +206,7 @@ impl WorkloadBuilder {
             size_distribution,
             min_size: self.min_size,
             max_size: self.max_size,
+            size_buckets: self.size_buckets,
             action_distribution,
 
             start_time: None,
@@ -162,6 +244,8 @@ pub struct Workload {
     min_size: u64,
     /// Optional maximum payload size in bytes.
     max_size: Option<u64>,
+    /// Size buckets that generate payload sizes instead of `size_distribution`, if configured.
+    size_buckets: Option<SizeBuckets>,
     /// A distribution that generates actions, such as write/read/delete.
     action_distribution: WeightedIndex<usize>,
 
@@ -186,6 +270,7 @@ impl Workload {
             p99_size: 1024 * 1024,
             min_size: 0,
             max_size: None,
+            size_buckets: None,
 
             write_weight: 33,
             read_weight: 33,
@@ -195,6 +280,11 @@ impl Workload {
 
     fn get_payload(&self, seed: u64) -> Payload {
         let mut rng = SmallRng::seed_from_u64(seed);
+        if let Some(buckets) = &self.size_buckets {
+            let len = buckets.sample(&mut rng);
+            return Payload { len, rng };
+        }
+
         let mut len =
             (self.size_distribution.sample(&mut rng) as u64).saturating_add(self.min_size);
 
@@ -390,6 +480,35 @@ mod tests {
         for seed in 0..1000 {
             assert!((MIN..=MAX).contains(&workload.get_payload(seed).len));
         }
+    }
+
+    #[test]
+    fn size_buckets_match_configured_shares() {
+        // 10% up to 1 KiB, another 60% up to 2 KiB, nothing up to 4 KiB, the last 30% up to 8 KiB.
+        let counts = vec![(1024, 10.0), (2048, 70.0), (4096, 70.0), (8192, 100.0)];
+        let workload = Workload::builder("test")
+            .size_buckets(SizeBuckets::new(counts.clone()).unwrap())
+            .build();
+
+        const SAMPLES: u64 = 100_000;
+        let sizes: Vec<_> = (0..SAMPLES)
+            .map(|seed| workload.get_payload(seed).len)
+            .collect();
+
+        assert!(sizes.iter().all(|size| (513..=8192).contains(size)));
+        for (bound, count) in counts {
+            let at_or_below = sizes.iter().filter(|&&size| size <= bound).count();
+            let share = at_or_below as f64 / SAMPLES as f64;
+            assert!((share - count / 100.0).abs() < 0.01, "{bound}: {share}");
+        }
+    }
+
+    #[test]
+    fn size_buckets_reject_invalid_input() {
+        assert!(SizeBuckets::new(vec![]).is_err());
+        assert!(SizeBuckets::new(vec![(1024, 0.0)]).is_err());
+        assert!(SizeBuckets::new(vec![(2048, 1.0), (1024, 2.0)]).is_err());
+        assert!(SizeBuckets::new(vec![(1024, 2.0), (2048, 1.0)]).is_err());
     }
 
     #[test]

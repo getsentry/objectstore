@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use anyhow::bail;
 use bytesize::ByteSize;
+use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use stresstest::workload::WorkloadMode;
 
@@ -92,14 +93,28 @@ pub struct Workload {
 
 impl Workload {
     pub fn validate(&self) -> anyhow::Result<()> {
-        if let Some(min) = self.file_sizes.min {
-            if min >= self.file_sizes.p50 || self.file_sizes.p99 < self.file_sizes.p50 {
+        let sizes = &self.file_sizes;
+        let valid = match sizes.buckets {
+            Some(_) => [sizes.min, sizes.p50, sizes.p99, sizes.max]
+                .iter()
+                .all(Option::is_none),
+            None => sizes.p50.is_some() && sizes.p99.is_some(),
+        };
+        if !valid {
+            bail!(
+                "workload '{}': file_sizes needs either `buckets` alone, or `p50` and `p99` \
+                 with optional `min` and `max`",
+                self.name
+            );
+        }
+        if let (Some(min), Some(p50), Some(p99)) = (sizes.min, sizes.p50, sizes.p99) {
+            if min >= p50 || p99 < p50 {
                 bail!(
                     "workload '{}': file sizes must satisfy min < p50 <= p99",
                     self.name
                 );
             }
-            if self.file_sizes.max.is_some_and(|max| max < min) {
+            if sizes.max.is_some_and(|max| max < min) {
                 bail!(
                     "workload '{}': maximum file size is below the minimum",
                     self.name
@@ -135,12 +150,47 @@ fn default_organizations() -> u64 {
     1
 }
 
+/// File size distribution of a workload.
+///
+/// Sizes are either drawn from a lognormal distribution fitted to `p50` and `p99`, optionally
+/// bounded by `min` and `max`, or from a histogram of size `buckets`. See
+/// [`SizeBuckets`](stresstest::workload::SizeBuckets) for the meaning of buckets.
 #[derive(Debug, Deserialize)]
 pub struct FileSizes {
     pub min: Option<ByteSize>,
-    pub p50: ByteSize,
-    pub p99: ByteSize,
+    pub p50: Option<ByteSize>,
+    pub p99: Option<ByteSize>,
     pub max: Option<ByteSize>,
+    /// Bucket sizes in bytes with the cumulative count of objects at or below each size, in the
+    /// order they are written in the config.
+    #[serde(default, deserialize_with = "deserialize_buckets")]
+    pub buckets: Option<Vec<(u64, f64)>>,
+}
+
+/// Deserializes a map of sizes to counts into pairs, keeping the order of the map.
+fn deserialize_buckets<'de, D>(deserializer: D) -> Result<Option<Vec<(u64, f64)>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct BucketsVisitor;
+
+    impl<'de> Visitor<'de> for BucketsVisitor {
+        type Value = Vec<(u64, f64)>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a map of sizes to cumulative object counts")
+        }
+
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+            let mut buckets = Vec::new();
+            while let Some((size, count)) = map.next_entry::<ByteSize, f64>()? {
+                buckets.push((size.0, count));
+            }
+            Ok(buckets)
+        }
+    }
+
+    deserializer.deserialize_map(BucketsVisitor).map(Some)
 }
 
 #[derive(Debug, Deserialize)]
@@ -156,6 +206,28 @@ impl Default for Actions {
             writes: 97,
             reads: 2,
             deletes: 1,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use stresstest::workload::SizeBuckets;
+
+    use super::*;
+
+    #[test]
+    fn example_configs_are_valid() {
+        for name in ["example.yaml", "production.example.yaml"] {
+            let path = format!("{}/config/{name}", env!("CARGO_MANIFEST_DIR"));
+            let config: Config =
+                serde_yaml::from_reader(std::fs::File::open(path).unwrap()).unwrap();
+            for workload in config.workloads {
+                workload.validate().unwrap();
+                if let Some(buckets) = workload.file_sizes.buckets {
+                    SizeBuckets::new(buckets).unwrap();
+                }
+            }
         }
     }
 }

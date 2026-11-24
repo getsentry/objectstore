@@ -1,10 +1,10 @@
 //! This is a stresstest binary which can run different [`Workload`]s against
 //! a backend storage service.
 //!
-//! The [`Workload`] currently supports configuring a *LogNormal* distribution
-//! of file sizes, defined by the `p50` and `p99` of file sizes.
-//! This models our real-world distribution of many small files, with a long
-//! tail of larger files as well.
+//! The [`Workload`] supports two ways of configuring file sizes. A *LogNormal*
+//! distribution, defined by the `p50` and `p99` of file sizes, models many
+//! small files with a long tail of larger files. A histogram of [`SizeBuckets`]
+//! replays a file size distribution that was measured in production.
 //!
 //! It also allows configuring a distribution of actions, such as write, read or delete.
 //! The goal is that we have a lot of *write-heavy* workloads which only write
@@ -12,6 +12,8 @@
 //!
 //! *Read* or *delete* actions are using a *zipfian* distribution, meaning that
 //! more recently written blobs are the ones that will be read/deleted.
+//!
+//! [`SizeBuckets`]: stresstest::workload::SizeBuckets
 #![warn(missing_docs)]
 #![warn(missing_debug_implementations)]
 
@@ -23,6 +25,7 @@ use objectstore_client::{SecretKey, TokenGenerator};
 use stresstest::Workload;
 use stresstest::http::HttpRemote;
 use stresstest::stresstest::Stresstest;
+use stresstest::workload::SizeBuckets;
 
 use crate::config::Config;
 
@@ -79,17 +82,25 @@ async fn main() -> anyhow::Result<()> {
     for w in config.workloads {
         w.validate()?;
 
-        let workload = Workload::builder(w.name)
+        let sizes = w.file_sizes;
+        let mut workload = Workload::builder(&w.name)
             .concurrency(w.concurrency)
             .organizations(w.organizations)
             .mode(w.mode)
-            .size_distribution(w.file_sizes.p50.0, w.file_sizes.p99.0)
-            .min_size(w.file_sizes.min.map_or(0, |b| b.0))
-            .max_size(w.file_sizes.max.map(|b| b.0))
-            .action_weights(w.actions.writes, w.actions.reads, w.actions.deletes)
-            .build();
+            .min_size(sizes.min.map_or(0, |b| b.0))
+            .max_size(sizes.max.map(|b| b.0))
+            .action_weights(w.actions.writes, w.actions.reads, w.actions.deletes);
 
-        stresstest = stresstest.workload(workload);
+        if let (Some(p50), Some(p99)) = (sizes.p50, sizes.p99) {
+            workload = workload.size_distribution(p50.0, p99.0);
+        }
+        if let Some(buckets) = sizes.buckets {
+            let buckets = SizeBuckets::new(buckets)
+                .with_context(|| format!("workload '{}': invalid file size buckets", w.name))?;
+            workload = workload.size_buckets(buckets);
+        }
+
+        stresstest = stresstest.workload(workload.build());
     }
 
     stresstest.run().await?;
