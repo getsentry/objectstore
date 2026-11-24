@@ -299,9 +299,9 @@ impl ConcurrencyLimiter {
         // Each count is read right before its peak restarts, so that the restarted peak does not
         // include permits released in between.
         let in_use = self.used_permits();
-        let in_use_peak = self.in_use_peak.restart(in_use);
+        let in_use_peak = self.in_use_peak.take(in_use);
         let bulk_in_use = self.used_bulk_permits();
-        let bulk_in_use_peak = self.bulk_in_use_peak.restart(bulk_in_use);
+        let bulk_in_use_peak = self.bulk_in_use_peak.take(bulk_in_use);
         Stats {
             in_use,
             in_use_peak,
@@ -583,7 +583,7 @@ mod tests {
                 limiter.try_acquire().unwrap(),
             );
             // Lower the peak so that only the failed acquisition can raise it back to capacity.
-            assert_eq!(limiter.in_use_peak.restart(1), 2);
+            assert_eq!(limiter.in_use_peak.take(1), 2);
             let mut waiting: std::pin::Pin<Box<dyn Future<Output = _>>> = match bulk {
                 false => Box::pin(limiter.acquire()),
                 true => Box::pin(limiter.acquire_bulk()),
@@ -603,7 +603,7 @@ mod tests {
             limiter.acquire_bulk().await.unwrap(),
         );
         // Lower the peak so that only the failed acquisition can raise it back to capacity.
-        assert_eq!(limiter.bulk_in_use_peak.restart(1), 2);
+        assert_eq!(limiter.bulk_in_use_peak.take(1), 2);
         limiter.acquire_bulk().await.unwrap_err();
         drop(held);
 

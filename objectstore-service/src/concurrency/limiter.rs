@@ -75,7 +75,7 @@ pub struct LimiterStats {
     pub in_use_peak: u32,
 }
 
-/// Most permits in use at once since the last [`restart`](Self::restart).
+/// Most permits in use at once since the last [`take`](Self::take).
 #[derive(Debug, Default)]
 pub(super) struct Peak(AtomicU32);
 
@@ -89,7 +89,7 @@ impl Peak {
     ///
     /// Restarting at the current number instead of zero keeps permits visible that stay held while
     /// nothing new is acquired.
-    pub(super) fn restart(&self, in_use: u32) -> u32 {
+    pub(super) fn take(&self, in_use: u32) -> u32 {
         self.0.swap(in_use, Ordering::Relaxed).max(in_use)
     }
 }
@@ -166,7 +166,7 @@ impl Limiter {
         let in_use = self.in_use();
         LimiterStats {
             in_use,
-            in_use_peak: self.in_use_peak.restart(in_use),
+            in_use_peak: self.in_use_peak.take(in_use),
         }
     }
 
@@ -491,7 +491,7 @@ mod tests {
             limiter.acquire().await.unwrap(),
         );
         // Lower the peak so that only the failed acquisition can raise it back to capacity.
-        assert_eq!(limiter.in_use_peak.restart(1), 2);
+        assert_eq!(limiter.in_use_peak.take(1), 2);
         limiter.acquire().await.unwrap_err();
         drop(held);
         assert_eq!(limiter.stats().in_use_peak, 2);
