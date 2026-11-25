@@ -374,10 +374,6 @@ impl From<TieredGet> for RegistryObject {
     }
 }
 
-fn fake_upload_session_marker_expiry() -> Timestamp {
-    Timestamp::now() + Duration::from_hours(5 * 24)
-}
-
 #[async_trait::async_trait]
 impl ObjectRegistry for HighVolumeAdapter {
     async fn get_entry_meta(
@@ -392,15 +388,13 @@ impl ObjectRegistry for HighVolumeAdapter {
                 .await?
                 .into(),
             RegistryKey::UploadSession(id) => {
-                if self.inner.has_upload_marker(id, access_time).await? {
-                    // TODO: Expose upload session marker expiry time from HV backend
-                    RegistryRead::Exists(Entry {
-                        expiry: Some(fake_upload_session_marker_expiry()),
+                match self.inner.get_upload_marker(id, access_time).await? {
+                    Some(expiry) => RegistryRead::Exists(Entry {
+                        expiry: Some(expiry),
                         version: ObservedVersion::Legacy,
                         payload: EntryPayload::UploadSessionMarker,
-                    })
-                } else {
-                    RegistryRead::NotFound
+                    }),
+                    None => RegistryRead::NotFound,
                 }
             }
         })
@@ -419,15 +413,13 @@ impl ObjectRegistry for HighVolumeAdapter {
                 .await?
                 .into(),
             RegistryKey::UploadSession(id) => {
-                if self.inner.has_upload_marker(id, access_time).await? {
-                    // TODO: Expose upload session marker expiry time from HV backend
-                    RegistryRead::Exists(Entry {
-                        expiry: Some(fake_upload_session_marker_expiry()),
+                match self.inner.get_upload_marker(id, access_time).await? {
+                    Some(expiry) => RegistryRead::Exists(Entry {
+                        expiry: Some(expiry),
                         version: ObservedVersion::Legacy,
                         payload: EntryPayload::UploadSessionMarker,
-                    })
-                } else {
-                    RegistryRead::NotFound
+                    }),
+                    None => RegistryRead::NotFound,
                 }
             }
         })

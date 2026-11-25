@@ -386,13 +386,18 @@ impl HighVolumeBackend for InMemoryBackend {
         Ok(())
     }
 
-    async fn has_upload_marker(&self, revision: &ObjectId, access_time: Timestamp) -> Result<bool> {
+    async fn get_upload_marker(
+        &self,
+        revision: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<Option<Timestamp>> {
         Ok(self
             .upload_markers
             .lock()
             .unwrap()
             .get(revision)
-            .is_some_and(|expiry| *expiry >= access_time))
+            .copied()
+            .filter(|expiry| *expiry >= access_time))
     }
 
     async fn delete_upload_marker(
