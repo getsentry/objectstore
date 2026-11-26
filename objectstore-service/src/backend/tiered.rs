@@ -411,11 +411,12 @@ impl TieredStorage {
 
     /// Checks that the upload is still authorized before contacting LT.
     async fn check_upload_marker(&self, revision: &ObjectId) -> Result<()> {
-        if !self
+        if self
             .inner
             .high_volume
-            .has_upload_marker(revision, Timestamp::now())
+            .get_upload_marker(revision, Timestamp::now())
             .await?
+            .is_none()
         {
             return Err(ErrorKind::UploadSessionGone.into());
         }
@@ -1273,8 +1274,9 @@ mod tests {
             storage
                 .inner
                 .high_volume
-                .has_upload_marker(&revision, Timestamp::now())
+                .get_upload_marker(&revision, Timestamp::now())
                 .await?
+                .is_some()
         );
         assert_eq!(
             storage.upload_offset(&token).await?,
@@ -1298,8 +1300,9 @@ mod tests {
             storage
                 .inner
                 .high_volume
-                .has_upload_marker(&revision, Timestamp::now())
+                .get_upload_marker(&revision, Timestamp::now())
                 .await?
+                .is_some()
         );
         assert_eq!(
             storage.upload_offset(&token).await?,
@@ -1325,8 +1328,9 @@ mod tests {
             !storage
                 .inner
                 .high_volume
-                .has_upload_marker(&revision, Timestamp::now())
+                .get_upload_marker(&revision, Timestamp::now())
                 .await?
+                .is_some()
         );
         assert_eq!(
             storage.upload_offset(&token).await.unwrap_err().kind(),
@@ -1389,8 +1393,9 @@ mod tests {
             storage
                 .inner
                 .high_volume
-                .has_upload_marker(&revision, Timestamp::now())
+                .get_upload_marker(&revision, Timestamp::now())
                 .await?
+                .is_some()
         );
         assert_eq!(
             storage.upload_offset(&token).await?,
@@ -1414,8 +1419,9 @@ mod tests {
             storage
                 .inner
                 .high_volume
-                .has_upload_marker(&revision, Timestamp::now())
+                .get_upload_marker(&revision, Timestamp::now())
                 .await?
+                .is_some()
         );
         assert_eq!(
             storage.upload_offset(&token).await?,
@@ -1441,8 +1447,9 @@ mod tests {
             !storage
                 .inner
                 .high_volume
-                .has_upload_marker(&revision, Timestamp::now())
+                .get_upload_marker(&revision, Timestamp::now())
                 .await?
+                .is_some()
         );
         assert_eq!(
             storage.upload_offset(&token).await.unwrap_err().kind(),
@@ -1500,15 +1507,17 @@ mod tests {
 
         let revision = upload_revision(&token);
         assert!(
-            hv.has_upload_marker(&revision, Timestamp::now())
+            hv.get_upload_marker(&revision, Timestamp::now())
                 .await
                 .unwrap()
+                .is_some()
         );
         storage.cancel_upload(&token).await.unwrap();
         assert!(
-            !hv.has_upload_marker(&revision, Timestamp::now())
+            !hv.get_upload_marker(&revision, Timestamp::now())
                 .await
                 .unwrap()
+                .is_some()
         );
         assert_eq!(
             storage.cancel_upload(&token).await.unwrap_err().kind(),

@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::change_stream::ChangeStreamFactory;
 
 pub mod bigtable;
+pub mod cas;
 pub mod changelog;
 pub mod common;
 pub mod counting;

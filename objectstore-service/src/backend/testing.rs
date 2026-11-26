@@ -150,14 +150,14 @@ pub trait Hooks: fmt::Debug + Send + Sync + 'static {
         inner.create_upload_marker(revision, time_expires).await
     }
 
-    /// Intercepts [`HighVolumeBackend::has_upload_marker`]. Default delegates to `inner`.
-    async fn has_upload_marker(
+    /// Intercepts [`HighVolumeBackend::get_upload_marker`]. Default delegates to `inner`.
+    async fn get_upload_marker(
         &self,
         inner: &InMemoryBackend,
         revision: &ObjectId,
         access_time: Timestamp,
-    ) -> Result<bool> {
-        inner.has_upload_marker(revision, access_time).await
+    ) -> Result<Option<Timestamp>> {
+        inner.get_upload_marker(revision, access_time).await
     }
 
     /// Intercepts [`HighVolumeBackend::delete_upload_marker`]. Default delegates to `inner`.
@@ -427,9 +427,13 @@ impl<H: Hooks> HighVolumeBackend for TestBackend<H> {
             .await
     }
 
-    async fn has_upload_marker(&self, revision: &ObjectId, access_time: Timestamp) -> Result<bool> {
+    async fn get_upload_marker(
+        &self,
+        revision: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<Option<Timestamp>> {
         self.hooks
-            .has_upload_marker(&self.inner, revision, access_time)
+            .get_upload_marker(&self.inner, revision, access_time)
             .await
     }
 

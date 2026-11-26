@@ -1107,7 +1107,11 @@ impl HighVolumeBackend for BigTableBackend {
         Ok(())
     }
 
-    async fn has_upload_marker(&self, revision: &ObjectId, access_time: Timestamp) -> Result<bool> {
+    async fn get_upload_marker(
+        &self,
+        revision: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<Option<Timestamp>> {
         let request = v2::ReadRowsRequest {
             table_name: self.table_path.clone(),
             rows: Some(v2::RowSet {
@@ -1118,11 +1122,26 @@ impl HighVolumeBackend for BigTableBackend {
             rows_limit: 1,
             ..Default::default()
         };
-        let rows = retry("has_upload_marker", || async {
+        let rows = retry("get_upload_marker", || async {
             self.bigtable.client().read_rows(request.clone()).await
         })
         .await?;
-        Ok(!rows.is_empty())
+
+        // The marker's deadline is its cell timestamp. If the marker was written more than
+        // once, it stays live until its latest cell expires.
+        let Some(expiry_micros) = rows
+            .into_iter()
+            .flat_map(|(_, cells)| cells)
+            .map(|cell| cell.timestamp_micros)
+            .max()
+        else {
+            return Ok(None);
+        };
+        let expiry = Timestamp::from_unix_micros(expiry_micros).context(
+            ErrorKind::CorruptData,
+            "decoding Bigtable upload marker expiration timestamp",
+        )?;
+        Ok(Some(expiry))
     }
 
     async fn delete_upload_marker(
@@ -3101,6 +3120,30 @@ mod tests {
         assert_eq!(records[1].size, None);
         assert_eq!(records[1].record_id, records[0].record_id);
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_upload_marker_returns_deadline() -> Result<()> {
+        let backend = create_test_backend().await?;
+        let revision = new_test_revision(&make_id());
+        let now = Timestamp::now();
+        let expires_at = now + Duration::from_secs(3600);
+
+        assert_eq!(backend.get_upload_marker(&revision, now).await?, None);
+        backend.create_upload_marker(&revision, expires_at).await?;
+        assert_eq!(
+            backend.get_upload_marker(&revision, now).await?,
+            Some(expires_at)
+        );
+        assert_eq!(
+            backend
+                .get_upload_marker(&revision, expires_at + Duration::from_secs(1))
+                .await?,
+            None
+        );
+        assert!(backend.delete_upload_marker(&revision, now).await?);
+        assert_eq!(backend.get_upload_marker(&revision, now).await?, None);
         Ok(())
     }
 

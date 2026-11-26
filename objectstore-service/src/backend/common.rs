@@ -345,8 +345,14 @@ pub trait HighVolumeBackend: Backend {
         time_expires: Timestamp,
     ) -> Result<()>;
 
-    /// Returns whether an upload marker exists and is live at `access_time`.
-    async fn has_upload_marker(&self, revision: &ObjectId, access_time: Timestamp) -> Result<bool>;
+    /// Returns the deadline of the upload marker if one exists and is live at `access_time`.
+    ///
+    /// Returns `None` for missing and expired markers.
+    async fn get_upload_marker(
+        &self,
+        revision: &ObjectId,
+        access_time: Timestamp,
+    ) -> Result<Option<Timestamp>>;
 
     /// Atomically deletes a live upload marker.
     ///
