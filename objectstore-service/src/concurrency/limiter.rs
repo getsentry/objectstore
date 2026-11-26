@@ -240,7 +240,7 @@ impl PriorityLimiter {
             capacity: capacity.get(),
             state: Arc::new(Mutex::new(PriorityState {
                 free: capacity.get(),
-                in_use_peak: 0,
+                in_use_peak: Peak::default(),
                 next_id: 0,
                 normal_queue: WaiterQueue::new(),
                 high_queue: WaiterQueue::new(),
@@ -263,7 +263,7 @@ impl PriorityLimiter {
             // A free permit implies that nobody is queued, so taking it overtakes no one.
             if state.free > 0 {
                 state.free -= 1;
-                state.in_use_peak = state.in_use_peak.max(self.capacity - state.free);
+                state.in_use_peak.record(self.capacity - state.free);
                 return Ok(Permit::priority(self.state.clone()));
             }
             if timeout == Some(Duration::ZERO) {
@@ -302,17 +302,14 @@ impl PriorityLimiter {
     /// Each call restarts the peak. [`run_emitter`](Self::run_emitter) calls this, so another
     /// caller takes away from the peak that the emitter reports.
     pub fn stats(&self) -> PriorityLimiterStats {
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        let stats = PriorityLimiterStats {
-            in_use: self.capacity - state.free,
-            in_use_peak: state.in_use_peak,
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let in_use = self.capacity - state.free;
+        PriorityLimiterStats {
+            in_use,
+            in_use_peak: state.in_use_peak.take(in_use),
             waiting_normal: state.normal_queue.len(),
             waiting_high: state.high_queue.len(),
-        };
-        // Restarting at the current number instead of zero keeps permits visible that stay held
-        // while nothing new is acquired.
-        state.in_use_peak = stats.in_use;
-        stats
+        }
     }
 
     /// Passes this limiter's stats to `emit` immediately and once per second thereafter.
@@ -336,7 +333,7 @@ struct PriorityState {
     free: u32,
     /// Most permits in use at once since the emitter last took it. Handing a slot to a waiter
     /// keeps it in use, so only taking a free permit can raise this.
-    in_use_peak: u32,
+    in_use_peak: Peak,
     next_id: u64,
     normal_queue: WaiterQueue,
     high_queue: WaiterQueue,
