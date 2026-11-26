@@ -77,11 +77,11 @@ pub struct LimiterStats {
 
 /// Most permits in use at once since the last [`take`](Self::take).
 #[derive(Debug, Default)]
-pub(super) struct Peak(AtomicU32);
+pub(crate) struct Peak(AtomicU32);
 
 impl Peak {
     /// Raises the peak to `in_use` if it is higher.
-    pub(super) fn record(&self, in_use: u32) {
+    pub(crate) fn record(&self, in_use: u32) {
         self.0.fetch_max(in_use, Ordering::Relaxed);
     }
 
@@ -89,7 +89,7 @@ impl Peak {
     ///
     /// Restarting at the current number instead of zero keeps permits visible that stay held while
     /// nothing new is acquired.
-    pub(super) fn take(&self, in_use: u32) -> u32 {
+    pub(crate) fn take(&self, in_use: u32) -> u32 {
         self.0.swap(in_use, Ordering::Relaxed).max(in_use)
     }
 }
