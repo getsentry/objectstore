@@ -366,7 +366,7 @@ dependencies = [
 requires-dist = [
     { name = "filetype", specifier = ">=1.2.0" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.10.1" },
-    { name = "sentry-sdk", specifier = ">=3.0.0" },
+    { name = "sentry-sdk", specifier = ">=2.66.0,<4.0.0" },
     { name = "urllib3", specifier = ">=2.2.2" },
     { name = "zstandard", specifier = ">=0.18.0" },
 ]
