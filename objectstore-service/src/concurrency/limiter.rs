@@ -5,6 +5,7 @@ use std::future::Future;
 use std::io;
 use std::mem::DropGuard;
 use std::num::NonZeroU32;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::Poll;
 use std::time::Duration;
@@ -69,6 +70,28 @@ impl Permit {
 pub struct LimiterStats {
     /// Permits currently in use.
     pub in_use: u32,
+    /// Most permits in use at once since the previous call to [`Limiter::stats`]. Unlike
+    /// `in_use`, this captures bursts between two calls.
+    pub in_use_peak: u32,
+}
+
+/// Most permits in use at once since the last [`take`](Self::take).
+#[derive(Debug, Default)]
+pub(crate) struct Peak(AtomicU32);
+
+impl Peak {
+    /// Raises the peak to `in_use` if it is higher.
+    pub(crate) fn record(&self, in_use: u32) {
+        self.0.fetch_max(in_use, Ordering::Relaxed);
+    }
+
+    /// Returns the peak and restarts it at `in_use`.
+    ///
+    /// Restarting at the current number instead of zero keeps permits visible that stay held while
+    /// nothing new is acquired.
+    pub(crate) fn take(&self, in_use: u32) -> u32 {
+        self.0.swap(in_use, Ordering::Relaxed).max(in_use)
+    }
 }
 
 /// Shared interval loop for the metric emitters.
@@ -89,6 +112,7 @@ where
 pub struct Limiter {
     semaphore: Arc<Semaphore>,
     queue: Option<Arc<Semaphore>>,
+    in_use_peak: Arc<Peak>,
     capacity: u32,
     timeout: Duration,
 }
@@ -100,6 +124,7 @@ impl Limiter {
         Self {
             semaphore: Arc::new(Semaphore::new(capacity as usize)),
             queue: max_queue_size.map(|size| Arc::new(Semaphore::new(size as usize))),
+            in_use_peak: Arc::default(),
             capacity,
             timeout,
         }
@@ -111,8 +136,12 @@ impl Limiter {
     /// Dropping the future releases its queue slot and any assigned permit.
     pub async fn acquire(&self) -> Result<Permit> {
         if let Ok(permit) = self.semaphore.clone().try_acquire_owned() {
+            self.in_use_peak.record(self.in_use());
             return Ok(Permit::semaphore(permit));
         }
+        // No permit was free, so the limiter is full. Recording that here makes every wait and
+        // rejection visible, whatever is released right after.
+        self.in_use_peak.record(self.capacity);
         if self.timeout.is_zero() {
             return Err(ErrorKind::AtCapacity.into());
         }
@@ -129,11 +158,20 @@ impl Limiter {
         Ok(Permit::semaphore(permit))
     }
 
-    /// Returns the current number of permits in use.
+    /// Returns the current and peak number of permits in use.
+    ///
+    /// Each call restarts the peak. [`run_emitter`](Self::run_emitter) calls this, so another
+    /// caller takes away from the peak that the emitter reports.
     pub fn stats(&self) -> LimiterStats {
+        let in_use = self.in_use();
         LimiterStats {
-            in_use: self.capacity - self.semaphore.available_permits() as u32,
+            in_use,
+            in_use_peak: self.in_use_peak.take(in_use),
         }
+    }
+
+    fn in_use(&self) -> u32 {
+        self.capacity - self.semaphore.available_permits() as u32
     }
 
     /// Passes this limiter's stats to `emit` immediately and once per second thereafter.
@@ -160,6 +198,9 @@ pub enum Priority {
 pub struct PriorityLimiterStats {
     /// Permits currently in use.
     pub in_use: u32,
+    /// Most permits in use at once since the previous call to [`PriorityLimiter::stats`].
+    /// Unlike `in_use`, this captures bursts between two calls.
+    pub in_use_peak: u32,
     /// Normal-priority acquisitions waiting in the queue.
     pub waiting_normal: usize,
     /// High-priority acquisitions waiting in the queue.
@@ -199,6 +240,7 @@ impl PriorityLimiter {
             capacity: capacity.get(),
             state: Arc::new(Mutex::new(PriorityState {
                 free: capacity.get(),
+                in_use_peak: Peak::default(),
                 next_id: 0,
                 normal_queue: WaiterQueue::new(),
                 high_queue: WaiterQueue::new(),
@@ -221,6 +263,7 @@ impl PriorityLimiter {
             // A free permit implies that nobody is queued, so taking it overtakes no one.
             if state.free > 0 {
                 state.free -= 1;
+                state.in_use_peak.record(self.capacity - state.free);
                 return Ok(Permit::priority(self.state.clone()));
             }
             if timeout == Some(Duration::ZERO) {
@@ -255,10 +298,15 @@ impl PriorityLimiter {
     }
 
     /// Returns a snapshot of permits in use and queued acquisitions.
+    ///
+    /// Each call restarts the peak. [`run_emitter`](Self::run_emitter) calls this, so another
+    /// caller takes away from the peak that the emitter reports.
     pub fn stats(&self) -> PriorityLimiterStats {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let in_use = self.capacity - state.free;
         PriorityLimiterStats {
-            in_use: self.capacity - state.free,
+            in_use,
+            in_use_peak: state.in_use_peak.take(in_use),
             waiting_normal: state.normal_queue.len(),
             waiting_high: state.high_queue.len(),
         }
@@ -283,6 +331,9 @@ type WaiterQueue = BTreeMap<u64, oneshot::Sender<Permit>>;
 #[derive(Debug)]
 struct PriorityState {
     free: u32,
+    /// Most permits in use at once since the emitter last took it. Handing a slot to a waiter
+    /// keeps it in use, so only taking a free permit can raise this.
+    in_use_peak: Peak,
     next_id: u64,
     normal_queue: WaiterQueue,
     high_queue: WaiterQueue,
@@ -360,11 +411,87 @@ mod tests {
         tokio::time::advance(Duration::from_secs(1)).await;
         assert!(poll!(&mut priority_emitter).is_pending());
         assert!(poll!(&mut simple_emitter).is_pending());
+        // Both permits were still in use when the previous emission restarted the peak.
         assert_eq!(
             priority_receiver.try_recv().unwrap(),
-            PriorityLimiterStats::default()
+            PriorityLimiterStats {
+                in_use_peak: 1,
+                ..Default::default()
+            }
         );
-        assert_eq!(simple_receiver.try_recv().unwrap(), LimiterStats::default());
+        assert_eq!(
+            simple_receiver.try_recv().unwrap(),
+            LimiterStats {
+                in_use: 0,
+                in_use_peak: 1
+            }
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn emitter_reports_peak_usage_between_emissions() {
+        const CAPACITY: u32 = 3;
+        let capacity = NonZeroU32::new(CAPACITY).unwrap();
+        let priority = PriorityLimiter::new(capacity, TIMEOUT, TIMEOUT, None, None);
+        let simple = Limiter::new(capacity, Duration::ZERO, None);
+        let (priority_sender, mut priority_peaks) = tokio::sync::mpsc::unbounded_channel();
+        let (simple_sender, mut simple_peaks) = tokio::sync::mpsc::unbounded_channel();
+        let priority_emitter = priority.run_emitter(|stats| {
+            priority_sender
+                .send((stats.in_use, stats.in_use_peak))
+                .unwrap();
+            std::future::ready(())
+        });
+        let simple_emitter = simple.run_emitter(|stats| {
+            simple_sender
+                .send((stats.in_use, stats.in_use_peak))
+                .unwrap();
+            std::future::ready(())
+        });
+        tokio::pin!(priority_emitter, simple_emitter);
+        let mut emit = async |advance: Duration| {
+            tokio::time::advance(advance).await;
+            assert!(poll!(&mut priority_emitter).is_pending());
+            assert!(poll!(&mut simple_emitter).is_pending());
+            let priority = priority_peaks.try_recv().unwrap();
+            assert_eq!(priority, simple_peaks.try_recv().unwrap());
+            priority
+        };
+        assert_eq!(emit(Duration::ZERO).await, (0, 0));
+
+        // A burst that is over before the next emission is still reported.
+        let held = (
+            priority.acquire(Priority::Normal).await.unwrap(),
+            simple.acquire().await.unwrap(),
+        );
+        let burst = (
+            priority.acquire(Priority::Normal).await.unwrap(),
+            simple.acquire().await.unwrap(),
+        );
+        drop(burst);
+        assert_eq!(emit(METRICS_EMITTER_INTERVAL).await, (1, 2));
+
+        // Permits held throughout count even though nothing was acquired.
+        assert_eq!(emit(METRICS_EMITTER_INTERVAL).await, (1, 1));
+
+        // Permits released since the previous emission were in use at its start.
+        drop(held);
+        assert_eq!(emit(METRICS_EMITTER_INTERVAL).await, (0, 1));
+        assert_eq!(emit(METRICS_EMITTER_INTERVAL).await, (0, 0));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rejection_marks_the_limiter_as_full() {
+        let limiter = Limiter::new(NonZeroU32::new(2).unwrap(), Duration::ZERO, None);
+        let held = (
+            limiter.acquire().await.unwrap(),
+            limiter.acquire().await.unwrap(),
+        );
+        // Lower the peak so that only the failed acquisition can raise it back to capacity.
+        assert_eq!(limiter.in_use_peak.take(1), 2);
+        limiter.acquire().await.unwrap_err();
+        drop(held);
+        assert_eq!(limiter.stats().in_use_peak, 2);
     }
 
     #[tokio::test(start_paused = true)]
@@ -507,6 +634,7 @@ mod tests {
             limiter.stats(),
             PriorityLimiterStats {
                 in_use: 1,
+                in_use_peak: 1,
                 waiting_normal: 2,
                 waiting_high: 2
             }
@@ -517,6 +645,7 @@ mod tests {
             limiter.stats(),
             PriorityLimiterStats {
                 in_use: 1,
+                in_use_peak: 1,
                 waiting_normal: 2,
                 waiting_high: 1
             }
@@ -538,7 +667,13 @@ mod tests {
         assert!(poll!(&mut newcomer).is_pending());
         drop(normal2.await.unwrap());
         drop(newcomer.await.unwrap());
-        assert_eq!(limiter.stats(), PriorityLimiterStats::default());
+        assert_eq!(
+            limiter.stats(),
+            PriorityLimiterStats {
+                in_use_peak: 1,
+                ..Default::default()
+            }
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -560,6 +695,7 @@ mod tests {
             limiter.stats(),
             PriorityLimiterStats {
                 in_use: 3,
+                in_use_peak: 3,
                 waiting_normal: 0,
                 waiting_high: 0
             }
@@ -567,7 +703,13 @@ mod tests {
         for waiter in &mut waiters {
             assert!(poll!(waiter).is_ready());
         }
-        assert_eq!(limiter.stats(), PriorityLimiterStats::default());
+        assert_eq!(
+            limiter.stats(),
+            PriorityLimiterStats {
+                in_use_peak: 3,
+                ..Default::default()
+            }
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -618,7 +760,13 @@ mod tests {
             drop(other);
             drop(held);
             drop(next.await.unwrap());
-            assert_eq!(limiter.stats(), PriorityLimiterStats::default());
+            assert_eq!(
+                limiter.stats(),
+                PriorityLimiterStats {
+                    in_use_peak: 1,
+                    ..Default::default()
+                }
+            );
         }
     }
 
@@ -635,7 +783,13 @@ mod tests {
         drop(held);
         drop(cancelled);
         drop(next.await.unwrap());
-        assert_eq!(limiter.stats(), PriorityLimiterStats::default());
+        assert_eq!(
+            limiter.stats(),
+            PriorityLimiterStats {
+                in_use_peak: 1,
+                ..Default::default()
+            }
+        );
         // Both normal queue slots must be available after cancellation and completion.
         let held = limiter.acquire(Priority::Normal).await.unwrap();
         let mut first = Box::pin(limiter.acquire(Priority::Normal));
@@ -708,7 +862,13 @@ mod tests {
             assert!(poll!(&mut retry).is_pending());
             drop(held);
             drop(retry.await.unwrap());
-            assert_eq!(limiter.stats(), PriorityLimiterStats::default());
+            assert_eq!(
+                limiter.stats(),
+                PriorityLimiterStats {
+                    in_use_peak: 1,
+                    ..Default::default()
+                }
+            );
         }
     }
 
@@ -753,7 +913,15 @@ mod tests {
             task.await.unwrap();
         }
 
-        assert_eq!(limiter.stats(), PriorityLimiterStats::default());
+        let stats = limiter.stats();
+        assert!(stats.in_use_peak <= CAPACITY);
+        assert_eq!(
+            stats,
+            PriorityLimiterStats {
+                in_use_peak: stats.in_use_peak,
+                ..Default::default()
+            }
+        );
         let mut permits = Vec::new();
         for _ in 0..CAPACITY {
             permits.push(limiter.acquire(Priority::Normal).await.unwrap());
